@@ -1,0 +1,44 @@
+/** String helpers. Original test program. */
+class Text {
+    /** Returns a new string with the characters of s in reverse order. */
+    function String reverse(String s) {
+        var String r;
+        var int i;
+        let i = s.length();
+        if (i = 0) {
+            let r = String.new(1);
+        } else {
+            let r = String.new(i);
+        }
+        while (i > 0) {
+            let i = i - 1;
+            let r = r.appendChar(s.charAt(i));
+        }
+        return r;
+    }
+
+    /** True if s reads the same both ways, ignoring case of ASCII letters. */
+    function boolean isPalindrome(String s) {
+        var int i, j;
+        var char a, b;
+        let i = 0;
+        let j = s.length() - 1;
+        while (i < j) {
+            let a = Text.lower(s.charAt(i));
+            let b = Text.lower(s.charAt(j));
+            if (~(a = b)) {
+                return false;
+            }
+            let i = i + 1;
+            let j = j - 1;
+        }
+        return true;
+    }
+
+    function char lower(char c) {
+        if ((c > 64) & (c < 91)) {
+            return c + 32;
+        }
+        return c;
+    }
+}

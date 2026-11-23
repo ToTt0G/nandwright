@@ -1,0 +1,8 @@
+// Shape has an error, so the official compiler does not check calls into it.
+class Main {
+    function void main() {
+        do Shape.nothing(1, 2, 3);
+        do Main.helper();
+        return;
+    }
+}

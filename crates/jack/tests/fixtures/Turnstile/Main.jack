@@ -1,0 +1,11 @@
+class Main {
+    function void main() {
+        var Turnstile t;
+        do Turnstile.init();
+        let t = Turnstile.new();
+        do t.report();
+        do t.run();
+        do Memory.deAlloc(t);
+        return;
+    }
+}

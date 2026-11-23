@@ -1,0 +1,16 @@
+// Calls into Shape in every wrong way the official compiler checks.
+class Main {
+    function void main() {
+        var Shape s;
+        let s = Shape.make(1, 2);
+        do Shape.area();
+        do s.make(3);
+        do Shape.nothing();
+        do s.nothing();
+        do s.scale(1, 2);
+        do Shape.scale(2);
+        do Output.printInt(1, 2);
+        do Unknown.thing();
+        return;
+    }
+}

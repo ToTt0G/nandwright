@@ -1,0 +1,65 @@
+// The sieve of Eratosthenes over an Array of booleans. Original test program.
+class Sieve {
+    field Array composite;
+    field int n;
+
+    constructor Sieve new(int limit) {
+        var int i;
+        let n = limit;
+        let composite = Array.new(n + 1);
+        let i = 0;
+        while (~(i > n)) {
+            let composite[i] = false;
+            let i = i + 1;
+        }
+        do run();
+        return this;
+    }
+
+    method void run() {
+        var int p, m;
+        let p = 2;
+        while (~(Math.multiply(p, p) > n)) {
+            if (~composite[p]) {
+                let m = p * p;
+                while (~(m > n)) {
+                    let composite[m] = true;
+                    let m = m + p;
+                }
+            }
+            let p = p + 1;
+        }
+        return;
+    }
+
+    method boolean isPrime(int k) {
+        if ((k < 2) | (k > n)) {
+            return false;
+        }
+        return ~composite[k];
+    }
+
+    /** Copies the primes into a new array and returns it; a[0] holds the count. */
+    method Array primes() {
+        var Array a;
+        var int k, count;
+        let a = Array.new(n + 1);
+        let count = 0;
+        let k = 2;
+        while (k < (n + 1)) {
+            if (isPrime(k)) {
+                let count = count + 1;
+                let a[count] = k;
+            }
+            let k = k + 1;
+        }
+        let a[0] = count;
+        return a;
+    }
+
+    method void dispose() {
+        do composite.dispose();
+        do Memory.deAlloc(this);
+        return;
+    }
+}

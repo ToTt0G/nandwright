@@ -1,0 +1,74 @@
+/**
+ * A coin-operated turnstile driven by the keyboard: C inserts a coin,
+ * P pushes the arm, Q quits. Original test program.
+ */
+class Turnstile {
+    static int LOCKED, UNLOCKED;
+    field int state, coins, passes, alarms;
+
+    function void init() {
+        let LOCKED = 0;
+        let UNLOCKED = 1;
+        return;
+    }
+
+    constructor Turnstile new() {
+        let state = LOCKED;
+        let coins = 0;
+        let passes = 0;
+        let alarms = 0;
+        return this;
+    }
+
+    /** Handles one key; returns false when the machine should stop. */
+    method boolean handle(char key) {
+        if (key = 81) {
+            return false;
+        }
+        if (key = 67) {
+            let coins = coins + 1;
+            let state = UNLOCKED;
+        } else {
+            if (key = 80) {
+                if (state = UNLOCKED) {
+                    let passes = passes + 1;
+                    let state = LOCKED;
+                } else {
+                    let alarms = alarms + 1;
+                }
+            }
+        }
+        return true;
+    }
+
+    method void report() {
+        do Output.moveCursor(0, 0);
+        do Output.printString("coins=");
+        do Output.printInt(coins);
+        do Output.printString(" passes=");
+        do Output.printInt(passes);
+        do Output.printString(" alarms=");
+        do Output.printInt(alarms);
+        do Screen.setColor(state = UNLOCKED);
+        do Screen.drawRectangle(0, 20, 50, 40);
+        return;
+    }
+
+    method void run() {
+        var char key;
+        var boolean running;
+        let running = true;
+        while (running) {
+            let key = 0;
+            while (key = 0) {
+                let key = Keyboard.keyPressed();
+            }
+            let running = handle(key);
+            while (~(Keyboard.keyPressed() = 0)) {
+                do Sys.wait(5);
+            }
+            do report();
+        }
+        return;
+    }
+}
