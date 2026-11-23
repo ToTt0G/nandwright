@@ -412,6 +412,9 @@ fn parse_c(tokens: &[Token], span: Span, diags: &mut Vec<Diagnostic>) -> CInstru
     let Some(sep) = tokens.get(i) else {
         return c;
     };
+    if c.equals.is_none() {
+        return parse_lenient_tail(c, tokens, i, diags);
+    }
     if !sep.is_char(';') {
         diags.push(Diagnostic::error(
             code("asm-expected-semicolon"),
@@ -430,6 +433,79 @@ fn parse_c(tokens: &[Token], span: Span, diags: &mut Vec<Diagnostic>) -> CInstru
         return c;
     };
     let jump = field(jump_tok, isa::jump_code(&jump_tok.text));
+    if jump.code.is_none() {
+        diags.push(Diagnostic::error(
+            code("asm-invalid-jump"),
+            jump_message(&jump.text),
+            jump.span,
+        ));
+        c.jump = Some(jump);
+        return c;
+    }
+    c.jump = Some(jump);
+    trailing(&tokens[i + 1..], diags, "the jump");
+    c
+}
+
+/// The rest of a C-instruction without `dest=`, after its computation.
+///
+/// Observed behaviour of the official assembler: it skips exactly one token
+/// after the computation, whatever it is, then accepts an optional `;` and a
+/// jump. For the usual `D;JGT` the skipped token is the `;`. But it also means
+/// that `D<TAB>JGT` assembles as plain `D` (the jump is lost), `D#JGT` and
+/// `D<TAB>X;JGT` as `D;JGT`, and `M+D;;` and `D;;JMP` are accepted. The
+/// `dest=` forms are parsed strictly. We accept the same lines and warn about
+/// every token the official assembler would ignore.
+fn parse_lenient_tail(
+    mut c: CInstruction,
+    tokens: &[Token],
+    mut i: usize,
+    diags: &mut Vec<Diagnostic>,
+) -> CInstruction {
+    let comp_text = c.comp.as_ref().map_or("", |f| f.text.as_str()).to_string();
+    let skipped = &tokens[i];
+    i += 1;
+    if skipped.is_char(';') {
+        c.semicolon = Some(skipped.span);
+    }
+    let next = tokens.get(i);
+    if !skipped.is_char(';') {
+        let consequence = match next {
+            None if isa::jump_code(&skipped.text).is_some() => format!(
+                "this line assembles as `{comp_text}` without a jump; write `{comp_text};{}`",
+                skipped.text
+            ),
+            None => format!("this line assembles as `{comp_text}`"),
+            Some(_) => "it should not be there".to_string(),
+        };
+        diags.push(Diagnostic::warning(
+            code("asm-ignored-token"),
+            format!(
+                "the official assembler ignores `{}` after the computation: {consequence}",
+                skipped.text
+            ),
+            skipped.span,
+        ));
+    }
+    let Some(mut t) = next else {
+        return c;
+    };
+    if t.is_char(';') {
+        if c.semicolon.is_some() {
+            diags.push(Diagnostic::warning(
+                code("asm-ignored-token"),
+                "extra `;`: the official assembler accepts it, but write a single `;`",
+                t.span,
+            ));
+        }
+        c.semicolon = Some(t.span);
+        i += 1;
+        match tokens.get(i) {
+            Some(n) => t = n,
+            None => return c,
+        }
+    }
+    let jump = field(t, isa::jump_code(&t.text));
     if jump.code.is_none() {
         diags.push(Diagnostic::error(
             code("asm-invalid-jump"),
@@ -586,6 +662,14 @@ mod tests {
             "@\t5",
             "@a\t//b",
             "\t\t@1\t\t",
+            "D\tJGT",
+            "M+D;;",
+            "D;;JMP",
+            "D#",
+            "D/JGT",
+            "D+1\u{c};JGT",
+            "M\tAM-1;JGT",
+            "0\tJ",
         ] {
             assert_eq!(errors(ok), Vec::<&str>::new(), "{ok:?}");
         }
@@ -632,6 +716,15 @@ mod tests {
             "AM\tD=M",
             "D=M;J\tMP",
             "(L\t1)",
+            "D;JGT;",
+            "D;;;",
+            "D)(",
+            "D=M#",
+            "=M\tX",
+            "=M;;JMP",
+            "D=M\tX",
+            "D\tX\tY",
+            "D\tA=M",
         ] {
             assert!(!errors(bad).is_empty(), "{bad:?}");
         }

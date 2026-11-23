@@ -53,6 +53,14 @@ fn c_instruction_forms() {
     assert_eq!(words("M=D+M\nM=M+D\n"), [0xF088, 0xF088]);
     assert_eq!(words("=M\nD;\nD=M;\n"), [0xFC00, 0xE300, 0xFC10]);
     assert_eq!(words("D=A&D\nD=D&A\n"), [0xE010, 0xE010]);
+    // Without `dest=`, one token after the computation is skipped (observed).
+    assert_eq!(
+        words("D\tJGT\nD\tX;JGT\nM+D;;\nD#JGT\nD;;JMP\nD/\n"),
+        [0xE300, 0xE301, 0xF080, 0xE301, 0xE307, 0xE300]
+    );
+    let a = assemble("D\tJGT\n");
+    assert_eq!(a.diagnostics.len(), 1);
+    assert!(a.diagnostics[0].message.contains("`D;JGT`"));
 }
 
 #[test]

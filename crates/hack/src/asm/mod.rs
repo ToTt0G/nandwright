@@ -18,6 +18,12 @@
 //!   `AMD` (`MD` yes, `DM` no). `A+D`, `A&D`, `A|D`, `M+D`, `M&D`, `M|D` are
 //!   accepted as aliases; `1+D`, `D+D` and the like are not.
 //! - `dest=` may be empty (`=M`) and so may `;jump` (`D;`).
+//! - Without `dest=`, the official assembler skips exactly one token after the
+//!   computation, whatever it is, before an optional `;` and jump. So `D;JGT`
+//!   works as expected, but `D<TAB>JGT` assembles as plain `D` (the jump is
+//!   lost), `D#JGT` as `D;JGT`, and `M+D;;` and `D;;JMP` are accepted. We
+//!   accept the same and warn (`asm-ignored-token`). With `dest=` the rest of
+//!   the line is parsed strictly.
 //! - `@n` is a number if `n` is a 16-bit signed decimal (`-32768..=32767`,
 //!   with an optional sign, Unicode digits allowed). `@-1` assembles to
 //!   `1111111111111111`. Anything else after `@` is a symbol, including
