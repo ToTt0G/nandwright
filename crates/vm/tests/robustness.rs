@@ -26,7 +26,7 @@ impl Rng {
 
 #[test]
 fn parse_and_link_never_panic_on_random_and_mutated_inputs() {
-    let mut rng = Rng::new(0xC0FFEE_1234_5678);
+    let mut rng = Rng::new(0x00C0_FFEE_1234_5678);
     let tokens = [
         "push",
         "pop",

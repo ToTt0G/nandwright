@@ -501,6 +501,58 @@ fn memory_allocator_split_and_forward_coalesce() {
     assert_eq!(vm.ram(20), 2068);
     assert_eq!(vm.ram(21), 2060); // split 6-word block into 3 + free(1) at 2063..2066
     assert_eq!(vm.ram(22), 2065); // took the 1-word split leftover!
+    // Corrupt heap header intentionally: must return HeapOverflow, never panic
+    let mut vm = make_vm(&[(
+        "Main",
+        "function Main.main 0\n\
+         push constant 2048\n\
+         push constant 30000\n\
+         call Memory.poke 2\n\
+         pop temp 0\n\
+         push constant 20000\n\
+         call Memory.alloc 1\n\
+         pop temp 0\n\
+         push constant 0\n\
+         return\n",
+    )]);
+    assert!(matches!(
+        vm.run(100, 0, &Breakpoints::new()),
+        RunStatus::Error(VmError::BuiltinError {
+            function: "Memory.alloc",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn screen_line_and_circle_edge_cases() {
+    // Reversed line endpoints produce identical pixels; r=0 draws 1 pixel;
+    // r=-2 draws (cx, cy-2) and (cx, cy+2) matching the Java VM Emulator.
+    let mut vm1 = make_vm(&[(
+        "Main",
+        "function Main.main 0\n\
+         push constant 10\npush constant 20\npush constant 37\npush constant 31\n\
+         call Screen.drawLine 4\npop temp 0\n\
+         push constant 100\npush constant 100\npush constant 2\nneg\n\
+         call Screen.drawCircle 3\npop temp 0\n\
+         push constant 50\npush constant 50\npush constant 0\n\
+         call Screen.drawCircle 3\npop temp 0\n\
+         push constant 0\nreturn\n",
+    )]);
+    let mut vm2 = make_vm(&[(
+        "Main",
+        "function Main.main 0\n\
+         push constant 37\npush constant 31\npush constant 10\npush constant 20\n\
+         call Screen.drawLine 4\npop temp 0\n\
+         push constant 100\npush constant 98\ncall Screen.drawPixel 2\npop temp 0\n\
+         push constant 100\npush constant 102\ncall Screen.drawPixel 2\npop temp 0\n\
+         push constant 50\npush constant 50\n\
+         call Screen.drawPixel 2\npop temp 0\n\
+         push constant 0\nreturn\n",
+    )]);
+    assert_eq!(vm1.run(100, 0, &Breakpoints::new()), RunStatus::Halted);
+    assert_eq!(vm2.run(100, 0, &Breakpoints::new()), RunStatus::Halted);
+    assert_eq!(vm1.screen_slice(), vm2.screen_slice());
 }
 
 #[test]

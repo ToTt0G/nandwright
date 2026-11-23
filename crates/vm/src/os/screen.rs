@@ -193,8 +193,19 @@ impl ScreenState {
                 message: "illegal center coordinates".to_string(),
             });
         }
-        // Verified against the Java VM Emulator: a negative radius is a silent no-op.
+        // Verified against the Java VM Emulator: a negative radius does not
+        // raise ERR13; its initial top/bottom pixels `(cx, cy + r)` and
+        // `(cx, cy - r)` are drawn when inside screen bounds, and the loop
+        // exits immediately.
         if r < 0 {
+            let y1 = i32::from(cy) + i32::from(r);
+            let y2 = i32::from(cy) - i32::from(r);
+            if (0..i32::from(SCREEN_HEIGHT)).contains(&y1) {
+                self.draw_pixel_unchecked(ram, cx, y1 as i16);
+            }
+            if (0..i32::from(SCREEN_HEIGHT)).contains(&y2) {
+                self.draw_pixel_unchecked(ram, cx, y2 as i16);
+            }
             return Ok(());
         }
         if r > 181 {

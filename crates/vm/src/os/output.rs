@@ -137,6 +137,9 @@ impl OutputState {
     }
 
     pub fn back_space(&mut self, ram: &mut [i16]) {
+        // Verified against the Java VM Emulator: `Output.backSpace` clears the
+        // current cell before stepping back, then clears the target cell too.
+        self.draw_char_at_cursor(ram, 32);
         if self.col == 0 {
             if self.row > 0 {
                 self.row -= 1;

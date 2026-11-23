@@ -99,20 +99,25 @@ pub(crate) fn alloc_i32(
     // Guard against corrupted heap chains with an iteration cap.
     let mut block: i32 = i32::from(HEAP_START);
     let mut steps: u32 = 0;
-    while block >= i32::from(HEAP_START) && block < i32::from(HEAP_LIMIT) && steps < 16384 {
+    while block >= i32::from(HEAP_START) && block < i32::from(HEAP_LIMIT) - 1 && steps < 16384 {
         steps += 1;
         let avail = i32::from(ram[block as usize]);
         let next = i32::from(ram[(block + 1) as usize]);
 
         if avail >= size {
             let payload = block + 2;
+            if payload + size > i32::from(HEAP_LIMIT) {
+                break;
+            }
             let remaining = avail - size;
             // Split if the leftover can hold at least a 2-word header + 1 word payload (remaining >= 3).
             if remaining >= 3 {
                 let new_block = payload + size;
-                ram[new_block as usize] = (remaining - 2) as i16;
-                ram[(new_block + 1) as usize] = next as i16;
-                ram[(block + 1) as usize] = new_block as i16;
+                if new_block + 1 < i32::from(HEAP_LIMIT) {
+                    ram[new_block as usize] = (remaining - 2) as i16;
+                    ram[(new_block + 1) as usize] = next as i16;
+                    ram[(block + 1) as usize] = new_block as i16;
+                }
             }
             // Mark block allocated (size = 0).
             ram[block as usize] = 0;
@@ -146,7 +151,7 @@ pub fn de_alloc(ram: &mut [i16], object: i16) -> Result<(), VmError> {
         size = 0;
     }
     // Coalesce with immediately following block if it is free.
-    if next >= i32::from(HEAP_START) && next < i32::from(HEAP_LIMIT) {
+    if next >= i32::from(HEAP_START) && next < i32::from(HEAP_LIMIT) - 1 {
         let next_size = i32::from(ram[next as usize]);
         if next_size > 0 {
             let next_next = i32::from(ram[(next + 1) as usize]);
