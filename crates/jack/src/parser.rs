@@ -404,10 +404,7 @@ impl<'a> Parser<'a> {
         let mut vars = Vec::new();
         let mut subroutines = Vec::new();
         let mut seen_subroutine = false;
-        loop {
-            let Some(t) = self.peek().copied() else {
-                break;
-            };
+        while let Some(t) = self.peek().copied() {
             match t.kind {
                 TokenKind::Keyword(Keyword::Static | Keyword::Field) => {
                     if seen_subroutine {
@@ -428,7 +425,9 @@ impl<'a> Parser<'a> {
                     if seen_subroutine {
                         self.expected("`}` to close the class, or another subroutine");
                     } else {
-                        self.expected("`field`, `static`, `constructor`, `function`, `method` or `}`");
+                        self.expected(
+                            "`field`, `static`, `constructor`, `function`, `method` or `}`",
+                        );
                     }
                     // Skip to the next class-level keyword or brace.
                     self.pos += 1;
@@ -477,7 +476,9 @@ impl<'a> Parser<'a> {
                          `char`, `boolean` or a class name."
                     ));
                 } else {
-                    self.expected(&format!("{what} (`int`, `char`, `boolean` or a class name)"));
+                    self.expected(&format!(
+                        "{what} (`int`, `char`, `boolean` or a class name)"
+                    ));
                 }
                 return None;
             }
@@ -583,7 +584,10 @@ impl<'a> Parser<'a> {
             self.skip_to_body_or_next(&mut sub);
             return finish(self, sub);
         }
-        if self.expect_symbol(b'(', "`(` to start the parameter list").is_some() {
+        if self
+            .expect_symbol(b'(', "`(` to start the parameter list")
+            .is_some()
+        {
             self.parse_params(&mut sub);
         } else if !self.at_symbol(b'{') {
             self.skip_to_body_or_next(&mut sub);
@@ -666,9 +670,11 @@ impl<'a> Parser<'a> {
 
     fn parse_body(&mut self, sub: &mut Subroutine) {
         sub.body_open = self.expect_symbol(b'{', "`{` to start the subroutine body");
-        if sub.body_open.is_none() && !self.peek().is_some_and(|t| {
-            t.is_keyword(Keyword::Var) || Self::is_statement_start(t)
-        }) {
+        if sub.body_open.is_none()
+            && !self
+                .peek()
+                .is_some_and(|t| t.is_keyword(Keyword::Var) || Self::is_statement_start(t))
+        {
             return;
         }
         while self.at_keyword(Keyword::Var) {
@@ -696,8 +702,7 @@ impl<'a> Parser<'a> {
     /// `locals` is given, still recorded so their names resolve.
     fn parse_statements(&mut self, mut locals: Option<&mut Vec<VarDec>>) -> Vec<Statement> {
         let mut out = Vec::new();
-        loop {
-            let Some(t) = self.peek().copied() else { break };
+        while let Some(t) = self.peek().copied() {
             if t.is_symbol(b'}') || Self::is_class_level(&t) {
                 break;
             }
@@ -790,7 +795,9 @@ impl<'a> Parser<'a> {
             return self.bump().map(|t| t.span);
         }
         let found = self.describe_current();
-        self.error_here(format!("Expected `;` at the end of the `{what}` statement, found {found}."));
+        self.error_here(format!(
+            "Expected `;` at the end of the `{what}` statement, found {found}."
+        ));
         self.synchronize(Ctx::Statements);
         None
     }
@@ -820,7 +827,9 @@ impl<'a> Parser<'a> {
             index = Some(self.parse_expr());
             if !self.at_symbol(b']') {
                 let found = self.describe_current();
-                self.error_here(format!("Expected `]` to close the array index, found {found}."));
+                self.error_here(format!(
+                    "Expected `]` to close the array index, found {found}."
+                ));
                 if let Some(d) = self.diags.last_mut()
                     && d.diag.related.is_empty()
                 {
@@ -915,7 +924,9 @@ impl<'a> Parser<'a> {
             self.pos += 1;
         } else {
             let found = self.describe_current();
-            self.error_here(format!("Expected `}}` to close the {what} block, found {found}."));
+            self.error_here(format!(
+                "Expected `}}` to close the {what} block, found {found}."
+            ));
         }
         Block {
             statements,
@@ -1038,13 +1049,10 @@ impl<'a> Parser<'a> {
         let mut rest = Vec::new();
         let mut ok = !matches!(first, Term::Missing(_));
         while ok {
-            let Some(op) = self
-                .peek()
-                .and_then(|t| match t.kind {
-                    TokenKind::Symbol(c) => BinOp::from_symbol(c),
-                    _ => None,
-                })
-            else {
+            let Some(op) = self.peek().and_then(|t| match t.kind {
+                TokenKind::Symbol(c) => BinOp::from_symbol(c),
+                _ => None,
+            }) else {
                 break;
             };
             let op_span = self.bump().expect("checked").span;
@@ -1081,7 +1089,9 @@ impl<'a> Parser<'a> {
                     span: t.span,
                 }
             }
-            TokenKind::Keyword(k @ (Keyword::True | Keyword::False | Keyword::Null | Keyword::This)) => {
+            TokenKind::Keyword(
+                k @ (Keyword::True | Keyword::False | Keyword::Null | Keyword::This),
+            ) => {
                 self.pos += 1;
                 let value = match k {
                     Keyword::True => KeywordConst::True,
@@ -1148,7 +1158,11 @@ impl<'a> Parser<'a> {
                 }
                 let span = Span::new(t.span.start, inner.span().end);
                 Term::Unary {
-                    op: if c == b'-' { UnaryOp::Neg } else { UnaryOp::Not },
+                    op: if c == b'-' {
+                        UnaryOp::Neg
+                    } else {
+                        UnaryOp::Not
+                    },
                     op_span: t.span,
                     term: Box::new(inner),
                     span,

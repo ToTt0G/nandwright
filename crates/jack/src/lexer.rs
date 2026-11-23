@@ -101,7 +101,7 @@ impl Keyword {
         }
     }
 
-    pub fn from_str(word: &str) -> Option<Keyword> {
+    pub fn from_word(word: &str) -> Option<Keyword> {
         Keyword::ALL.into_iter().find(|k| k.as_str() == word)
     }
 }
@@ -280,7 +280,7 @@ pub fn lex(source: &str) -> Lexed {
                     }
                 }
                 let text = &source[start..cur.pos];
-                let kind = match Keyword::from_str(text) {
+                let kind = match Keyword::from_word(text) {
                     Some(k) => TokenKind::Keyword(k),
                     None => TokenKind::Identifier,
                 };
@@ -308,17 +308,15 @@ pub fn lex(source: &str) -> Lexed {
                         cur.bump();
                         if let Some(e) = cur.bump()
                             && ('0'..='7').contains(&e)
+                            && let Some(e2) = cur.peek()
+                            && ('0'..='7').contains(&e2)
                         {
-                            if let Some(e2) = cur.peek()
-                                && ('0'..='7').contains(&e2)
+                            cur.bump();
+                            if let Some(e3) = cur.peek()
+                                && ('0'..='7').contains(&e3)
+                                && e <= '3'
                             {
                                 cur.bump();
-                                if let Some(e3) = cur.peek()
-                                    && ('0'..='7').contains(&e3)
-                                    && e <= '3'
-                                {
-                                    cur.bump();
-                                }
                             }
                         }
                         if quote == '"' {
@@ -367,8 +365,7 @@ pub fn lex(source: &str) -> Lexed {
                     // line counting.
                     let mut prev: Option<char> = None;
                     let mut closed = false;
-                    loop {
-                        let Some(mut d) = cur.bump() else { break };
+                    while let Some(mut d) = cur.bump() {
                         if d == '/' && prev == Some('*') {
                             closed = true;
                             break;
@@ -537,7 +534,9 @@ mod tests {
         let texts: Vec<_> = k.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
             texts,
-            ["let", "x_1", "=", "a", ".", "b", "[", "3", "]", "-", "1.5", ";"]
+            [
+                "let", "x_1", "=", "a", ".", "b", "[", "3", "]", "-", "1.5", ";"
+            ]
         );
         assert_eq!(k[0].0, TokenKind::Keyword(Keyword::Let));
         assert_eq!(k[10].0, TokenKind::IntConst);

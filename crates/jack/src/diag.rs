@@ -13,7 +13,12 @@ pub(crate) struct JDiag {
     pub order: usize,
 }
 
-pub(crate) fn error(code: &'static str, msg: impl Into<String>, span: Span, java_line: u32) -> JDiag {
+pub(crate) fn error(
+    code: &'static str,
+    msg: impl Into<String>,
+    span: Span,
+    java_line: u32,
+) -> JDiag {
     JDiag {
         diag: Diagnostic::error(DiagnosticCode::Other(code), msg, span),
         java_line,

@@ -39,11 +39,24 @@ fn fixtures_match_official_output() {
     assert!(dirs.len() >= 5);
     for dir in dirs {
         let files = jack_files(&dir);
-        let pairs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let pairs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         let out = compile_program(&pairs);
         for f in &out.files {
-            let errors: Vec<_> = f.compiled.diagnostics.iter().filter(|d| d.is_error()).collect();
-            assert!(errors.is_empty(), "{}/{}: {errors:?}", dir.display(), f.file_stem);
+            let errors: Vec<_> = f
+                .compiled
+                .diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{}/{}: {errors:?}",
+                dir.display(),
+                f.file_stem
+            );
             let golden = fs::read_to_string(dir.join(format!("{}.vm", f.file_stem)))
                 .unwrap()
                 .replace("\r\n", "\n");
@@ -86,7 +99,10 @@ fn line_map_points_at_the_source_line() {
 fn cross_class_errors_fixture() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/errors/CrossClass");
     let files = jack_files(&dir);
-    let pairs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let out = compile_program(&pairs);
     let main = out.files.iter().find(|f| f.file_stem == "Main").unwrap();
     let shape = out.files.iter().find(|f| f.file_stem == "Shape").unwrap();

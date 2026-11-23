@@ -377,7 +377,10 @@ impl Checker<'_> {
 
     fn subroutine(&mut self, sub: &Subroutine, class: &Class) {
         self.sub_kind = sub.kind;
-        self.sub_name = sub.name.as_ref().map_or_else(String::new, |n| n.name.clone());
+        self.sub_name = sub
+            .name
+            .as_ref()
+            .map_or_else(String::new, |n| n.name.clone());
         self.is_void = sub.kind != SubroutineKind::Constructor
             && matches!(sub.return_type, Some(ReturnType::Void(_)));
         self.args.clear();
@@ -402,7 +405,11 @@ impl Checker<'_> {
                     self.class_name,
                     self.class_name,
                     self.class_name,
-                    if self.sub_name.is_empty() { "new" } else { &self.sub_name }
+                    if self.sub_name.is_empty() {
+                        "new"
+                    } else {
+                        &self.sub_name
+                    }
                 ),
                 span,
                 self.line(span.start),
@@ -452,7 +459,10 @@ impl Checker<'_> {
             }
         }
 
-        let header_at = sub.name.as_ref().map_or(sub.kind_span.start, |n| n.span.start);
+        let header_at = sub
+            .name
+            .as_ref()
+            .map_or(sub.kind_span.start, |n| n.span.start);
         self.emit(
             header_at,
             format!(
@@ -656,12 +666,15 @@ impl Checker<'_> {
                     None => {
                         if let Some(semi) = semicolon {
                             if self.sub_kind == SubroutineKind::Constructor {
-                                self.diags.push(error(
-                                    codes::CONSTRUCTOR_RETURN,
-                                    "A constructor must end with `return this;`.",
-                                    *span,
-                                    self.line(semi.start),
-                                ).at_order(semi.start));
+                                self.diags.push(
+                                    error(
+                                        codes::CONSTRUCTOR_RETURN,
+                                        "A constructor must end with `return this;`.",
+                                        *span,
+                                        self.line(semi.start),
+                                    )
+                                    .at_order(semi.start),
+                                );
                             }
                             if !self.is_void {
                                 let ty = if self.sub_kind == SubroutineKind::Constructor {
@@ -715,7 +728,10 @@ impl Checker<'_> {
                     | JType::Boolean
             ),
             TypeKind::Boolean => {
-                matches!(ty, JType::StrConst | JType::Null | JType::This | JType::Char)
+                matches!(
+                    ty,
+                    JType::StrConst | JType::Null | JType::This | JType::Char
+                )
             }
             TypeKind::Class(_) => false,
         };
@@ -1018,7 +1034,7 @@ impl Checker<'_> {
                         static_form: false,
                         args: n,
                         java_line: line,
-                            field_in_function: false,
+                        field_in_function: false,
                     });
                 } else {
                     let field_in_function =
@@ -1049,7 +1065,7 @@ impl Checker<'_> {
                         static_form: true,
                         args: n,
                         java_line: line,
-                            field_in_function,
+                        field_in_function,
                     });
                 }
             }

@@ -40,7 +40,10 @@ pub fn compile_program(files: &[(&str, &str)]) -> ProgramOutput {
 
 /// [`compile_program`] with explicit [`Options`].
 pub fn compile_program_with(files: &[(&str, &str)], options: &Options) -> ProgramOutput {
-    let units: Vec<Unit> = files.iter().map(|(stem, src)| Unit::new(stem, src)).collect();
+    let units: Vec<Unit> = files
+        .iter()
+        .map(|(stem, src)| Unit::new(stem, src))
+        .collect();
     let mut clean: Vec<&ClassSig> = Vec::new();
     for u in &units {
         if let Some(sig) = u.sig_if_clean()
@@ -49,7 +52,10 @@ pub fn compile_program_with(files: &[(&str, &str)], options: &Options) -> Progra
             clean.push(sig);
         }
     }
-    let all_names: Vec<&str> = units.iter().filter_map(|u| u.class_name.as_deref()).collect();
+    let all_names: Vec<&str> = units
+        .iter()
+        .filter_map(|u| u.class_name.as_deref())
+        .collect();
     let mut extra: Vec<Vec<JDiag>> = Vec::new();
     for (i, u) in units.iter().enumerate() {
         let mut d = check_calls(&u.deferred, &clean, Some(&all_names));
@@ -142,7 +148,12 @@ pub(crate) fn check_calls(
                         suggestion(cls.subs.iter().map(|s| s.name.as_str()), &c.name)
                     )
                 };
-                out.push(error(codes::UNKNOWN_SUBROUTINE, msg, c.name_span, c.java_line));
+                out.push(error(
+                    codes::UNKNOWN_SUBROUTINE,
+                    msg,
+                    c.name_span,
+                    c.java_line,
+                ));
                 continue;
             };
             if c.static_form && sub.kind == SubroutineKind::Method {
@@ -226,7 +237,10 @@ pub(crate) fn check_calls(
                     } else if !c.static_form && f.kind != SubroutineKind::Method {
                         out.push(warning(
                             codes::CALL_KIND,
-                            format!("`{qualified}` is a {}; call it as `{qualified}(…)`.", f.kind.as_str()),
+                            format!(
+                                "`{qualified}` is a {}; call it as `{qualified}(…)`.",
+                                f.kind.as_str()
+                            ),
                             c.name_span,
                             0,
                         ));

@@ -20,28 +20,95 @@ impl Rng {
 const SEED_PROGRAM: &str = include_str!("fixtures/LinkedList/List.jack");
 
 const FRAGMENTS: &[&str] = &[
-    "class", "Main", "{", "}", "(", ")", "[", "]", ";", ",", ".", "+", "-", "*", "/", "&", "|", "<",
-    ">", "=", "~", "let", "do", "if", "else", "while", "return", "var", "int", "char", "boolean",
-    "void", "true", "false", "null", "this", "field", "static", "constructor", "function",
-    "method", "x", "y", "Output", "printInt", "0", "32767", "32768", "1.5", "\"str\"", "\"open",
-    "/*", "*/", "//", "/**", "\n", "\r\n", "\t", " ", "\u{feff}", "é", "😀", "$", "'", "\\",
+    "class",
+    "Main",
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    ";",
+    ",",
+    ".",
+    "+",
+    "-",
+    "*",
+    "/",
+    "&",
+    "|",
+    "<",
+    ">",
+    "=",
+    "~",
+    "let",
+    "do",
+    "if",
+    "else",
+    "while",
+    "return",
+    "var",
+    "int",
+    "char",
+    "boolean",
+    "void",
+    "true",
+    "false",
+    "null",
+    "this",
+    "field",
+    "static",
+    "constructor",
+    "function",
+    "method",
+    "x",
+    "y",
+    "Output",
+    "printInt",
+    "0",
+    "32767",
+    "32768",
+    "1.5",
+    "\"str\"",
+    "\"open",
+    "/*",
+    "*/",
+    "//",
+    "/**",
+    "\n",
+    "\r\n",
+    "\t",
+    " ",
+    "\u{feff}",
+    "é",
+    "😀",
+    "$",
+    "'",
+    "\\",
 ];
 
 fn run_all(src: &str) {
     let p = parse(src);
     let _ = resolve(&p);
     let c = compile("Main", src);
-    if c.vm.is_some() {
+    if let Some(vm) = &c.vm {
         assert!(!c.has_errors());
-        assert_eq!(c.line_map.len(), c.vm.as_ref().unwrap().lines().count());
+        assert_eq!(c.line_map.len(), vm.lines().count());
     }
     assert_eq!(c.diagnostics.len(), c.official_lines.len());
     for d in &c.diagnostics {
         if let Some(s) = d.span {
             assert!(s.start <= s.end && s.end <= src.len(), "{d:?}");
-            assert!(src.is_char_boundary(s.start) && src.is_char_boundary(s.end), "{d:?}");
+            assert!(
+                src.is_char_boundary(s.start) && src.is_char_boundary(s.end),
+                "{d:?}"
+            );
         }
-        assert!(!d.message.contains('\n') && !d.message.contains("  "), "{}", d.message);
+        assert!(
+            !d.message.contains('\n') && !d.message.contains("  "),
+            "{}",
+            d.message
+        );
     }
 }
 

@@ -83,16 +83,18 @@ impl Symbols {
     /// Every occurrence that refers to the same declaration as `symbol`
     /// (declaration included), for references and rename.
     pub fn references<'a>(&'a self, symbol: &'a Symbol) -> impl Iterator<Item = &'a Symbol> + 'a {
-        self.symbols.iter().filter(move |s| match (&symbol.role, &s.role) {
-            (Role::Class, Role::Class) => s.name == symbol.name,
-            (Role::Subroutine { class: a, .. }, Role::Subroutine { class: b, .. }) => {
-                a == b && s.name == symbol.name
-            }
-            (Role::Variable { .. }, Role::Variable { .. }) => {
-                symbol.declaration.is_some() && s.declaration == symbol.declaration
-            }
-            (Role::Undefined, Role::Undefined) => s.name == symbol.name,
-            _ => false,
-        })
+        self.symbols
+            .iter()
+            .filter(move |s| match (&symbol.role, &s.role) {
+                (Role::Class, Role::Class) => s.name == symbol.name,
+                (Role::Subroutine { class: a, .. }, Role::Subroutine { class: b, .. }) => {
+                    a == b && s.name == symbol.name
+                }
+                (Role::Variable { .. }, Role::Variable { .. }) => {
+                    symbol.declaration.is_some() && s.declaration == symbol.declaration
+                }
+                (Role::Undefined, Role::Undefined) => s.name == symbol.name,
+                _ => false,
+            })
     }
 }

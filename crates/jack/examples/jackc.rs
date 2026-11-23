@@ -56,8 +56,9 @@ fn parse_args() -> Result<Args, String> {
         }
     }
     if args.inputs.is_empty() {
-        return Err("usage: jackc [--out DIR] [--check] [--lenient] [--report] <FILE.jack | DIR>..."
-            .into());
+        return Err(
+            "usage: jackc [--out DIR] [--check] [--lenient] [--report] <FILE.jack | DIR>...".into(),
+        );
     }
     Ok(args)
 }
@@ -155,7 +156,11 @@ fn main() -> ExitCode {
                 println!(
                     "FILE\t{}\t{}",
                     name,
-                    if compiled.has_errors() { "failed" } else { "ok" }
+                    if compiled.has_errors() {
+                        "failed"
+                    } else {
+                        "ok"
+                    }
                 );
             }
             let Some(vm) = compiled.vm else { continue };

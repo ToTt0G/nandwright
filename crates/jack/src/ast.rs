@@ -248,10 +248,19 @@ pub enum KeywordConst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Term {
     /// The value is the official compiler's (truncated) value; it may be out of range.
-    Int { value: i32, span: Span },
+    Int {
+        value: i32,
+        span: Span,
+    },
     /// UTF-16 code units after escape processing.
-    Str { units: Vec<u16>, span: Span },
-    Keyword { value: KeywordConst, span: Span },
+    Str {
+        units: Vec<u16>,
+        span: Span,
+    },
+    Keyword {
+        value: KeywordConst,
+        span: Span,
+    },
     Var(Ident),
     Index {
         name: Ident,
@@ -259,7 +268,10 @@ pub enum Term {
         span: Span,
     },
     Call(Box<Call>),
-    Paren { expr: Box<Expr>, span: Span },
+    Paren {
+        expr: Box<Expr>,
+        span: Span,
+    },
     Unary {
         op: UnaryOp,
         op_span: Span,
