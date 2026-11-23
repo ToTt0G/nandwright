@@ -44,7 +44,7 @@ pub fn full(ws: &mut Workspace, uri: &Url) -> Option<lsp::SemanticTokens> {
     let tokens = match kind {
         DocKind::Hdl => hdl_tokens(ws, uri)?,
         DocKind::Tst => tst_tokens(ws, uri)?,
-        DocKind::Other => return None,
+        _ => return None,
     };
     let doc = ws.docs.get(uri)?;
     Some(lsp::SemanticTokens {

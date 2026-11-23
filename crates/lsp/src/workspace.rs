@@ -89,7 +89,39 @@ impl Project {
 pub enum DocKind {
     Hdl,
     Tst,
+    /// Hack assembly.
+    Asm,
+    /// Hack machine code.
+    Hack,
+    Jack,
+    /// An expected-output file of a test script.
+    Cmp,
+    /// An output file written by a test script.
+    Out,
     Other,
+}
+
+impl DocKind {
+    /// The kind of a file, from its extension (case-insensitive). Editors'
+    /// language ids are not used: they differ between editors.
+    pub fn from_extension(extension: &str) -> Self {
+        match extension.to_ascii_lowercase().as_str() {
+            "hdl" => DocKind::Hdl,
+            "tst" => DocKind::Tst,
+            "asm" => DocKind::Asm,
+            "hack" => DocKind::Hack,
+            "jack" => DocKind::Jack,
+            "cmp" => DocKind::Cmp,
+            "out" => DocKind::Out,
+            _ => DocKind::Other,
+        }
+    }
+}
+
+/// Cached analysis of a Hack assembly document.
+pub struct AsmState {
+    pub parsed: n2t_hack::asm::ParsedAsm,
+    pub assembly: n2t_hack::Assembly,
 }
 
 pub struct Document {
@@ -105,6 +137,7 @@ pub struct Document {
     /// The file stem (the chip name for `.hdl` files).
     pub stem: String,
     pub tst: Option<(ParsedScript, ScriptAnalysis)>,
+    pub asm: Option<Arc<AsmState>>,
 }
 
 impl Document {
@@ -163,11 +196,7 @@ impl Workspace {
             Some((s, e)) => (s.to_string(), e.to_ascii_lowercase()),
             None => (file_name.clone(), String::new()),
         };
-        let kind = match extension.as_str() {
-            "hdl" => DocKind::Hdl,
-            "tst" => DocKind::Tst,
-            _ => DocKind::Other,
-        };
+        let kind = DocKind::from_extension(&extension);
         let dir = match path.as_deref() {
             Some(p) => path::dir(p).to_string(),
             None => UNTITLED_DIR.to_string(),
@@ -183,6 +212,7 @@ impl Workspace {
             dir,
             stem,
             tst: None,
+            asm: None,
         };
         self.docs.insert(uri.clone(), doc);
         self.sync_overlay(&uri);
@@ -194,6 +224,7 @@ impl Workspace {
             doc.lines = LineIndex::new(&doc.text);
             doc.version = version;
             doc.tst = None;
+            doc.asm = None;
         }
         self.sync_overlay(uri);
     }
@@ -272,6 +303,20 @@ impl Workspace {
         self.docs.get(uri)?.tst.as_ref()
     }
 
+    /// The cached assembly of a Hack assembly document.
+    pub fn asm_state(&mut self, uri: &Url) -> Option<Arc<AsmState>> {
+        let doc = self.docs.get_mut(uri)?;
+        if doc.kind != DocKind::Asm {
+            return None;
+        }
+        if doc.asm.is_none() {
+            let parsed = n2t_hack::asm::parse(&doc.text);
+            let assembly = n2t_hack::assemble(&doc.text);
+            doc.asm = Some(Arc::new(AsmState { parsed, assembly }));
+        }
+        doc.asm.clone()
+    }
+
     /// Discards cached script analyses in a folder (after an HDL edit).
     pub fn invalidate_scripts(&mut self, dir: &str) {
         for doc in self.docs.values_mut() {
@@ -300,9 +345,22 @@ impl Workspace {
                         .collect()
                 })
                 .unwrap_or_default(),
-            DocKind::Other => Vec::new(),
+            DocKind::Asm => self
+                .asm_state(uri)
+                .map(|s| s.assembly.diagnostics.clone())
+                .unwrap_or_default(),
+            DocKind::Hack => self
+                .docs
+                .get(uri)
+                .and_then(|d| n2t_hack::parse_hack(&d.text).err())
+                .unwrap_or_default(),
+            DocKind::Jack => crate::jack::diagnostics(self, uri),
+            DocKind::Out => crate::compare::diagnostics(self, uri),
+            DocKind::Cmp | DocKind::Other => Vec::new(),
         };
-        let doc = &self.docs[uri];
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
         let text = doc.text();
         let docs = &self.docs;
         let host = &self.host;
