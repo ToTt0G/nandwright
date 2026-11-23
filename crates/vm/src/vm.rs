@@ -65,10 +65,21 @@ pub struct CallFrame {
     pub arguments: Vec<i16>,
 }
 
+/// Name shown for the frame of the built-in `Sys.init` that boots `Main.main`.
+const BUILTIN_SYS_INIT_FRAME: &str = "Sys.init (built-in)";
+
+/// Most shadow frames kept for [`Vm::call_stack`]. A real call needs at least
+/// five stack words, so an honest program never gets deeper than ~360 frames;
+/// a program that pops its own frame and calls again can recurse forever with
+/// a flat `SP`, and without this cap the records would exhaust memory. When the
+/// cap is hit the oldest half is dropped (the panel shows the newest frames).
+const MAX_SHADOW_FRAMES: usize = 4096;
+
 /// Internal shadow frame record used to inspect the call stack cleanly.
 #[derive(Debug, Clone)]
 struct FrameRecord {
-    function: String,
+    /// Index into [`Program::functions`]; `None` for the built-in `Sys.init`.
+    function: Option<u32>,
     file_idx: Option<u32>,
     call_line: Option<u32>,
     local_base: u16,
@@ -264,10 +275,11 @@ impl Vm {
         self.ram[3] = 0; // THIS
         self.ram[4] = 0; // THAT
 
-        self.current_function = "Sys.init (built-in)".to_string();
+        self.current_function.clear();
+        self.current_function.push_str(BUILTIN_SYS_INIT_FRAME);
         self.last_index_in_func = Some(2);
         self.call_frames.push(FrameRecord {
-            function: "Sys.init (built-in)".to_string(),
+            function: None,
             file_idx: None,
             call_line: None,
             local_base: 261,
@@ -282,7 +294,7 @@ impl Vm {
         {
             let info = &self.program.functions[main_func_id as usize];
             self.call_frames.push(FrameRecord {
-                function: info.name.clone(),
+                function: Some(main_func_id),
                 file_idx: Some(info.file_idx),
                 call_line: Some(info.line),
                 local_base: 266,
@@ -792,7 +804,7 @@ impl Vm {
                     // (e.g., Sys.init or SimpleFunction without an explicit `call`).
                     if self.call_frames.is_empty() {
                         self.call_frames.push(FrameRecord {
-                            function: info.name.clone(),
+                            function: Some(func_id),
                             file_idx: Some(info.file_idx),
                             call_line: Some(info.line),
                             local_base: self.ram[1].max(0) as u16,
@@ -850,8 +862,11 @@ impl Vm {
                             if let Some(caller) = self.call_frames.last_mut() {
                                 caller.call_line = Some(meta.line);
                             }
+                            if self.call_frames.len() >= MAX_SHADOW_FRAMES {
+                                self.call_frames.drain(..MAX_SHADOW_FRAMES / 2);
+                            }
                             self.call_frames.push(FrameRecord {
-                                function: info.name.clone(),
+                                function: Some(func_id),
                                 file_idx: Some(info.file_idx),
                                 call_line: Some(info.line),
                                 local_base: new_sp as u16,
@@ -958,7 +973,8 @@ impl Vm {
                     if ret_addr == BUILTIN_SYS_RETURN_ADDR {
                         // Returned from `Main.main` back to built-in `Sys.init`.
                         self.ram[0] = arg as i16;
-                        self.current_function = "Sys.init (built-in)".to_string();
+                        self.current_function.clear();
+                        self.current_function.push_str(BUILTIN_SYS_INIT_FRAME);
                         self.halted = true;
                         self.steps += 1;
                         return Ok(StepStatus::Halted);
@@ -1128,7 +1144,9 @@ impl Vm {
     /// Returns the static segment slice allocated to `file_stem`, if any.
     pub fn static_slice(&self, file_stem: &str) -> Option<&[i16]> {
         let info = self.program.files.iter().find(|f| f.stem == file_stem)?;
-        let start = info.static_base as usize;
+        // A file after one with a huge `static` index can have its base past
+        // the end of RAM (the linker reports the overflow; it must not panic here).
+        let start = (info.static_base as usize).min(RAM_LEN);
         let end = start
             .saturating_add(info.static_count as usize)
             .min(RAM_LEN);
@@ -1184,7 +1202,14 @@ impl Vm {
                 let args_start = (argument_base as usize).min(RAM_LEN);
                 let args_end = args_start.saturating_add(f.n_args as usize).min(RAM_LEN);
                 CallFrame {
-                    function: f.function.clone(),
+                    function: match f.function {
+                        Some(id) => self
+                            .program
+                            .functions
+                            .get(id as usize)
+                            .map_or_else(String::new, |info| info.name.clone()),
+                        None => BUILTIN_SYS_INIT_FRAME.to_string(),
+                    },
                     file: f
                         .file_idx
                         .and_then(|fi| self.program.files.get(fi as usize))
@@ -1220,11 +1245,21 @@ impl Vm {
             ("line", None) => Ok(i64::from(self.last_index_in_func.unwrap_or(0))),
 
             ("RAM", Some(i)) => self.read_script_ram(name, i, i),
-            ("local", Some(i)) => self.read_script_ram(name, i, i64::from(self.ram[1]) + i),
-            ("argument", Some(i)) => self.read_script_ram(name, i, i64::from(self.ram[2]) + i),
-            ("this", Some(i)) => self.read_script_ram(name, i, i64::from(self.ram[3]) + i),
-            ("that", Some(i)) => self.read_script_ram(name, i, i64::from(self.ram[4]) + i),
-            ("temp", Some(i)) => self.read_script_ram(name, i, i64::from(TEMP_BASE) + i),
+            ("local", Some(i)) => {
+                self.read_script_ram(name, i, i64::from(self.ram[1]).saturating_add(i))
+            }
+            ("argument", Some(i)) => {
+                self.read_script_ram(name, i, i64::from(self.ram[2]).saturating_add(i))
+            }
+            ("this", Some(i)) => {
+                self.read_script_ram(name, i, i64::from(self.ram[3]).saturating_add(i))
+            }
+            ("that", Some(i)) => {
+                self.read_script_ram(name, i, i64::from(self.ram[4]).saturating_add(i))
+            }
+            ("temp", Some(i)) => {
+                self.read_script_ram(name, i, i64::from(TEMP_BASE).saturating_add(i))
+            }
 
             ("currentFunction", None) => {
                 Err("`currentFunction` is a text variable; use `get_var_text`".to_string())
@@ -1267,13 +1302,21 @@ impl Vm {
             ("currentFunction", None) => Err("Read Only variable: currentFunction".to_string()),
 
             ("RAM", Some(i)) => self.write_script_ram(name, i, i, value),
-            ("local", Some(i)) => self.write_script_ram(name, i, i64::from(self.ram[1]) + i, value),
-            ("argument", Some(i)) => {
-                self.write_script_ram(name, i, i64::from(self.ram[2]) + i, value)
+            ("local", Some(i)) => {
+                self.write_script_ram(name, i, i64::from(self.ram[1]).saturating_add(i), value)
             }
-            ("this", Some(i)) => self.write_script_ram(name, i, i64::from(self.ram[3]) + i, value),
-            ("that", Some(i)) => self.write_script_ram(name, i, i64::from(self.ram[4]) + i, value),
-            ("temp", Some(i)) => self.write_script_ram(name, i, i64::from(TEMP_BASE) + i, value),
+            ("argument", Some(i)) => {
+                self.write_script_ram(name, i, i64::from(self.ram[2]).saturating_add(i), value)
+            }
+            ("this", Some(i)) => {
+                self.write_script_ram(name, i, i64::from(self.ram[3]).saturating_add(i), value)
+            }
+            ("that", Some(i)) => {
+                self.write_script_ram(name, i, i64::from(self.ram[4]).saturating_add(i), value)
+            }
+            ("temp", Some(i)) => {
+                self.write_script_ram(name, i, i64::from(TEMP_BASE).saturating_add(i), value)
+            }
 
             (_, Some(i)) => Err(format!("Unknown variable: {name}[{i}]")),
             (_, None) => Err(format!("Unknown variable: {name}")),
