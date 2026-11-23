@@ -313,6 +313,7 @@ dependencies = [
  "n2t-core",
  "n2t-lsp",
  "n2t-simulator",
+ "serde_json",
 ]
 
 [[package]]
@@ -326,6 +327,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "n2t-core",
+ "percent-encoding",
  "serde",
  "serde_json",
 ]

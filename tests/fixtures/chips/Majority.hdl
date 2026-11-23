@@ -1,0 +1,15 @@
+/**
+ * Majority vote of three bits:
+ * out = 1 when at least two of a, b, c are 1.
+ */
+CHIP Majority {
+    IN a, b, c;
+    OUT out;
+
+    PARTS:
+    And(a=a, b=b, out=ab);
+    And(a=a, b=c, out=ac);
+    And(a=b, b=c, out=bc);
+    Or(a=ab, b=ac, out=abOrAc);
+    Or(a=abOrAc, b=bc, out=out);
+}

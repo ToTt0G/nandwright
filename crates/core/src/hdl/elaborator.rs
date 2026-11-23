@@ -37,15 +37,23 @@ pub struct ElaboratorOptions {
 }
 
 impl ElaboratorOptions {
-    /// Options suited to editor tooling: stubs are warnings and still yield an
-    /// (all-zero) definition.
+    /// Options suited to editor tooling. A chip with an empty `PARTS:` section
+    /// is what every course project starts as, so it is a hint, not an error,
+    /// and still yields a definition (whose outputs are all zero).
     pub fn editor() -> Self {
         Self {
             analysis: AnalysisOptions {
-                empty_implementation: Severity::Warning,
+                empty_implementation: Severity::Hint,
                 ..AnalysisOptions::default()
             },
         }
+    }
+
+    /// Options for running tests. The official simulator loads an
+    /// unimplemented chip and simulates it with its outputs at zero, so the
+    /// test fails on a comparison and not on loading. So does this one.
+    pub fn runtime() -> Self {
+        Self::editor()
     }
 }
 

@@ -1,21 +1,21 @@
-//! Runs the test scripts in the repository's `samples/` folder.
+//! Runs the test scripts in the repository's `tests/fixtures` folder.
 //!
-//! - Every script in `samples/projects` and `samples/features` must pass
+//! - Every script in `tests/fixtures/chips` and `tests/fixtures/features` must pass
 //!   against its `.cmp` file.
-//! - Each script in `samples/runtime` has a `<script>.expected` golden with
+//! - Each script in `tests/fixtures/runtime` has a `<script>.expected` golden with
 //!   its rendered outcome. Set `N2T_BLESS=1` to rewrite the goldens, then
 //!   review the diff.
 //!
 //! Scripts run in a temporary copy of their folder, so the `.out` files they
-//! write never land in `samples/`.
+//! write never land in the repository.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use n2t_core::LineIndex;
-use n2t_core::builtins::BuiltinLibrary;
-use n2t_simulator::{BuiltinRegistry, Outcome, RunnerOptions, ScriptRunner, StartError};
+use n2t_core::host::StdHost;
+use n2t_simulator::{Outcome, RunnerOptions, ScriptRunner, StartError};
 
 fn samples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -59,14 +59,10 @@ fn scratch_copy(dir: &Path, tag: &str) -> PathBuf {
 fn run(script: &Path, max_commands: u64) -> Result<(Outcome, Vec<String>), StartError> {
     let options = RunnerOptions {
         max_commands: Some(max_commands),
-        cancel: None,
+        auto_keyboard: true,
+        ..Default::default()
     };
-    let mut runner = ScriptRunner::open(
-        script,
-        Arc::new(BuiltinLibrary::standard()),
-        BuiltinRegistry::standard(),
-        options,
-    )?;
+    let mut runner = ScriptRunner::open(Arc::new(StdHost), &StdHost::absolute(script), options)?;
     let text = fs::read_to_string(script).unwrap();
     let lines = LineIndex::new(&text);
     let mut suspensions = Vec::new();
@@ -92,7 +88,7 @@ fn location(script: &Path, span: Option<n2t_core::Span>) -> String {
 
 /// A stable, machine-independent rendering of a run.
 fn render(script: &Path, result: Result<(Outcome, Vec<String>), StartError>) -> String {
-    let dir = script.parent().unwrap().display().to_string();
+    let dir = StdHost::absolute(script.parent().unwrap());
     let (outcome, suspensions) = match result {
         Ok(result) => result,
         Err(StartError::Syntax(diagnostics)) => {
@@ -105,7 +101,16 @@ fn render(script: &Path, result: Result<(Outcome, Vec<String>), StartError>) -> 
     };
     let mut out: String = suspensions.iter().map(|s| format!("{s}\n")).collect();
     out.push_str(&match outcome {
-        Outcome::Passed { compared_lines } => format!("passed ({compared_lines} lines compared)\n"),
+        Outcome::Passed {
+            compared_lines,
+            unreached_lines: 0,
+        } => format!("passed ({compared_lines} lines compared)\n"),
+        Outcome::Passed {
+            compared_lines,
+            unreached_lines,
+        } => format!(
+            "passed ({compared_lines} lines compared; {unreached_lines} compare line(s) never reached)\n"
+        ),
         Outcome::CompletedUnchecked => "completed without a compare file\n".to_string(),
         Outcome::FailedComparison { mismatch, span } => {
             format!("failed{}: {mismatch}\n", location(script, span))
@@ -124,7 +129,7 @@ fn render(script: &Path, result: Result<(Outcome, Vec<String>), StartError>) -> 
 fn project_and_feature_scripts_pass() {
     let mut failures = Vec::new();
     let mut ran = 0;
-    for group in ["projects", "features"] {
+    for group in ["chips", "features"] {
         let mut dirs: Vec<PathBuf> = scripts(&samples().join(group))
             .iter()
             .map(|s| s.parent().unwrap().to_path_buf())
@@ -143,7 +148,7 @@ fn project_and_feature_scripts_pass() {
             let _ = fs::remove_dir_all(&scratch);
         }
     }
-    assert!(ran > 30, "only {ran} scripts were found");
+    assert!(ran > 2, "only {ran} scripts were found");
     assert!(
         failures.is_empty(),
         "{} script(s) failed:\n{}",

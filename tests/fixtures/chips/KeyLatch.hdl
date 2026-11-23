@@ -1,0 +1,12 @@
+/**
+ * Shows the key that is currently pressed, and remembers the last key
+ * pressed while `store` was 1.
+ */
+CHIP KeyLatch {
+    IN store;
+    OUT key[16], last[16];
+
+    PARTS:
+    Keyboard(out=pressed, out=key);
+    Register(in=pressed, load=store, out=last);
+}

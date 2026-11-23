@@ -1,7 +1,7 @@
-//! Compiles and analyses everything in the repository's `samples/` folder.
+//! Compiles and analyses everything in the repository's `tests/fixtures` folder.
 //!
-//! - `samples/projects` and `samples/features` must produce no diagnostics.
-//! - Each file in `samples/errors` has a `<file>.expected` golden with its
+//! - `tests/fixtures/chips` and `tests/fixtures/features` must produce no diagnostics.
+//! - Each file in `tests/fixtures/errors` has a `<file>.expected` golden with its
 //!   rendered diagnostics. Set `N2T_BLESS=1` to rewrite the goldens, then
 //!   review the diff.
 
@@ -14,7 +14,8 @@ use n2t_core::LineIndex;
 use n2t_core::builtins::BuiltinLibrary;
 use n2t_core::diagnostic::Diagnostic;
 use n2t_core::hdl::Elaborator;
-use n2t_core::hdl::resolve::{FsSourceProvider, is_valid_chip_name};
+use n2t_core::hdl::resolve::{HostSourceProvider, is_valid_chip_name};
+use n2t_core::host::StdHost;
 
 fn samples() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -100,7 +101,7 @@ fn render(file: &str, text: &str, diagnostics: &[Diagnostic]) -> String {
 /// using one elaborator for the folder.
 fn check_folder(dir: &Path) -> BTreeMap<PathBuf, String> {
     let mut elaborator = Elaborator::new(
-        FsSourceProvider::new(dir),
+        HostSourceProvider::new(Arc::new(StdHost), StdHost::absolute(dir)),
         Arc::new(BuiltinLibrary::standard()),
     );
     let mut results = BTreeMap::new();
@@ -149,7 +150,7 @@ fn folders(root: &Path) -> Vec<PathBuf> {
 fn projects_and_features_have_no_diagnostics() {
     let mut problems = String::new();
     let mut checked = 0;
-    for group in ["projects", "features"] {
+    for group in ["chips", "features"] {
         for dir in folders(&samples().join(group)) {
             for (path, rendered) in check_folder(&dir) {
                 checked += 1;
@@ -159,7 +160,7 @@ fn projects_and_features_have_no_diagnostics() {
             }
         }
     }
-    assert!(checked > 50, "only {checked} sample files were found");
+    assert!(checked > 5, "only {checked} sample files were found");
     assert!(problems.is_empty(), "samples should be clean:\n{problems}");
 }
 

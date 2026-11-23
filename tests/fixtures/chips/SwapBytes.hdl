@@ -1,0 +1,11 @@
+/**
+ * Swaps the two bytes of a 16-bit word:
+ * out[0..7] = in[8..15], out[8..15] = in[0..7].
+ */
+CHIP SwapBytes {
+    IN in[16];
+    OUT out[16];
+
+    PARTS:
+    Or16(a[0..7]=in[8..15], a[8..15]=in[0..7], b=false, out=out);
+}

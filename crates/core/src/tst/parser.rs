@@ -15,7 +15,7 @@ pub fn parse(tokens: &[Token]) -> ParseResult {
     Parser::new(tokens).parse()
 }
 
-/// Command words recognised by the hardware dialect (lower case).
+/// Command words of the test language, all dialects (lower case).
 pub const COMMANDS: &[&str] = &[
     "load",
     "output-file",
@@ -26,6 +26,8 @@ pub const COMMANDS: &[&str] = &[
     "output",
     "tick",
     "tock",
+    "ticktock",
+    "vmstep",
     "echo",
     "clear-echo",
     "breakpoint",
@@ -34,13 +36,11 @@ pub const COMMANDS: &[&str] = &[
     "while",
 ];
 
-/// Commands of the CPU/VM dialects, rejected by the hardware dialect.
-pub const OTHER_DIALECT_COMMANDS: &[(&str, &str)] =
-    &[("ticktock", "CPU emulator"), ("vmstep", "VM emulator")];
+/// File extensions `load` accepts, by dialect.
+pub const LOAD_EXTENSIONS: &[&str] = &["hdl", "asm", "hack", "vm"];
 
 fn is_command_word(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    COMMANDS.contains(&lower.as_str()) || OTHER_DIALECT_COMMANDS.iter().any(|(c, _)| *c == lower)
+    COMMANDS.contains(&word.to_ascii_lowercase().as_str())
 }
 
 fn is_decimal(word: &str) -> bool {
@@ -416,7 +416,7 @@ impl<'t> Parser<'t> {
         let follows_output_list_comma = std::mem::take(&mut self.after_output_list_comma);
 
         let command = match lower.as_str() {
-            "load" => self.file_argument("load", "hdl").map(Command::Load),
+            "load" => self.load_argument(keyword_span).map(Command::Load),
             "output-file" => self
                 .file_argument("output-file", "out")
                 .map(Command::OutputFile),
@@ -429,26 +429,12 @@ impl<'t> Parser<'t> {
             "output" => Some(Command::Output),
             "tick" => Some(Command::Tick),
             "tock" => Some(Command::Tock),
+            "ticktock" => Some(Command::TickTock),
+            "vmstep" => Some(Command::VmStep),
             "clear-echo" => Some(Command::ClearEcho),
             "clear-breakpoints" => Some(Command::ClearBreakpoints),
             "echo" => self.echo(),
             "breakpoint" => self.breakpoint(),
-            _ if OTHER_DIALECT_COMMANDS.iter().any(|(c, _)| *c == lower) => {
-                let dialect = OTHER_DIALECT_COMMANDS
-                    .iter()
-                    .find(|(c, _)| *c == lower)
-                    .map_or("another", |(_, d)| *d);
-                self.error(
-                    DiagnosticCode::UnsupportedCommand,
-                    format!("`{word}` is a {dialect} command and is not supported by the hardware simulator"),
-                    keyword_span,
-                );
-                let arguments = self.arguments();
-                Some(Command::Unsupported {
-                    name: keyword.clone(),
-                    arguments,
-                })
-            }
             _ if !self.at_command_end() && self.word().is_some() => {
                 let method_word = self.word().unwrap().to_string();
                 let method = Ident {
@@ -543,6 +529,44 @@ impl<'t> Parser<'t> {
             arguments.push(Argument { kind, span });
         }
         arguments
+    }
+
+    /// The target of `load`: a chip, a program, a folder of `.vm` files, or
+    /// nothing at all (the VM Emulator then loads the script's folder).
+    fn load_argument(&mut self, keyword_span: Span) -> Option<FileName> {
+        if self.at_command_end() {
+            return Some(FileName {
+                name: String::new(),
+                quoted: false,
+                span: Span::empty(keyword_span.end),
+            });
+        }
+        let (name, quoted) = match self.kind().clone() {
+            TokenKind::Word(w) => (w, false),
+            TokenKind::String {
+                value,
+                percent: false,
+            } => (value, true),
+            _ => {
+                self.error_expected("a file name after `load`");
+                return None;
+            }
+        };
+        let span = self.bump();
+        let file = FileName { name, quoted, span };
+        if let Some(problem) = check_basename(&file.name) {
+            self.error(DiagnosticCode::InvalidFileName, problem, span);
+        } else if let Some(extension) = file.extension()
+            && (!LOAD_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+                || file.stem().is_empty())
+        {
+            self.error(
+                DiagnosticCode::InvalidFileName,
+                "`load` takes a chip (`.hdl`), a program (`.asm`, `.hack`, `.vm`) or a folder of `.vm` files",
+                span,
+            );
+        }
+        Some(file)
     }
 
     fn file_argument(&mut self, command: &str, extension: &str) -> Option<FileName> {

@@ -6,10 +6,11 @@
 //! ```no_run
 //! use std::sync::Arc;
 //! use n2t_core::builtins::BuiltinLibrary;
-//! use n2t_core::hdl::{Elaborator, resolve::FsSourceProvider};
+//! use n2t_core::hdl::{Elaborator, resolve::HostSourceProvider};
+//! use n2t_core::host::StdHost;
 //!
 //! let mut elaborator = Elaborator::new(
-//!     FsSourceProvider::new("projects/01"),
+//!     HostSourceProvider::new(Arc::new(StdHost), "projects/01"),
 //!     Arc::new(BuiltinLibrary::standard()),
 //! );
 //! let unit = elaborator.compile("Xor");

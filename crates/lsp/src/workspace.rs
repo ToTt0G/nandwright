@@ -1,7 +1,6 @@
 //! Open documents and per-folder analysis projects.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lsp_types as lsp;
@@ -9,50 +8,50 @@ use lsp_types::Url;
 use n2t_core::LineIndex;
 use n2t_core::builtins::{BuiltinChip, BuiltinLibrary};
 use n2t_core::hdl::resolve::{
-    FsSourceProvider, OverlaySourceProvider, SourceFile, is_valid_chip_name,
+    HostSourceProvider, OverlaySourceProvider, SourceFile, is_valid_chip_name,
 };
 use n2t_core::hdl::{ChipUnit, Elaborator, ElaboratorOptions, UnitOrigin};
+use n2t_core::host::{SharedHost, path, read_text};
 use n2t_core::source::Span;
 use n2t_core::tst::{ParsedScript, ScriptAnalysis};
 
-use crate::convert::{self, Text, canonical_path, path_to_url, url_to_path};
+use crate::convert::{self, BUILTIN_SCHEME, Text, path_to_url, url_to_path};
 
-pub type ProjectElaborator = Elaborator<OverlaySourceProvider<FsSourceProvider>>;
+pub type ProjectElaborator = Elaborator<OverlaySourceProvider<HostSourceProvider>>;
+
+/// The folder that documents without a file (untitled buffers) live in.
+/// Nothing exists there, so their parts resolve to the built-in chips.
+const UNTITLED_DIR: &str = "/n2t-untitled";
 
 /// All chips in one folder share a resolution context (the folder is the
 /// "project directory" of the specification).
 pub struct Project {
-    pub dir: PathBuf,
+    pub dir: String,
     pub elaborator: ProjectElaborator,
+    host: SharedHost,
 }
 
 impl Project {
-    fn new(dir: PathBuf, builtins: Arc<BuiltinLibrary>) -> Self {
-        let provider = OverlaySourceProvider::new(FsSourceProvider::new(&dir));
+    fn new(host: SharedHost, dir: String, builtins: Arc<BuiltinLibrary>) -> Self {
+        let provider = OverlaySourceProvider::new(HostSourceProvider::new(host.clone(), &dir));
         Self {
             dir,
             elaborator: Elaborator::with_options(provider, builtins, ElaboratorOptions::editor()),
+            host,
         }
     }
 
     /// The source identity the file-system provider uses for a chip.
     pub fn source_id(&self, chip_name: &str) -> String {
-        self.elaborator
-            .provider()
-            .inner()
-            .chip_path(chip_name)
-            .display()
-            .to_string()
+        self.elaborator.provider().inner().chip_path(chip_name)
     }
 
     /// Names of chips with a `.hdl` file in the folder.
     pub fn local_chips(&self) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(&self.dir)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let name = e.file_name().into_string().ok()?;
+        let mut names: Vec<String> = self
+            .files()
+            .iter()
+            .filter_map(|name| {
                 let stem = name.strip_suffix(".hdl")?;
                 is_valid_chip_name(stem).then(|| stem.to_string())
             })
@@ -60,6 +59,17 @@ impl Project {
         names.sort();
         names.dedup();
         names
+    }
+
+    /// Names of the files in the folder.
+    pub fn files(&self) -> Vec<String> {
+        self.host
+            .list(&self.dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.name)
+            .collect()
     }
 
     /// Local chips plus built-ins not shadowed by a local file.
@@ -88,10 +98,10 @@ pub struct Document {
     pub text: Arc<str>,
     pub lines: LineIndex,
     pub kind: DocKind,
-    /// Canonical file path, for `file:` documents.
-    pub path: Option<PathBuf>,
-    /// The project folder.
-    pub dir: PathBuf,
+    /// Engine-form file path, for `file:` documents.
+    pub path: Option<String>,
+    /// The project folder, in engine form.
+    pub dir: String,
     /// The file stem (the chip name for `.hdl` files).
     pub stem: String,
     pub tst: Option<(ParsedScript, ScriptAnalysis)>,
@@ -111,30 +121,27 @@ impl Document {
 
 pub struct Workspace {
     pub docs: HashMap<Url, Document>,
-    pub projects: HashMap<PathBuf, Project>,
+    pub projects: HashMap<String, Project>,
     pub builtins: Arc<BuiltinLibrary>,
-    builtin_dir: PathBuf,
-    untitled_dir: PathBuf,
+    pub host: SharedHost,
 }
 
 impl Workspace {
-    pub fn new() -> Self {
-        let tmp = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-        let base = tmp.join(format!("n2t-lsp-{}", env!("CARGO_PKG_VERSION")));
+    pub fn new(host: SharedHost) -> Self {
         Self {
             docs: HashMap::new(),
             projects: HashMap::new(),
             builtins: Arc::new(BuiltinLibrary::standard()),
-            builtin_dir: base.join("builtins"),
-            untitled_dir: base.join("untitled"),
+            host,
         }
     }
 
-    pub fn project(&mut self, dir: &Path) -> &mut Project {
+    pub fn project(&mut self, dir: &str) -> &mut Project {
         let builtins = self.builtins.clone();
+        let host = self.host.clone();
         self.projects
-            .entry(dir.to_path_buf())
-            .or_insert_with(|| Project::new(dir.to_path_buf(), builtins))
+            .entry(dir.to_string())
+            .or_insert_with(|| Project::new(host, dir.to_string(), builtins))
     }
 
     // ---------------------------------------------------------------------
@@ -142,12 +149,10 @@ impl Workspace {
     // ---------------------------------------------------------------------
 
     pub fn open(&mut self, uri: Url, text: String, version: i32) {
-        let path = url_to_path(&uri).map(|p| canonical_path(&p));
+        let path = url_to_path(&uri);
         let file_name = path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(str::to_string)
+            .as_deref()
+            .map(|p| path::file_name(p).to_string())
             .unwrap_or_else(|| {
                 uri.path_segments()
                     .and_then(|mut s| s.next_back())
@@ -163,12 +168,9 @@ impl Workspace {
             "tst" => DocKind::Tst,
             _ => DocKind::Other,
         };
-        let dir = match path.as_ref().and_then(|p| p.parent()) {
-            Some(dir) => dir.to_path_buf(),
-            None => {
-                let _ = std::fs::create_dir_all(&self.untitled_dir);
-                canonical_path(&self.untitled_dir)
-            }
+        let dir = match path.as_deref() {
+            Some(p) => path::dir(p).to_string(),
+            None => UNTITLED_DIR.to_string(),
         };
         let text: Arc<str> = Arc::from(text);
         let doc = Document {
@@ -225,7 +227,7 @@ impl Workspace {
     }
 
     /// Open documents sharing a project folder.
-    pub fn docs_in(&self, dir: &Path) -> Vec<Url> {
+    pub fn docs_in(&self, dir: &str) -> Vec<Url> {
         self.docs
             .values()
             .filter(|d| d.dir == dir)
@@ -271,7 +273,7 @@ impl Workspace {
     }
 
     /// Discards cached script analyses in a folder (after an HDL edit).
-    pub fn invalidate_scripts(&mut self, dir: &Path) {
+    pub fn invalidate_scripts(&mut self, dir: &str) {
         for doc in self.docs.values_mut() {
             if doc.dir == dir {
                 doc.tst = None;
@@ -303,7 +305,8 @@ impl Workspace {
         let doc = &self.docs[uri];
         let text = doc.text();
         let docs = &self.docs;
-        let mut resolve = |id: &str| source_by_id(docs, id);
+        let host = &self.host;
+        let mut resolve = |id: &str| source_by_id(docs, host, id);
         core.iter()
             .map(|d| convert::diagnostic(uri, &text, d, &mut resolve))
             .collect()
@@ -315,7 +318,7 @@ impl Workspace {
 
     /// The URL and text of a source identity (an open document or a file).
     pub fn source(&self, id: &str) -> Option<(Url, String)> {
-        source_by_id(&self.docs, id)
+        source_by_id(&self.docs, &self.host, id)
     }
 
     /// A location for a span in a chip unit's source (local or built-in).
@@ -330,15 +333,10 @@ impl Workspace {
         }
     }
 
-    /// Writes a built-in's interface text to a cache file so editors can open it.
+    /// A location in the read-only document that shows a built-in chip's
+    /// interface. The editor fetches its text with `n2t/builtinSource`.
     pub fn builtin_location(&self, chip: &BuiltinChip, span: Span) -> Option<lsp::Location> {
-        let path = self.builtin_dir.join(format!("{}.hdl", chip.name));
-        let current = std::fs::read_to_string(&path).ok();
-        if current.as_deref() != Some(&*chip.source) {
-            std::fs::create_dir_all(&self.builtin_dir).ok()?;
-            std::fs::write(&path, &*chip.source).ok()?;
-        }
-        let url = path_to_url(&canonical_path(&path))?;
+        let url = Url::parse(&format!("{BUILTIN_SCHEME}:/{}.hdl", chip.name)).ok()?;
         Some(lsp::Location::new(
             url,
             convert::range_in(&chip.source, span),
@@ -346,14 +344,17 @@ impl Workspace {
     }
 }
 
-fn source_by_id(docs: &HashMap<Url, Document>, id: &str) -> Option<(Url, String)> {
-    let path = PathBuf::from(id);
+fn source_by_id(
+    docs: &HashMap<Url, Document>,
+    host: &SharedHost,
+    id: &str,
+) -> Option<(Url, String)> {
     if let Some(doc) = docs
         .values()
-        .find(|d| d.path.as_deref() == Some(path.as_path()) || d.uri.as_str() == id)
+        .find(|d| d.path.as_deref() == Some(id) || d.uri.as_str() == id)
     {
         return Some((doc.uri.clone(), doc.text.to_string()));
     }
-    let text = n2t_core::source::read_text_file(&path).ok()?;
-    Some((path_to_url(&path)?, text))
+    let text = read_text(host.as_ref(), id).ok()?.text;
+    Some((path_to_url(id)?, text))
 }

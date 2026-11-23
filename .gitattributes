@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.cmp text eol=lf
+*.expected text eol=lf
+*.png binary
+*.gif binary
+*.wasm binary
+*.vsix binary

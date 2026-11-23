@@ -375,15 +375,8 @@ pub fn completion(
         ("output-file", 1) => vec![file_item(format!("{stem}.out"))],
         ("compare-to", 1) => {
             let mut names = vec![format!("{stem}.cmp")];
-            for entry in std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-            {
-                if let Ok(name) = entry.file_name().into_string()
-                    && name.ends_with(".cmp")
-                    && !names.contains(&name)
-                {
+            for name in ws.project(&dir).files() {
+                if name.ends_with(".cmp") && !names.contains(&name) {
                     names.push(name);
                 }
             }

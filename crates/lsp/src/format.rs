@@ -10,7 +10,6 @@ fn options_from_lsp(options: &lsp::FormattingOptions) -> FormatOptions {
     FormatOptions {
         tab_size: (options.tab_size as usize).max(1),
         use_tabs: !options.insert_spaces,
-        max_line_width: FormatOptions::default().max_line_width,
         trailing_newline: options.insert_final_newline.unwrap_or(true),
     }
 }
@@ -50,7 +49,7 @@ pub fn range(
         DocKind::Tst => n2t_core::tst::format_with_options(&doc.text, &opts)?,
         DocKind::Other => return None,
     };
-    if formatted == &*doc.text {
+    if formatted == *doc.text {
         return Some(Vec::new());
     }
 

@@ -1,1 +1,1 @@
-error: a compare file (`<dir>/NothingCompared.cmp`) was opened but no output was compared
+passed (0 lines compared; 1 compare line(s) never reached)

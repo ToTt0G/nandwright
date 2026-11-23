@@ -1,27 +1,48 @@
-//! Executes `.tst` scripts against the hardware simulator.
+//! Executes `.tst` scripts.
 //!
 //! The runner owns control flow (statements, loops, terminators, pauses),
-//! output schemas, `.out`/`.cmp` streams and breakpoints. The [`Circuit`]
-//! owns circuit state and simulated time. Implements the `book-hardware`
-//! profile of the test-script specification.
+//! output schemas, the `.out` file, `.cmp` comparison and breakpoints. A
+//! [`Machine`] owns the simulated chip, CPU or VM. Which machine a script
+//! gets is decided by [`Script::dialect`].
+//!
+//! Results follow the official Java tools, which coursework is graded
+//! against. In particular a run ends at the first comparison failure and the
+//! `.out` file ends with the failing line; a compare file with lines left over
+//! still passes; and a script without `compare-to` simply ends.
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use n2t_core::builtins::{BuiltinChip, MethodParameter, WritePolicy};
+use n2t_core::builtins::BuiltinLibrary;
 use n2t_core::diagnostic::{Diagnostic, has_errors};
-use n2t_core::hdl::definition::NetKind;
-use n2t_core::hdl::resolve::{FsSourceProvider, SourceProvider};
-use n2t_core::hdl::{ChipUnit, Elaborator};
+use n2t_core::hdl::ChipUnit;
+use n2t_core::hdl::resolve::{HostSourceProvider, SourceProvider};
+use n2t_core::host::{HostError, SharedHost, path, read_text};
 use n2t_core::source::{LineIndex, Span};
 use n2t_core::tst::ast::*;
 
-use crate::circuit::{Circuit, PinHandle};
 use crate::format::{self, Comparator, Mismatch, Value};
-use crate::primitives::BuiltinRegistry;
+use crate::machine::{Files, HardwareMachine, Machine, Observed};
+
+pub use crate::program::parse_hack;
+
+/// The line ending written to `.out` files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Newline {
+    #[default]
+    Lf,
+    /// What the official tools write on Windows.
+    CrLf,
+}
+
+impl Newline {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Newline::Lf => "\n",
+            Newline::CrLf => "\r\n",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RunnerOptions {
@@ -29,6 +50,17 @@ pub struct RunnerOptions {
     pub max_commands: Option<u64>,
     /// Set to `true` from another thread to cancel the run.
     pub cancel: Option<Arc<AtomicBool>>,
+    pub newline: Newline,
+    /// Keep executing after the first comparison failure, to collect every
+    /// failing line for display. The outcome and the `.out` file are still
+    /// those of the first failure, as with the official tools.
+    pub collect_all_mismatches: bool,
+    /// Press the key a script is waiting for. Some official tests (project
+    /// 5's `Memory.tst`) loop until the keyboard reads a given code and ask
+    /// the student to hold that key down in the simulator window. With this
+    /// option the runner presses it, holds it until the next `output`, and
+    /// reports an [`Event::KeyPressed`].
+    pub auto_keyboard: bool,
 }
 
 /// An error that stops a run.
@@ -53,14 +85,18 @@ pub enum SuspendReason {
     Breakpoint,
     /// End of a `;` step while single-stepping.
     StepEnd,
+    /// The step budget of [`ScriptRunner::run_for`] ran out.
+    Budget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The script completed and every comparison passed, consuming the whole
-    /// compare file.
+    /// The script completed and every compared line matched.
     Passed {
         compared_lines: usize,
+        /// Lines of the compare file the script never reached. The official
+        /// tools pass such a run, so this does too; a front-end can say so.
+        unreached_lines: usize,
     },
     /// The script completed without a compare file.
     CompletedUnchecked,
@@ -95,6 +131,21 @@ pub enum Event {
     ClearEcho,
     /// A header or data line written to the output file.
     OutputLine(String),
+    /// The runner pressed a key because the script was waiting for it
+    /// (see [`RunnerOptions::auto_keyboard`]).
+    KeyPressed(u16),
+}
+
+/// One compared line that did not match, with the machine's state when it
+/// was produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub mismatch: Mismatch,
+    /// The `output` command that produced the line.
+    pub span: Span,
+    /// Every observable value of the machine at that moment (for a chip:
+    /// all pins, internal ones included).
+    pub state: Vec<Observed>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,24 +161,6 @@ struct Cursor {
     body: usize,
     iteration: u64,
     condition_checked: bool,
-}
-
-struct OutputStream {
-    path: PathBuf,
-    writer: BufWriter<File>,
-}
-
-#[derive(Debug, Clone)]
-enum Handle {
-    Time,
-    Pin(PinHandle),
-    State {
-        chip: String,
-        instance: usize,
-        index: usize,
-        width: u32,
-        write: WritePolicy,
-    },
 }
 
 struct Breakpoint {
@@ -147,40 +180,18 @@ impl From<RunError> for Stop {
     }
 }
 
-fn error(message: impl Into<String>, span: Span) -> RunError {
+pub(crate) fn error(message: impl Into<String>, span: Span) -> RunError {
     RunError {
         message: message.into(),
         span: Some(span),
     }
 }
 
-/// Runs one script. A runner is single-use: create a new one for a fresh run.
-pub struct ScriptRunner<P: SourceProvider> {
-    project_dir: PathBuf,
-    script_path: Option<PathBuf>,
-    elaborator: Elaborator<P>,
-    registry: BuiltinRegistry,
-    script: Arc<Script>,
-    options: RunnerOptions,
-
-    cursor: Cursor,
-    circuit: Option<Circuit>,
-    loaded: Option<String>,
-    output: Option<OutputStream>,
-    compare: Option<(PathBuf, Comparator)>,
-    schema: Option<Vec<OutputItem>>,
-    breakpoints: Vec<Breakpoint>,
-    echo: Option<String>,
-    events: Vec<Event>,
-    commands: u64,
-    current_span: Span,
-    finished: Option<Outcome>,
-}
-
 /// Why a script could not be started.
 #[derive(Debug)]
 pub enum StartError {
-    Io(PathBuf, std::io::Error),
+    /// The script could not be read.
+    Io(String, HostError),
     /// Lexical/syntax errors. Nothing has been executed or written.
     Syntax(Vec<Diagnostic>),
 }
@@ -188,7 +199,7 @@ pub enum StartError {
 impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StartError::Io(path, e) => write!(f, "cannot read `{}`: {e}", path.display()),
+            StartError::Io(path, e) => write!(f, "cannot read `{path}`: {e}"),
             StartError::Syntax(d) => write!(
                 f,
                 "the script has {} syntax error(s)",
@@ -200,76 +211,138 @@ impl std::fmt::Display for StartError {
 
 impl std::error::Error for StartError {}
 
-impl ScriptRunner<FsSourceProvider> {
-    /// Opens a script file; chips resolve against the script's folder.
-    pub fn open(
-        script_path: &Path,
-        builtins: Arc<n2t_core::builtins::BuiltinLibrary>,
-        registry: BuiltinRegistry,
-        options: RunnerOptions,
-    ) -> Result<Self, StartError> {
-        let canonical = script_path
-            .canonicalize()
-            .map_err(|e| StartError::Io(script_path.to_path_buf(), e))?;
-        let text = n2t_core::source::read_text_file(&canonical)
-            .map_err(|e| StartError::Io(canonical.clone(), e))?;
-        let dir = canonical
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        let elaborator = Elaborator::new(FsSourceProvider::new(&dir), builtins);
-        let mut runner = Self::new(&text, dir, elaborator, registry, options)?;
-        runner.script_path = Some(canonical);
-        Ok(runner)
-    }
+/// Makes the machine for a dialect.
+pub type MachineFactory<'a> = &'a dyn Fn(Dialect, &SharedHost, &str) -> Box<dyn Machine>;
+
+/// The standard machines: chips resolve against the script's folder on the
+/// host, then the built-in chip library.
+pub fn standard_machine(dialect: Dialect, host: &SharedHost, dir: &str) -> Box<dyn Machine> {
+    hardware_machine(
+        dialect,
+        Box::new(HostSourceProvider::new(host.clone(), dir)),
+    )
 }
 
-impl<P: SourceProvider> ScriptRunner<P> {
-    /// Parses `script` (rejecting syntax errors) and prepares a run whose
-    /// companion files resolve against `project_dir`.
-    pub fn new(
-        script: &str,
-        project_dir: PathBuf,
-        elaborator: Elaborator<P>,
-        registry: BuiltinRegistry,
+/// The standard machines, with chip sources from `provider` (an editor
+/// passes one that sees unsaved buffers).
+pub fn hardware_machine(_dialect: Dialect, provider: Box<dyn SourceProvider>) -> Box<dyn Machine> {
+    Box::new(HardwareMachine::new(
+        provider,
+        Arc::new(BuiltinLibrary::standard()),
+    ))
+}
+
+/// Runs one script. A runner is single-use: create a new one for a fresh run.
+pub struct ScriptRunner {
+    host: SharedHost,
+    /// The script's folder: every file it names is relative to it.
+    dir: String,
+    script_path: Option<String>,
+    script: Arc<Script>,
+    dialect: Dialect,
+    options: RunnerOptions,
+    machine: Box<dyn Machine>,
+
+    cursor: Cursor,
+    /// The output file and the text written to it so far.
+    output: Option<(String, String)>,
+    output_dirty: bool,
+    compare: Option<(String, Comparator)>,
+    schema: Option<Vec<OutputItem>>,
+    breakpoints: Vec<Breakpoint>,
+    echo: Option<String>,
+    events: Vec<Event>,
+    failures: Vec<Failure>,
+    /// Set once a comparison has failed and the run continues only to collect
+    /// the remaining failures.
+    first_failure: Option<(Mismatch, Span)>,
+    /// The key held down by [`RunnerOptions::auto_keyboard`].
+    held_key: Option<u16>,
+    commands: u64,
+    current_span: Span,
+    finished: Option<Outcome>,
+}
+
+impl ScriptRunner {
+    /// Opens a script file on `host`. `script_path` is an engine-form path.
+    pub fn open(
+        host: SharedHost,
+        script_path: &str,
         options: RunnerOptions,
+    ) -> Result<Self, StartError> {
+        let text = read_text(host.as_ref(), script_path)
+            .map_err(|e| StartError::Io(script_path.to_string(), e))?;
+        let dir = path::dir(script_path).to_string();
+        let mut runner = Self::new(host, &text.text, &dir, options, &standard_machine)?;
+        runner.script_path = Some(script_path.to_string());
+        Ok(runner)
+    }
+
+    /// Parses `script` (rejecting syntax errors) and prepares a run whose
+    /// companion files resolve against `dir` on `host`.
+    pub fn new(
+        host: SharedHost,
+        script: &str,
+        dir: &str,
+        options: RunnerOptions,
+        machines: MachineFactory<'_>,
     ) -> Result<Self, StartError> {
         let parsed = n2t_core::tst::parse(script);
         if has_errors(&parsed.diagnostics) {
             return Err(StartError::Syntax(parsed.diagnostics));
         }
+        let dialect = parsed.script.dialect();
+        let machine = machines(dialect, &host, dir);
         Ok(Self {
-            project_dir,
+            host,
+            dir: dir.to_string(),
             script_path: None,
-            elaborator,
-            registry,
             script: Arc::new(parsed.script),
+            dialect,
             options,
+            machine,
             cursor: Cursor::default(),
-            circuit: None,
-            loaded: None,
             output: None,
+            output_dirty: false,
             compare: None,
             schema: None,
             breakpoints: Vec::new(),
             echo: None,
             events: Vec::new(),
+            failures: Vec::new(),
+            first_failure: None,
+            held_key: None,
             commands: 0,
             current_span: Span::default(),
             finished: None,
         })
     }
 
-    pub fn circuit(&self) -> Option<&Circuit> {
-        self.circuit.as_ref()
+    /// Records where the script lives, so `output-file` can refuse to
+    /// overwrite it.
+    pub fn set_script_path(&mut self, script_path: &str) {
+        self.script_path = Some(script_path.to_string());
     }
 
-    pub fn circuit_mut(&mut self) -> Option<&mut Circuit> {
-        self.circuit.as_mut()
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
     }
 
-    pub fn loaded_chip(&self) -> Option<&str> {
-        self.loaded.as_deref()
+    pub fn machine(&self) -> &dyn Machine {
+        self.machine.as_ref()
+    }
+
+    pub fn machine_mut(&mut self) -> &mut dyn Machine {
+        self.machine.as_mut()
+    }
+
+    /// The chip under test, for a hardware script that has loaded one.
+    pub fn hardware(&self) -> Option<&HardwareMachine> {
+        self.machine.as_any().downcast_ref()
+    }
+
+    pub fn hardware_mut(&mut self) -> Option<&mut HardwareMachine> {
+        self.machine.as_any_mut().downcast_mut()
     }
 
     pub fn echo(&self) -> Option<&str> {
@@ -285,17 +358,39 @@ impl<P: SourceProvider> ScriptRunner<P> {
     }
 
     /// The path of the current output file, if any.
-    pub fn output_path(&self) -> Option<&Path> {
-        self.output.as_ref().map(|o| o.path.as_path())
+    pub fn output_path(&self) -> Option<&str> {
+        self.output.as_ref().map(|(path, _)| path.as_str())
     }
 
-    pub fn elaborator(&self) -> &Elaborator<P> {
-        &self.elaborator
+    /// Everything written to the output file so far (with `\n` line breaks).
+    pub fn output_text(&self) -> Option<&str> {
+        self.output.as_ref().map(|(_, text)| text.as_str())
+    }
+
+    /// The path of the compare file, if one is open.
+    pub fn compare_path(&self) -> Option<&str> {
+        self.compare.as_ref().map(|(path, _)| path.as_str())
+    }
+
+    /// Every comparison failure seen so far. With
+    /// [`RunnerOptions::collect_all_mismatches`] this goes beyond the first.
+    pub fn failures(&self) -> &[Failure] {
+        &self.failures
     }
 
     /// The span of the most recently executed command.
     pub fn current_span(&self) -> Span {
         self.current_span
+    }
+
+    /// The span of the command that will execute next, if the script has not
+    /// ended.
+    pub fn next_span(&self) -> Option<Span> {
+        match self.script.statements.get(self.cursor.statement)? {
+            Statement::Simple(s) => Some(s.span),
+            Statement::Repeat(r) => r.body.get(self.cursor.body).map(|s| s.span),
+            Statement::While(w) => w.body.get(self.cursor.body).map(|s| s.span),
+        }
     }
 
     /// Whether the runner is currently positioned on a `while` loop statement.
@@ -313,36 +408,66 @@ impl<P: SourceProvider> ScriptRunner<P> {
 
     /// Runs until completion, failure or suspension.
     pub fn run(&mut self) -> Outcome {
-        self.execute(Mode::Run)
+        self.execute(Mode::Run, u64::MAX)
+    }
+
+    /// Runs at most `budget` commands, then suspends with
+    /// [`SuspendReason::Budget`] so the caller can stay responsive.
+    pub fn run_for(&mut self, budget: u64) -> Outcome {
+        self.execute(Mode::Run, budget)
     }
 
     /// Runs until the end of the current `;` step (or an earlier stop).
     pub fn step(&mut self) -> Outcome {
-        self.execute(Mode::Step)
+        self.execute(Mode::Step, u64::MAX)
     }
 
     /// Executes a single simple command, suspending with [`SuspendReason::StepEnd`]
     /// even if the command is comma-terminated (e.g. `while out <> 75 { eval, }`).
     pub fn step_command(&mut self) -> Outcome {
-        self.execute(Mode::StepCommand)
+        self.execute(Mode::StepCommand, u64::MAX)
     }
 
-    fn execute(&mut self, mode: Mode) -> Outcome {
+    fn execute(&mut self, mode: Mode, budget: u64) -> Outcome {
         if let Some(outcome) = &self.finished {
             return outcome.clone();
         }
-        let outcome = self.execute_inner(mode);
+        let mut outcome = self.execute_inner(mode, budget);
+        if let Some(e) = self.flush_output()
+            && outcome.is_terminal()
+            && outcome.is_success()
+        {
+            outcome = Outcome::FailedError(e);
+        }
         if outcome.is_terminal() {
-            if let Some(output) = &mut self.output {
-                let _ = output.writer.flush();
-            }
             self.finished = Some(outcome.clone());
         }
         outcome
     }
 
-    fn execute_inner(&mut self, mode: Mode) -> Outcome {
+    /// Writes the output file if it changed. Returns the error, if any.
+    fn flush_output(&mut self) -> Option<RunError> {
+        if !self.output_dirty {
+            return None;
+        }
+        self.output_dirty = false;
+        let (path, text) = self.output.as_ref()?;
+        let data = match self.options.newline {
+            Newline::Lf => text.clone(),
+            Newline::CrLf => text.replace('\n', "\r\n"),
+        };
+        self.host
+            .write(path, data.as_bytes())
+            .err()
+            .map(|e| RunError {
+                message: format!("cannot write `{}`: {e}", path::file_name(path)),
+                span: None,
+            })
+    }
+
+    fn execute_inner(&mut self, mode: Mode, budget: u64) -> Outcome {
         let script = self.script.clone();
+        let mut executed: u64 = 0;
         loop {
             if self
                 .options
@@ -357,7 +482,7 @@ impl<P: SourceProvider> ScriptRunner<P> {
                 .max_commands
                 .is_some_and(|max| self.commands >= max)
             {
-                return Outcome::LimitExceeded;
+                return self.ended_early(Outcome::LimitExceeded);
             }
 
             let Some(statement) = script.statements.get(self.cursor.statement) else {
@@ -382,27 +507,56 @@ impl<P: SourceProvider> ScriptRunner<P> {
                     }
                     if self.cursor.body == 0 && !self.cursor.condition_checked {
                         match self.condition(&w.condition) {
-                            Ok(true) => self.cursor.condition_checked = true,
+                            Ok(true) => {
+                                self.cursor.condition_checked = true;
+                                if self.cursor.iteration >= 1 {
+                                    self.press_awaited_key(&w.condition);
+                                }
+                            }
                             Ok(false) => {
                                 self.next_statement();
                                 continue;
                             }
-                            Err(e) => return Outcome::FailedError(e),
+                            Err(e) => return self.ended_early(Outcome::FailedError(e)),
                         }
                     }
                     (&w.body[self.cursor.body], Some(w.body.len()))
                 }
             };
 
+            if executed >= budget {
+                return Outcome::Suspended {
+                    reason: SuspendReason::Budget,
+                    span: simple.span,
+                };
+            }
+            executed += 1;
+
             self.current_span = simple.span;
             match self.command(simple) {
                 Ok(()) => {}
-                Err(Stop::Error(e)) => return Outcome::FailedError(e),
+                Err(Stop::Error(e)) => return self.ended_early(Outcome::FailedError(e)),
                 Err(Stop::Mismatch(mismatch)) => {
-                    return Outcome::FailedComparison {
-                        mismatch,
-                        span: Some(simple.span),
+                    let failure = Failure {
+                        mismatch: mismatch.clone(),
+                        span: simple.span,
+                        state: self.machine.observe(),
                     };
+                    self.failures.push(failure);
+                    if self.first_failure.is_none() {
+                        // The official tools stop here, and so does the
+                        // output file.
+                        if let Some(e) = self.flush_output() {
+                            return Outcome::FailedError(e);
+                        }
+                        self.first_failure = Some((mismatch.clone(), simple.span));
+                    }
+                    if !self.options.collect_all_mismatches {
+                        return Outcome::FailedComparison {
+                            mismatch,
+                            span: Some(simple.span),
+                        };
+                    }
                 }
             }
             self.commands += 1;
@@ -419,6 +573,10 @@ impl<P: SourceProvider> ScriptRunner<P> {
                 }
             }
 
+            if self.first_failure.is_some() {
+                // Only collecting failures now: no pauses, no stepping.
+                continue;
+            }
             match self.check_breakpoints() {
                 Ok(true) => {
                     return Outcome::Suspended {
@@ -453,6 +611,44 @@ impl<P: SourceProvider> ScriptRunner<P> {
         }
     }
 
+    /// If the loop is waiting for a value that only the keyboard can
+    /// produce (`while out <> 75 { … }`), presses that key.
+    fn press_awaited_key(&mut self, condition: &Condition) {
+        if !self.options.auto_keyboard || condition.relation != Relation::NotEqual {
+            return;
+        }
+        let constant = match (&condition.left, &condition.right) {
+            (Operand::Variable(_), Operand::Scalar(Scalar::Integer(i)))
+            | (Operand::Scalar(Scalar::Integer(i)), Operand::Variable(_)) => i,
+            _ => return,
+        };
+        let Ok(code) = constant.constant_value() else {
+            return;
+        };
+        let Ok(code) = u16::try_from(code) else {
+            return;
+        };
+        if code == 0 || self.held_key == Some(code) {
+            return;
+        }
+        if self.machine.set_key(code) {
+            self.held_key = Some(code);
+            self.events.push(Event::KeyPressed(code));
+        }
+    }
+
+    /// The outcome when a run stops before the end of the script: if a
+    /// comparison had already failed, that is the result.
+    fn ended_early(&self, outcome: Outcome) -> Outcome {
+        match &self.first_failure {
+            Some((mismatch, span)) => Outcome::FailedComparison {
+                mismatch: mismatch.clone(),
+                span: Some(*span),
+            },
+            None => outcome,
+        }
+    }
+
     fn next_statement(&mut self) {
         self.cursor = Cursor {
             statement: self.cursor.statement + 1,
@@ -461,36 +657,18 @@ impl<P: SourceProvider> ScriptRunner<P> {
     }
 
     fn complete(&mut self) -> Outcome {
-        if let Some(output) = &mut self.output
-            && let Err(e) = output.writer.flush()
-        {
-            return Outcome::FailedError(RunError {
-                message: format!("cannot write `{}`: {e}", output.path.display()),
-                span: None,
-            });
+        if let Some((mismatch, span)) = &self.first_failure {
+            return Outcome::FailedComparison {
+                mismatch: mismatch.clone(),
+                span: Some(*span),
+            };
         }
         match &self.compare {
             None => Outcome::CompletedUnchecked,
-            Some((path, comparator)) => {
-                if comparator.compared() == 0 {
-                    return Outcome::FailedError(RunError {
-                        message: format!(
-                            "a compare file (`{}`) was opened but no output was compared",
-                            path.display()
-                        ),
-                        span: None,
-                    });
-                }
-                match comparator.finish() {
-                    Ok(()) => Outcome::Passed {
-                        compared_lines: comparator.compared(),
-                    },
-                    Err(mismatch) => Outcome::FailedComparison {
-                        mismatch,
-                        span: None,
-                    },
-                }
-            }
+            Some((_, comparator)) => Outcome::Passed {
+                compared_lines: comparator.compared(),
+                unreached_lines: comparator.remaining(),
+            },
         }
     }
 
@@ -498,23 +676,31 @@ impl<P: SourceProvider> ScriptRunner<P> {
     // Commands
     // ---------------------------------------------------------------------
 
-    fn circuit_or_error(&mut self, span: Span) -> Result<&mut Circuit, RunError> {
-        self.circuit
-            .as_mut()
-            .ok_or_else(|| error("no chip is loaded; use `load Xxx.hdl` first", span))
-    }
-
     fn command(&mut self, statement: &SimpleStatement) -> Result<(), Stop> {
         let span = statement.command_span;
         match &statement.command {
-            Command::Load(file) => self.load(file)?,
+            Command::Load(file) => {
+                let files = Files {
+                    host: &self.host,
+                    dir: &self.dir,
+                };
+                self.machine.load(&files, file)?;
+                self.breakpoints.clear();
+            }
             Command::OutputFile(file) => self.output_file(file)?,
             Command::CompareTo(file) => {
-                let path = self.project_dir.join(&file.name);
-                let text = n2t_core::source::read_text_file(&path).map_err(|e| {
-                    error(format!("cannot read `{}`: {e}", path.display()), file.span)
+                let path = path::join(&self.dir, &file.name);
+                let text = read_text(self.host.as_ref(), &path).map_err(|e| {
+                    let message = match e {
+                        HostError::NotFound => format!(
+                            "the compare file `{}` does not exist in the script's folder",
+                            file.name
+                        ),
+                        other => format!("cannot read `{}`: {other}", file.name),
+                    };
+                    error(message, file.span)
                 })?;
-                self.compare = Some((path, Comparator::new(&text)));
+                self.compare = Some((path, Comparator::new(&text.text)));
             }
             Command::OutputList(items) => {
                 if self.output.is_none() {
@@ -525,12 +711,12 @@ impl<P: SourceProvider> ScriptRunner<P> {
                     .into());
                 }
                 for item in items {
-                    self.resolve(&item.variable)?;
+                    self.machine.read(&item.variable)?;
                 }
                 self.schema = Some(items.clone());
                 let labels: Vec<(String, OutputFormat)> = items
                     .iter()
-                    .map(|i| (item_label(i), i.effective_format()))
+                    .map(|i| (i.variable.to_string(), i.effective_format()))
                     .collect();
                 let line = format::header(labels.iter().map(|(n, f)| (n.as_str(), *f)));
                 self.output_line(&line)?;
@@ -545,21 +731,29 @@ impl<P: SourceProvider> ScriptRunner<P> {
                 };
                 let mut values = Vec::with_capacity(schema.len());
                 for item in &schema {
-                    let handle = self.resolve(&item.variable)?;
-                    values.push((self.read(&handle), item.effective_format()));
+                    values.push((self.machine.read(&item.variable)?, item.effective_format()));
                 }
                 let line = format::row(values.iter().map(|(v, f)| (v, *f)));
-                self.output_line(&line)?;
+                let result = self.output_line(&line);
+                // The awaited key has now been seen in the output: release it.
+                if self.held_key.is_some() && !self.in_while_loop() {
+                    self.machine.set_key(0);
+                    self.held_key = None;
+                }
+                result?;
             }
-            Command::Set { variable, value } => self.set(variable, value)?,
-            Command::Eval => self.circuit_or_error(span)?.eval(),
-            Command::Tick => {
-                let circuit = self.circuit_or_error(span)?;
-                circuit.tick().map_err(|e| error(e.to_string(), span))?;
-            }
-            Command::Tock => {
-                let circuit = self.circuit_or_error(span)?;
-                circuit.tock().map_err(|e| error(e.to_string(), span))?;
+            Command::Set { variable, value } => self.machine.write(variable, value)?,
+            Command::Eval
+            | Command::Tick
+            | Command::Tock
+            | Command::TickTock
+            | Command::VmStep
+            | Command::BuiltinMethod { .. } => {
+                let files = Files {
+                    host: &self.host,
+                    dir: &self.dir,
+                };
+                self.machine.execute(&files, statement)?;
             }
             Command::Echo(text) => {
                 self.echo = Some(text.value.clone());
@@ -570,8 +764,7 @@ impl<P: SourceProvider> ScriptRunner<P> {
                 self.events.push(Event::ClearEcho);
             }
             Command::Breakpoint { variable, value } => {
-                let handle = self.resolve(variable)?;
-                let current = self.read(&handle);
+                let current = self.machine.read(variable)?;
                 // Validate the value's type once at registration.
                 breakpoint_matches(&current, value).map_err(|m| error(m, span))?;
                 let duplicate = self.breakpoints.iter().any(|b| {
@@ -589,333 +782,70 @@ impl<P: SourceProvider> ScriptRunner<P> {
                 }
             }
             Command::ClearBreakpoints => self.breakpoints.clear(),
-            Command::BuiltinMethod {
-                target,
-                method,
-                arguments,
-            } => self.builtin_method(target, method, arguments, span)?,
-            Command::Unsupported { name, .. } => {
-                return Err(error(
-                    format!("`{}` is not supported by the hardware simulator", name.name),
-                    name.span,
-                )
-                .into());
-            }
         }
-        Ok(())
-    }
-
-    fn load(&mut self, file: &FileName) -> Result<(), RunError> {
-        let name = file.stem().to_string();
-        let unit = self.elaborator.compile(&name);
-        let Some(definition) = unit.definition.clone() else {
-            return Err(error(load_failure(&file.name, &unit), file.span));
-        };
-        let circuit = Circuit::new(definition, &self.registry)
-            .map_err(|e| error(e.to_string(), file.span))?;
-        self.circuit = Some(circuit);
-        self.loaded = Some(name);
-        self.breakpoints.clear();
         Ok(())
     }
 
     fn output_file(&mut self, file: &FileName) -> Result<(), RunError> {
-        let path = self.project_dir.join(&file.name);
-        let canonical = path.canonicalize().ok();
+        let target = path::join(&self.dir, &file.name);
         let protected = [
             self.script_path.as_deref(),
-            self.compare.as_ref().map(|(p, _)| p.as_path()),
+            self.compare.as_ref().map(|(p, _)| p.as_str()),
         ];
-        if canonical.is_some()
-            && protected
-                .iter()
-                .flatten()
-                .any(|p| p.canonicalize().ok() == canonical)
+        if protected
+            .iter()
+            .flatten()
+            .any(|p| p.eq_ignore_ascii_case(&target))
         {
             return Err(error(
-                format!("refusing to overwrite `{}`", path.display()),
+                format!(
+                    "refusing to overwrite `{}`; choose another output file",
+                    file.name
+                ),
                 file.span,
             ));
         }
-        if let Some(mut old) = self.output.take() {
-            let _ = old.writer.flush();
+        if let Some(e) = self.flush_output() {
+            return Err(e);
         }
-        let handle = File::create(&path).map_err(|e| {
-            error(
-                format!("cannot create `{}`: {e}", path.display()),
-                file.span,
-            )
-        })?;
-        self.output = Some(OutputStream {
-            path,
-            writer: BufWriter::new(handle),
-        });
+        self.output = Some((target, String::new()));
+        // The official tools create the file at once, even if nothing is
+        // ever written to it.
+        self.output_dirty = true;
         Ok(())
     }
 
     fn output_line(&mut self, line: &str) -> Result<(), Stop> {
         let span = self.current_span;
-        let Some(output) = &mut self.output else {
+        let failed_before = self.first_failure.is_some();
+        let Some((_, text)) = &mut self.output else {
             return Err(error(
                 "no output file is open; use `output-file Xxx.out` first",
                 span,
             )
             .into());
         };
-        writeln!(output.writer, "{line}").map_err(|e| {
-            error(
-                format!("cannot write `{}`: {e}", output.path.display()),
-                span,
-            )
-        })?;
-        self.events.push(Event::OutputLine(line.to_string()));
+        if !failed_before {
+            text.push_str(line);
+            text.push('\n');
+            self.output_dirty = true;
+            self.events.push(Event::OutputLine(line.to_string()));
+        }
         if let Some((_, comparator)) = &mut self.compare
             && let Err(mismatch) = comparator.compare(line)
         {
-            let _ = output.writer.flush();
             return Err(Stop::Mismatch(mismatch));
         }
         Ok(())
     }
 
-    fn set(&mut self, variable: &Variable, value: &IntegerLiteral) -> Result<(), RunError> {
-        let handle = self.resolve(variable)?;
-        let span = variable.span;
-        match handle {
-            Handle::Time => Err(error("`time` is read-only", span)),
-            Handle::Pin(pin) => {
-                if !matches!(pin.kind, NetKind::Input(_)) {
-                    return Err(error(
-                        format!("`{variable}` is not an input pin and cannot be set"),
-                        span,
-                    ));
-                }
-                let bits = value.encode(pin.width).map_err(|m| error(m, value.span))?;
-                self.circuit_or_error(span)?.write(&pin, bits);
-                Ok(())
-            }
-            Handle::State {
-                chip,
-                instance,
-                index,
-                width,
-                write,
-            } => {
-                if write == WritePolicy::ReadOnly {
-                    return Err(error(format!("the state of `{chip}` is read-only"), span));
-                }
-                let bits = value.encode(width).map_err(|m| error(m, value.span))?;
-                let circuit = self.circuit_or_error(span)?;
-                if !circuit.write_state(instance, index, bits) {
-                    return Err(error(format!("cannot write `{variable}`"), span));
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn builtin_method(
-        &mut self,
-        target: &Ident,
-        method: &Ident,
-        arguments: &[Argument],
-        span: Span,
-    ) -> Result<(), RunError> {
-        let (instance, chip) = self.find_builtin(target, |c| !c.methods.is_empty())?;
-        let Some(descriptor) = chip.method(&method.name) else {
-            return Err(error(
-                format!("built-in `{}` has no method `{}`", chip.name, method.name),
-                method.span,
-            ));
-        };
-        if arguments.len() != descriptor.parameters.len() {
-            return Err(error(
-                format!(
-                    "`{} {}` takes {} argument(s)",
-                    chip.name,
-                    descriptor.name,
-                    descriptor.parameters.len()
-                ),
-                span,
-            ));
-        }
-        // The only standard method is `ROM32K load file`.
-        let [MethodParameter::FileName { .. }] = descriptor.parameters.as_slice() else {
-            return Err(error(
-                format!("method `{}` is not supported", descriptor.name),
-                method.span,
-            ));
-        };
-        let argument = &arguments[0];
-        let name = match &argument.kind {
-            ArgumentKind::Word(w) | ArgumentKind::String(w) => w.clone(),
-            ArgumentKind::Percent { .. } => {
-                return Err(error("expected a file name", argument.span));
-            }
-        };
-        if let Some(problem) = n2t_core::tst::parser::check_basename(&name) {
-            return Err(error(problem, argument.span));
-        }
-        let path = self.project_dir.join(&name);
-        if name.ends_with(".asm") {
-            return Err(error(
-                "loading `.asm` programs requires an assembler, which is not available; assemble the program and load the `.hack` file",
-                argument.span,
-            ));
-        }
-        if !name.ends_with(".hack") {
-            return Err(error("expected a `.hack` program file", argument.span));
-        }
-        let text = n2t_core::source::read_text_file(&path).map_err(|e| {
-            error(
-                format!("cannot read `{}`: {e}", path.display()),
-                argument.span,
-            )
-        })?;
-        let words =
-            parse_hack(&text).map_err(|m| error(format!("`{name}`: {m}"), argument.span))?;
-        let circuit = self.circuit_or_error(span)?;
-        if !circuit.load_program(instance, &words) {
-            return Err(error(
-                format!("cannot load `{name}` into `{}`", chip.name),
-                argument.span,
-            ));
-        }
-        Ok(())
-    }
-
     // ---------------------------------------------------------------------
-    // Variables
+    // Conditions and breakpoints
     // ---------------------------------------------------------------------
-
-    fn find_builtin(
-        &self,
-        name: &Ident,
-        filter: impl Fn(&BuiltinChip) -> bool,
-    ) -> Result<(usize, Arc<BuiltinChip>), RunError> {
-        let circuit = self
-            .circuit
-            .as_ref()
-            .ok_or_else(|| error("no chip is loaded", name.span))?;
-        let library = self.elaborator.builtins();
-        let candidates: Vec<(usize, Arc<BuiltinChip>)> = circuit
-            .primitives()
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| {
-                let chip = library.by_symbol(&p.symbol)?;
-                (filter(chip) && chip.name == p.chip_name).then(|| (i, chip.clone()))
-            })
-            .collect();
-        let exact: Vec<_> = candidates
-            .iter()
-            .filter(|(_, c)| c.name == name.name)
-            .collect();
-        let matching = if exact.is_empty() {
-            candidates
-                .iter()
-                .filter(|(_, c)| c.name.eq_ignore_ascii_case(&name.name))
-                .collect()
-        } else {
-            exact
-        };
-        match matching.as_slice() {
-            [] => Err(error(
-                format!("the loaded chip contains no built-in `{}`", name.name),
-                name.span,
-            )),
-            [one] => Ok((*one).clone()),
-            [first, ..] => Err(error(
-                format!(
-                    "the loaded chip contains {} instances of built-in `{}`; the reference is ambiguous",
-                    matching.len(),
-                    first.1.name
-                ),
-                name.span,
-            )),
-        }
-    }
-
-    fn resolve(&self, variable: &Variable) -> Result<Handle, RunError> {
-        let span = variable.span;
-        if variable.is_time() {
-            return Ok(Handle::Time);
-        }
-        let circuit = self
-            .circuit
-            .as_ref()
-            .ok_or_else(|| error("no chip is loaded; use `load Xxx.hdl` first", span))?;
-        if let Some(index) = variable.index {
-            let (instance, chip) =
-                self.find_builtin(&variable.name, |c| c.script_state.is_some())?;
-            let state = chip.script_state.as_ref().expect("filtered");
-            let index = match (state.shape, index.value) {
-                (n2t_core::builtins::StateShape::Scalar, None | Some(0)) => 0,
-                (n2t_core::builtins::StateShape::Indexed { len }, Some(i)) if i < len as u64 => {
-                    i as usize
-                }
-                _ => {
-                    return Err(error(
-                        format!("invalid index for `{}`", chip.name),
-                        index.span,
-                    ));
-                }
-            };
-            return Ok(Handle::State {
-                chip: chip.name.clone(),
-                instance,
-                index,
-                width: state.width,
-                write: state.write,
-            });
-        }
-        let name = &variable.name.name;
-        let pins = circuit.pins();
-        if let Some(pin) = pins.iter().find(|p| p.name == *name) {
-            return Ok(Handle::Pin(pin.clone()));
-        }
-        let folded: Vec<&PinHandle> = pins
-            .iter()
-            .filter(|p| p.name.eq_ignore_ascii_case(name))
-            .collect();
-        match folded.as_slice() {
-            [one] => Ok(Handle::Pin((*one).clone())),
-            [] => Err(error(
-                format!("the loaded chip has no pin named `{name}`"),
-                span,
-            )),
-            _ => Err(error(
-                format!("`{name}` is ambiguous; use the exact spelling"),
-                span,
-            )),
-        }
-    }
-
-    fn read(&self, handle: &Handle) -> Value {
-        let Some(circuit) = &self.circuit else {
-            return Value::Text(String::new());
-        };
-        match handle {
-            Handle::Time => Value::Text(circuit.time().to_string()),
-            Handle::Pin(pin) => Value::Int {
-                bits: circuit.read(pin),
-                width: pin.width,
-            },
-            Handle::State {
-                instance,
-                index,
-                width,
-                ..
-            } => Value::Int {
-                bits: circuit.read_state(*instance, *index).unwrap_or(0),
-                width: *width,
-            },
-        }
-    }
 
     fn operand(&self, operand: &Operand) -> Result<Value, RunError> {
         match operand {
-            Operand::Variable(v) => Ok(self.read(&self.resolve(v)?)),
+            Operand::Variable(v) => self.machine.read(v),
             Operand::Scalar(Scalar::String(s)) => Ok(Value::Text(s.value.clone())),
             Operand::Scalar(Scalar::Integer(i)) => {
                 let value = i.constant_value().map_err(|m| error(m, i.span))?;
@@ -952,8 +882,7 @@ impl<P: SourceProvider> ScriptRunner<P> {
     fn check_breakpoints(&mut self) -> Result<bool, RunError> {
         let mut fired = false;
         for i in 0..self.breakpoints.len() {
-            let handle = self.resolve(&self.breakpoints[i].variable)?;
-            let current = self.read(&handle);
+            let current = self.machine.read(&self.breakpoints[i].variable)?;
             let matches = breakpoint_matches(&current, &self.breakpoints[i].value)
                 .map_err(|m| error(m, self.breakpoints[i].variable.span))?;
             let breakpoint = &mut self.breakpoints[i];
@@ -966,11 +895,6 @@ impl<P: SourceProvider> ScriptRunner<P> {
         }
         Ok(fired)
     }
-}
-
-/// The header label of an output item: its script spelling, including any index.
-fn item_label(item: &OutputItem) -> String {
-    item.variable.to_string()
 }
 
 /// Numeric value for comparisons: constants are stored as full 64-bit
@@ -1002,28 +926,6 @@ fn breakpoint_matches(current: &Value, value: &Scalar) -> Result<bool, String> {
     }
 }
 
-/// Parses a `.hack` program: one 16-digit binary word per non-empty line.
-pub fn parse_hack(text: &str) -> Result<Vec<u16>, String> {
-    let mut words = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.len() != 16 || !line.bytes().all(|b| b == b'0' || b == b'1') {
-            return Err(format!("line {} is not a 16-bit binary word", number + 1));
-        }
-        words.push(u16::from_str_radix(line, 2).expect("validated"));
-    }
-    if words.len() > 32768 {
-        return Err(format!(
-            "the program has {} words; ROM32K holds 32768",
-            words.len()
-        ));
-    }
-    Ok(words)
-}
-
 /// Summarises why a chip failed to load, with locations.
 pub fn load_failure(file_name: &str, unit: &ChipUnit) -> String {
     let mut message = format!("cannot load `{file_name}`");
@@ -1034,7 +936,7 @@ pub fn load_failure(file_name: &str, unit: &ChipUnit) -> String {
     message.push(':');
     let text = unit.text().unwrap_or("");
     let lines = LineIndex::new(text);
-    let source = unit.source_id();
+    let source = unit.source_id().map(path::file_name);
     for d in errors.iter().take(10) {
         match (source, d.span) {
             (Some(source), Some(span)) => {

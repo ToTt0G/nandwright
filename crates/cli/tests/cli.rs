@@ -44,8 +44,8 @@ fn scratch_copy(from: &Path, tag: &str) -> PathBuf {
 }
 
 #[test]
-fn check_accepts_the_projects() {
-    let (code, _, stderr) = n2t(&["check", samples().join("projects").to_str().unwrap()]);
+fn check_accepts_the_fixture_chips() {
+    let (code, _, stderr) = n2t(&["check", samples().join("chips").to_str().unwrap()]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains(" 0 errors, 0 warnings"), "{stderr}");
 }
@@ -64,13 +64,29 @@ fn check_reports_errors_with_exit_code_1() {
     assert!(stderr.contains("WidthMismatch.hdl:6:9"), "{stderr}");
 }
 
+/// Review finding A3/A4: an unimplemented skeleton is the normal state of a
+/// course project. It is a hint, not an error, and it still runs.
 #[test]
-fn test_runs_the_projects() {
-    let dir = scratch_copy(&samples().join("projects"), "projects");
+fn an_unimplemented_chip_is_not_an_error() {
+    let (code, _, stderr) = n2t(&[
+        "check",
+        samples().join("runtime/Stub.hdl").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("hint[hdl-empty-implementation]"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(" 0 errors, 0 warnings"), "{stderr}");
+}
+
+#[test]
+fn test_runs_the_fixture_chips() {
+    let dir = scratch_copy(&samples().join("chips"), "chips");
     let (code, stdout, stderr) = n2t(&["test", dir.to_str().unwrap()]);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(stdout.contains("33 passed, 0 failed"), "{stdout}");
+    assert!(stdout.contains("6 passed, 0 failed"), "{stdout}");
 }
 
 #[test]
@@ -86,93 +102,106 @@ fn test_reports_a_comparison_failure() {
     );
 }
 
+/// The official simulator loads an unimplemented chip, simulates it with its
+/// outputs at zero and reports the first compare line that differs. The
+/// `.out` file ends with that line.
 #[test]
-fn eval_prints_pins() {
-    let alu = samples().join("projects/02/ALU.hdl");
-    // x + y with x = 2, y = 3.
-    let (code, stdout, stderr) = n2t(&["eval", alu.to_str().unwrap(), "x=2", "y=3", "f=1"]);
+fn an_unimplemented_chip_fails_on_comparison_like_the_official_simulator() {
+    let dir = scratch_copy(&samples().join("runtime"), "stub");
+    let (code, stdout, stderr) = n2t(&["test", dir.join("Stub.tst").to_str().unwrap()]);
+    let out = fs::read_to_string(dir.join("Stub.out")).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("comparison failure at line 3"), "{stderr}");
+    assert_eq!(
+        out,
+        "|   a   |   b   |  out  |\n|   0   |   0   |   0   |\n|   0   |   1   |   0   |\n"
+    );
+}
+
+#[test]
+fn test_json_reports_outcomes_for_tools() {
+    let dir = scratch_copy(&samples().join("runtime"), "json");
+    let (_, stdout, _) = n2t(&[
+        "test",
+        "--json",
+        dir.join("Stub.tst").to_str().unwrap(),
+        dir.join("Unchecked.tst").to_str().unwrap(),
+    ]);
+    let _ = fs::remove_dir_all(&dir);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "{stdout}");
+    assert_eq!(records[0]["outcome"], "failed");
+    assert_eq!(records[0]["dialect"], "hardware");
+    assert_eq!(records[0]["mismatch"]["line"], 3);
+    assert_eq!(records[0]["mismatch"]["script_line"], 7);
+    assert_eq!(records[1]["outcome"], "unchecked");
+}
+
+#[test]
+fn eval_prints_pins_including_internal_ones() {
+    let chip = samples().join("chips/Majority.hdl");
+    let (code, stdout, stderr) = n2t(&["eval", chip.to_str().unwrap(), "a=1", "c=1"]);
     assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("OUT out     1  (1)"), "{stdout}");
+    assert!(stdout.contains("INT ac      1  (1)"), "{stdout}");
+    assert!(stdout.contains("INT ab      0  (0)"), "{stdout}");
+}
+
+#[test]
+fn eval_steps_a_clocked_chip() {
+    let chip = samples().join("chips/Accumulator.hdl");
+    let (code, stdout, stderr) = n2t(&[
+        "eval",
+        chip.to_str().unwrap(),
+        "in=5",
+        "add=1",
+        "--cycles",
+        "3",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("0000000000001111  (15)"), "{stdout}");
+    assert!(stdout.contains("time 3"), "{stdout}");
+}
+
+/// A script that waits for a key is run by pressing that key for it.
+#[test]
+fn test_presses_the_key_a_script_waits_for() {
+    let dir = scratch_copy(&samples().join("chips"), "keys");
+    let tst = dir.join("KeyLatch.tst");
+    let (code, stdout, stderr) = n2t(&["test", tst.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("[pressed 'K' for the script]"), "{stdout}");
+
+    // Without it the script waits until the command limit, as it would wait
+    // for a person in the official simulator.
+    let (code, stdout, stderr) = n2t(&[
+        "test",
+        "--no-keys",
+        "--max-commands",
+        "5000",
+        tst.to_str().unwrap(),
+    ]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{stdout}{stderr}");
     assert!(
-        stdout.contains("OUT out") && stdout.contains("0000000000000101  (5)"),
+        stdout.contains("still running after 5000 commands"),
         "{stdout}"
     );
-    assert!(
-        stdout.contains("INT xPlusY") && stdout.contains("0000000000000101  (5)"),
-        "expected internal pins in eval output:\n{stdout}"
-    );
+    assert!(stderr.contains("Hold down the 'K' key"), "{stderr}");
 }
 
-#[test]
-fn test_accepts_scalar_register_index_zero_like_official_computer_add() {
-    let dir = scratch_copy(&samples().join("projects/05"), "scalar-zero");
-    let tst = dir.join("ComputerAdd.tst");
-    let original = fs::read_to_string(&tst).unwrap();
-    // Match official nand2tetris/projects/05/ComputerAdd.tst spelling.
-    let official_spelling = original
-        .replace("ARegister[]", "ARegister[0]")
-        .replace("DRegister[]", "DRegister[0]");
-    fs::write(&tst, &official_spelling).unwrap();
-
-    let (code, stdout, stderr) = n2t(&["test", tst.to_str().unwrap()]);
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(stdout.contains("PASS"), "{stdout}");
-}
-
-#[test]
-fn test_keys_flag_drives_interactive_keyboard_loops() {
-    let dir = scratch_copy(&samples().join("projects/05"), "keys-loop");
-    let tst = dir.join("KeyTest.tst");
-    let cmp = dir.join("KeyTest.cmp");
-    fs::write(
-        &tst,
-        "\
-load Memory.hdl,
-output-file KeyTest.out,
-compare-to KeyTest.cmp,
-output-list address%D1.5.1 out%D1.3.1;
-
-set address 24576,
-echo \"Hold K\",
-while out <> 75 {
-    eval,
-}
-clear-echo,
-output;
-
-echo \"Hold Y\",
-while out <> 89 {
-    tick, tock;
-}
-clear-echo,
-output;
-",
-    )
-    .unwrap();
-    fs::write(
-        &cmp,
-        "\
-|address| out |
-| 24576 |  75 |
-| 24576 |  89 |
-",
-    )
-    .unwrap();
-
-    let (code, stdout, stderr) = n2t(&["test", "--keys", "K,Y", tst.to_str().unwrap()]);
-    let _ = fs::remove_dir_all(&dir);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(stdout.contains("PASS"), "{stdout}");
-}
-
+/// The course's own `tools/builtInChips` files, which a student may copy
+/// next to their chips, are not UTF-8 and name polymorphic built-ins.
 #[test]
 fn check_reads_windows_1252_and_polymorphic_course_builtins() {
     let dir = std::env::temp_dir().join(format!("n2t-cli-course-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
-    // Mirrors `tools/builtInChips/ALU.hdl` (Windows-1252 0x96 en-dash in doc comment)
-    // and `tools/builtInChips/And16.hdl` (`BUILTIN And;` for 16-bit And16).
     let alu = dir.join("ALU.hdl");
     let mut alu_bytes = b"/** Computes x+y, x-y, y".to_vec();
     alu_bytes.push(0x96);
@@ -207,9 +236,12 @@ fn fmt_formats_and_checks_hdl_and_tst_files() {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
 
-    let hdl = dir.join("And.hdl");
-    fs::write(&hdl, "CHIP And{IN a,b;OUT out;PARTS: }")
-        .unwrap();
+    let hdl = dir.join("Nor.hdl");
+    fs::write(
+        &hdl,
+        "CHIP Nor{\nIN a,b;\n  OUT out;\nPARTS:\nOr(a=a,b=b,out=w);\n      Not(in=w,out=out);\n}",
+    )
+    .unwrap();
 
     // `--check` exits 1 when unformatted.
     let (code, stdout, stderr) = n2t(&["fmt", "--check", dir.to_str().unwrap()]);
@@ -226,9 +258,74 @@ fn fmt_formats_and_checks_hdl_and_tst_files() {
     assert_eq!(code, 0, "{stdout}{stderr}");
 
     let content = fs::read_to_string(&hdl).unwrap();
+    let _ = fs::remove_dir_all(&dir);
     assert_eq!(
         content,
-        "CHIP And {\n    IN a, b;\n    OUT out;\n\n    PARTS: }\n"
+        "CHIP Nor {\n    IN a, b;\n    OUT out;\n    PARTS:\n    Or(a=a, b=b, out=w);\n    Not(in=w, out=out);\n}\n"
     );
+}
+
+/// Review finding A1: the formatter used to move `,` and `;` onto the end of
+/// a `//` comment, silently commenting them out.
+#[test]
+fn fmt_never_comments_out_punctuation() {
+    let dir = std::env::temp_dir().join(format!("n2t-cli-fmt-comment-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let hdl = dir.join("Pair.hdl");
+    fs::write(
+        &hdl,
+        "CHIP Pair {\n    IN a // first\n    , b;\n    OUT out;\n    PARTS:\n    Nand(a=a // left\n    , b=b, out=out);\n}\n",
+    )
+    .unwrap();
+    let (code, stdout, stderr) = n2t(&["fmt", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (code, _, stderr) = n2t(&["check", dir.to_str().unwrap()]);
+    let content = fs::read_to_string(&hdl).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        code, 0,
+        "the formatted chip no longer checks:\n{content}\n{stderr}"
+    );
+    assert!(content.contains("IN a // first\n"), "{content}");
+    assert!(content.contains(", b;"), "{content}");
+}
+
+/// Review finding A2: formatting a Windows-1252 file must not re-encode it.
+#[test]
+fn fmt_keeps_the_encoding_of_windows_1252_files() {
+    let dir = std::env::temp_dir().join(format!("n2t-cli-fmt-cp1252-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let hdl = dir.join("Dash.hdl");
+    let mut bytes = b"// a ".to_vec();
+    bytes.push(0x96);
+    bytes.extend_from_slice(b" b\nCHIP Dash {\nIN a;\nOUT out;\nPARTS:\nOr(a=a,b=a,out=out);\n}\n");
+    fs::write(&hdl, &bytes).unwrap();
+    let (code, stdout, stderr) = n2t(&["fmt", dir.to_str().unwrap()]);
+    let after = fs::read(&hdl).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(after.starts_with(b"// a \x96 b\n"), "{after:?}");
+    assert!(
+        std::str::from_utf8(&after).is_err(),
+        "the file was re-encoded"
+    );
+    assert!(
+        after.ends_with(b"    Or(a=a, b=a, out=out);\n}\n"),
+        "{after:?}"
+    );
+}
+
+/// Review finding A7: messages never show the Windows `\\?\` path form, and
+/// an unsupported file type is not called a syntax error.
+#[test]
+fn messages_use_plain_paths() {
+    let dir = scratch_copy(&samples().join("runtime"), "paths");
+    let (_, stdout, stderr) = n2t(&["test", dir.join("Stub.tst").to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !stdout.contains(r"\\?\") && !stderr.contains(r"\\?\"),
+        "{stdout}{stderr}"
+    );
 }

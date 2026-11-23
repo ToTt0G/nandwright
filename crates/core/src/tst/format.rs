@@ -1,24 +1,24 @@
-//! Comment-preserving formatter for `.tst` test scripts.
+//! Formatter for `.tst` test scripts.
 //!
-//! Normalizes indentation (including inside `repeat` and `while` blocks),
-//! whitespace around operators, punctuation, and format specifiers, and
-//! collapses excessive blank lines while preserving intentional command
-//! grouping on lines and every comment verbatim.
+//! Like the HDL formatter it is line-preserving (see [`crate::format`]): it
+//! fixes indentation inside `repeat`/`while` blocks and the spacing within
+//! each line, and never moves a command or a comment to another line.
 
 use crate::diagnostic::Severity;
-use crate::format::{FormatOptions, apply_line_ending, format_comment, newline_count};
-use crate::tst::lexer::TokenKind;
+use crate::format::{Class, FormatOptions, Gap, Piece, comment_key, reformat, same_tokens};
+use crate::tst::lexer::{Token, TokenKind};
 
-/// Formats a `.tst` script using the default [`FormatOptions`].
+/// Formats a `.tst` source using the default [`FormatOptions`].
 ///
-/// Returns `None` if the script contains lexical or syntax errors.
+/// Returns `None` if the source contains lexical or syntax errors.
 pub fn format(source: &str) -> Option<String> {
     format_with_options(source, &FormatOptions::default())
 }
 
-/// Formats a `.tst` script with custom [`FormatOptions`].
+/// Formats a `.tst` source with custom [`FormatOptions`].
 ///
-/// Returns `None` if the script contains lexical or syntax errors.
+/// Returns `None` if the source has lexical or syntax errors, or if the
+/// formatted text would not lex to exactly the same tokens and comments.
 pub fn format_with_options(source: &str, options: &FormatOptions) -> Option<String> {
     let parsed = crate::tst::parse(source);
     if parsed
@@ -28,230 +28,163 @@ pub fn format_with_options(source: &str, options: &FormatOptions) -> Option<Stri
     {
         return None;
     }
-
-    let mut out = String::with_capacity(source.len() + 64);
-    let mut indent_level: usize = 0;
-    let mut at_line_start = true;
-    let mut force_newline = false;
-    let mut just_opened_brace = false;
-    let mut prev_kind: Option<&TokenKind> = None;
-    let mut last_end = crate::source::bom_len(source);
-
-    for tok in &parsed.tokens {
-        if tok.kind == TokenKind::Eof {
-            break;
-        }
-        let gap = if tok.span.start > last_end {
-            &source[last_end..tok.span.start]
-        } else {
-            ""
-        };
-        let newlines = newline_count(gap);
-        let raw = tok.span.slice(source);
-
-        if tok.is_trivia() {
-            let is_line = raw.starts_with("//");
-            if !at_line_start && newlines == 0 {
-                let ind = options.indent(indent_level);
-                out.push(' ');
-                out.push_str(&format_comment(raw, &ind));
-                if is_line || raw.contains('\n') {
-                    force_newline = true;
-                }
-            } else {
-                if !out.is_empty() {
-                    if !out.ends_with('\n') {
-                        out.push('\n');
-                    }
-                    if newlines >= 2 && !just_opened_brace && !out.ends_with("\n\n") {
-                        out.push('\n');
-                    }
-                }
-                let ind = options.indent(indent_level);
-                out.push_str(&ind);
-                out.push_str(&format_comment(raw, &ind));
-                at_line_start = false;
-                force_newline = true;
-                just_opened_brace = false;
-            }
-            last_end = tok.span.end;
-            continue;
-        }
-
-        match &tok.kind {
-            TokenKind::RightBrace => {
-                indent_level = indent_level.saturating_sub(1);
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str(&options.indent(indent_level));
-                out.push('}');
-                at_line_start = false;
-                force_newline = true;
-                just_opened_brace = false;
-                prev_kind = Some(&tok.kind);
-                last_end = tok.span.end;
-                continue;
-            }
-            TokenKind::LeftBrace => {
-                if at_line_start {
-                    out.push_str(&options.indent(indent_level));
-                } else {
-                    out.push(' ');
-                }
-                out.push('{');
-                indent_level += 1;
-                at_line_start = false;
-                force_newline = true;
-                just_opened_brace = true;
-                prev_kind = Some(&tok.kind);
-                last_end = tok.span.end;
-                continue;
-            }
-            _ => {}
-        }
-
-        let start_new_line = force_newline || newlines > 0;
-        if start_new_line {
-            if !out.is_empty() {
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                if newlines >= 2 && !just_opened_brace && !out.ends_with("\n\n") {
-                    out.push('\n');
-                }
-            }
-            out.push_str(&options.indent(indent_level));
-            force_newline = false;
-            just_opened_brace = false;
-        } else if at_line_start {
-            out.push_str(&options.indent(indent_level));
-        } else if needs_space(prev_kind, &tok.kind) {
-            out.push(' ');
-        }
-
-        out.push_str(raw);
-        at_line_start = false;
-        prev_kind = Some(&tok.kind);
-        last_end = tok.span.end;
+    let pieces: Vec<Piece> = parsed.tokens.iter().filter_map(piece).collect();
+    let formatted = reformat(source, &pieces, options, &gap);
+    let after = crate::tst::lexer::lex(&formatted);
+    if !after.diagnostics.is_empty()
+        || !same_tokens(
+            &keys(source, &parsed.tokens),
+            &keys(&formatted, &after.tokens),
+        )
+    {
+        return None;
     }
-
-    if !out.is_empty() && options.trailing_newline && !out.ends_with('\n') {
-        out.push('\n');
-    }
-
-    Some(apply_line_ending(source, out))
+    Some(formatted)
 }
 
-fn needs_space(prev: Option<&TokenKind>, curr: &TokenKind) -> bool {
-    let Some(prev) = prev else {
-        return false;
+/// `ch` values for tokens that are not single punctuation characters.
+const PERCENT: u8 = b'%';
+const RELATION: u8 = b'<';
+
+fn piece(token: &Token) -> Option<Piece> {
+    use TokenKind::*;
+    let (class, ch, ends_statement) = match &token.kind {
+        Eof => return None,
+        Comment(_) | DocComment(_) => (Class::Comment, 0, false),
+        Word(_) | String { .. } => (Class::Word, 0, false),
+        Percent { .. } => (Class::Word, PERCENT, false),
+        LeftBrace => (Class::Open, b'{', true),
+        RightBrace => (Class::Close, b'}', true),
+        LeftBracket => (Class::Punct, b'[', false),
+        RightBracket => (Class::Punct, b']', false),
+        Comma => (Class::Punct, b',', true),
+        Semicolon => (Class::Punct, b';', true),
+        Bang => (Class::Punct, b'!', true),
+        Equals | Less | Greater | LessEqual | GreaterEqual | NotEqual => {
+            (Class::Punct, RELATION, false)
+        }
     };
-    if matches!(
-        curr,
-        TokenKind::Comma
-            | TokenKind::Semicolon
-            | TokenKind::Bang
-            | TokenKind::LeftBracket
-            | TokenKind::RightBracket
-    ) {
-        return false;
+    Some(Piece {
+        span: token.span,
+        class,
+        ch,
+        ends_statement,
+    })
+}
+
+fn gap(previous: &Piece, next: &Piece) -> Gap {
+    if matches!(next.ch, b',' | b';' | b'!' | b']') || previous.ch == b'[' {
+        return Gap::None;
     }
-    if matches!(prev, TokenKind::LeftBracket) {
-        return false;
+    // `RAM16K[3]` and `a%B3.1.3` are written without a space, `set in %B0101`
+    // with one: keep what the script has.
+    if next.ch == b'[' || next.ch == PERCENT || previous.ch == b']' {
+        return Gap::Keep;
     }
-    // Output format specifiers (`a%B3.1.3`, `RAM16K[0]%D1.7.1`) attach directly
-    // to their variable; radix integer literals (`%B101`, `%X00FF`) take a space.
-    if matches!(curr, TokenKind::Percent { body, .. } if body.contains('.'))
-        && matches!(prev, TokenKind::Word(_) | TokenKind::RightBracket)
-    {
-        return false;
-    }
-    true
+    Gap::One
+}
+
+fn keys(source: &str, tokens: &[Token]) -> Vec<(u8, String)> {
+    tokens
+        .iter()
+        .filter(|t| t.kind != TokenKind::Eof)
+        .map(|t| {
+            let text = t.span.slice(source);
+            if t.is_trivia() {
+                (1, comment_key(text))
+            } else {
+                (0, text.to_string())
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn formats_messy_tst_script() {
-        let input = "\
-// Header
-load   And.hdl ,
-output-file And.out ,
-compare-to   And.cmp,
-output-list   a %B3.1.3   b%B3.1.3   out%B3.1.3 ;
-
-
-set a   0, set b   1,   eval ,output ;
-repeat 10{
-tick,   tock , output ;
-}
-";
-        let expected = "\
-// Header
-load And.hdl,
-output-file And.out,
-compare-to And.cmp,
-output-list a%B3.1.3 b%B3.1.3 out%B3.1.3;
-
-set a 0, set b 1, eval, output;
-repeat 10 {
-    tick, tock, output;
-}
-";
-        let formatted = format(input).expect("valid tst should format");
-        assert_eq!(formatted, expected);
-        assert_eq!(format(&formatted).as_deref(), Some(expected));
+    fn fmt(source: &str) -> String {
+        format(source).expect("the source should format")
     }
 
     #[test]
-    fn formats_radix_literals_and_while_loops() {
-        let input = "set x %B1010, set y %X00FF, while time<>%S\"6\"{tick,tock;}";
-        let expected = "\
-set x %B1010, set y %X00FF, while time <> %S\"6\" {
-    tick, tock;
-}
-";
-        let formatted = format(input).unwrap();
-        assert_eq!(formatted, expected);
-        assert_eq!(format(&formatted).as_deref(), Some(expected));
+    fn formats_a_messy_script() {
+        let source = "load Majority.hdl ,\noutput-file Majority.out,\n  compare-to Majority.cmp ,\noutput-list a%B3.1.3 b%B3.1.3   out%B3.1.3 ;\n\n\n\nset a 0 ,set b 1,  eval ,output ;\nrepeat 3 {\ntick , tock ,\n   output;\n}\n";
+        assert_eq!(
+            fmt(source),
+            "load Majority.hdl,\noutput-file Majority.out,\ncompare-to Majority.cmp,\noutput-list a%B3.1.3 b%B3.1.3 out%B3.1.3;\n\nset a 0, set b 1, eval, output;\nrepeat 3 {\n    tick, tock,\n    output;\n}\n"
+        );
     }
 
     #[test]
-    fn refuses_to_format_syntax_errors() {
-        assert!(format("load And.hdl\noutput-file And.out,").is_none());
-    }
-
-    #[test]
-    fn formats_all_sample_project_tst_files_idempotently() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/projects");
-        let mut count = 0;
-        let mut stack = vec![root];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap().map(Result::unwrap) {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else if path.extension().is_some_and(|e| e == "tst") {
-                    count += 1;
-                    let src = std::fs::read_to_string(&path).unwrap();
-                    let once = format(&src)
-                        .unwrap_or_else(|| panic!("failed to format {}", path.display()));
-                    let twice = format(&once)
-                        .unwrap_or_else(|| panic!("failed second format {}", path.display()));
-                    assert_eq!(once, twice, "not idempotent for {}", path.display());
-                    let reparsed = crate::tst::parse(&once);
-                    assert!(
-                        reparsed.diagnostics.is_empty(),
-                        "formatted {} had diagnostics: {:?}",
-                        path.display(),
-                        reparsed.diagnostics
-                    );
-                }
-            }
+    fn keeps_comments_values_and_state_access() {
+        let source = "// header\nload Counter.hdl;   // the chip\n/* block\n   comment */\nset in %B0101, set RAM16K[3] -1, set PC[] 5;\nwhile out <> 75 {\n  eval, // wait\n}\noutput-list time%S1.4.1\n            in%D1.6.1;\n";
+        let formatted = fmt(source);
+        for needle in [
+            "// header\n",
+            "load Counter.hdl;   // the chip\n",
+            "/* block\n   comment */\n",
+            "set in %B0101, set RAM16K[3] -1, set PC[] 5;\n",
+            "while out <> 75 {\n    eval, // wait\n}\n",
+            "output-list time%S1.4.1\n            in%D1.6.1;\n",
+        ] {
+            assert!(
+                formatted.contains(needle),
+                "missing {needle:?} in:\n{formatted}"
+            );
         }
-        assert!(count >= 30, "expected >= 30 sample tst files, got {count}");
+        assert_eq!(fmt(&formatted), formatted);
+    }
+
+    #[test]
+    fn refuses_syntax_errors() {
+        assert_eq!(format("repeat {\n"), None);
+        assert_eq!(format("load \"unterminated"), None);
+    }
+
+    #[test]
+    fn never_changes_tokens_on_mutated_input() {
+        let seed = "// t\nload Mix.hdl, output-file Mix.out, compare-to Mix.cmp,\noutput-list in%B1.4.1 out%D2.6.2 RAM8[2]%X1.4.1;\nset in %B0101, eval, output;\nrepeat 2 { tick, tock; } /* c\n d */ while out <> 3 { eval, }\necho \"a b\"; breakpoint out 4; clear-breakpoints;\n";
+        let inserts = [
+            "//x\n", " ", "\t", "\n", "\r\n", "/*y*/", ",", ";", " // c", "\n\n\n", "!",
+        ];
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut formatted_count = 0;
+        for _ in 0..4000 {
+            let mut text = seed.to_string();
+            for _ in 0..(next() % 4 + 1) {
+                let at = (next() as usize) % (text.len() + 1);
+                if !text.is_char_boundary(at) {
+                    continue;
+                }
+                text.insert_str(at, inserts[(next() as usize) % inserts.len()]);
+            }
+            let Some(formatted) = format(&text) else {
+                continue;
+            };
+            formatted_count += 1;
+            let before = crate::tst::lexer::lex(&text);
+            let after = crate::tst::lexer::lex(&formatted);
+            assert_eq!(
+                keys(&text, &before.tokens),
+                keys(&formatted, &after.tokens),
+                "tokens changed for:\n{text}\n---\n{formatted}"
+            );
+            assert_eq!(
+                format(&formatted).as_deref(),
+                Some(formatted.as_str()),
+                "not idempotent for:\n{text}"
+            );
+        }
+        assert!(
+            formatted_count > 500,
+            "only {formatted_count} inputs formatted"
+        );
     }
 }

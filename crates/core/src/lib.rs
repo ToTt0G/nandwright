@@ -9,9 +9,11 @@ pub mod builtins;
 pub mod diagnostic;
 pub mod format;
 pub mod hdl;
+pub mod host;
 pub mod source;
 pub mod tst;
 
 pub use diagnostic::{Diagnostic, DiagnosticCode, Severity};
 pub use format::FormatOptions;
+pub use host::{Host, HostError, SharedHost};
 pub use source::{LineIndex, Position, Span};

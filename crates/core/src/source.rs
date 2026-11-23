@@ -177,32 +177,3 @@ fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
 pub(crate) fn bom_len(text: &str) -> usize {
     if text.starts_with('\u{FEFF}') { 3 } else { 0 }
 }
-
-/// Reads a text file as UTF-8, falling back to Windows-1252 decoding for
-/// legacy Nand to Tetris files (such as `tools/builtInChips/ALU.hdl`).
-pub fn read_text_file(path: &std::path::Path) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    match String::from_utf8(bytes) {
-        Ok(text) => Ok(text),
-        Err(err) => Ok(decode_windows_1252(err.as_bytes())),
-    }
-}
-
-fn decode_windows_1252(bytes: &[u8]) -> String {
-    const CP1252_80_9F: [char; 32] = [
-        '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
-        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}',
-        '\u{017D}', '\u{FFFD}', '\u{FFFD}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}',
-        '\u{2022}', '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
-        '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
-    ];
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if (0x80..=0x9F).contains(&b) {
-            out.push(CP1252_80_9F[(b - 0x80) as usize]);
-        } else {
-            out.push(char::from(b));
-        }
-    }
-    out
-}

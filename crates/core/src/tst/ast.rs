@@ -17,7 +17,73 @@ pub struct Script {
     pub statements: Vec<Statement>,
 }
 
+/// Which simulator a script is written for.
+///
+/// The official suite has three programs that each read their own dialect of
+/// the test language, and the student has to open a script in the right one.
+/// Here the dialect is read off the script itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Dialect {
+    /// The Hardware Simulator: `load Xxx.hdl`, `eval`, `tick`, `tock`.
+    Hardware,
+    /// The CPU Emulator: `load Xxx.asm` or `Xxx.hack`, `ticktock`.
+    Cpu,
+    /// The VM Emulator: `load Xxx.vm`, a folder, or nothing; `vmstep`.
+    Vm,
+}
+
+impl Dialect {
+    /// The name of the official tool that runs this dialect.
+    pub fn tool(self) -> &'static str {
+        match self {
+            Dialect::Hardware => "Hardware Simulator",
+            Dialect::Cpu => "CPU Emulator",
+            Dialect::Vm => "VM Emulator",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Dialect::Hardware => "hardware",
+            Dialect::Cpu => "cpu",
+            Dialect::Vm => "vm",
+        }
+    }
+}
+
 impl Script {
+    /// The dialect of the script: decided by what its first `load` names, or,
+    /// if it loads nothing recognisable, by the stepping commands it uses.
+    pub fn dialect(&self) -> Dialect {
+        for statement in self.simple_statements() {
+            if let Command::Load(file) = &statement.command {
+                match file.extension().map(str::to_ascii_lowercase).as_deref() {
+                    Some("hdl") => return Dialect::Hardware,
+                    Some("asm" | "hack") => return Dialect::Cpu,
+                    Some("vm") => return Dialect::Vm,
+                    _ => {}
+                }
+            }
+        }
+        let mut loads_folder = false;
+        for statement in self.simple_statements() {
+            match &statement.command {
+                Command::TickTock => return Dialect::Cpu,
+                Command::VmStep => return Dialect::Vm,
+                Command::Eval | Command::Tick | Command::Tock | Command::BuiltinMethod { .. } => {
+                    return Dialect::Hardware;
+                }
+                Command::Load(_) => loads_folder = true,
+                _ => {}
+            }
+        }
+        if loads_folder {
+            Dialect::Vm
+        } else {
+            Dialect::Hardware
+        }
+    }
+
     /// Every simple statement in source order, including loop bodies.
     pub fn simple_statements(&self) -> impl Iterator<Item = &SimpleStatement> {
         self.statements
@@ -181,7 +247,8 @@ impl Scalar {
 
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// `load Xxx.hdl`
+    /// `load Xxx.hdl`, `load Xxx.asm`, `load Xxx.hack`, `load Xxx.vm`,
+    /// `load Folder`, or a bare `load` (an empty name: the script's folder).
     Load(FileName),
     /// `output-file Xxx.out`
     OutputFile(FileName),
@@ -198,6 +265,10 @@ pub enum Command {
     Output,
     Tick,
     Tock,
+    /// One CPU instruction (CPU Emulator).
+    TickTock,
+    /// One VM command (VM Emulator).
+    VmStep,
     /// `echo "text"`
     Echo(StringLiteral),
     ClearEcho,
@@ -211,12 +282,6 @@ pub enum Command {
     BuiltinMethod {
         target: Ident,
         method: Ident,
-        arguments: Vec<Argument>,
-    },
-    /// A command from another dialect (`ticktock`, `vmstep`) — parsed so it
-    /// can be reported, never executable on the hardware backend.
-    Unsupported {
-        name: Ident,
         arguments: Vec<Argument>,
     },
 }
@@ -233,12 +298,13 @@ impl Command {
             Command::Output => "output",
             Command::Tick => "tick",
             Command::Tock => "tock",
+            Command::TickTock => "ticktock",
+            Command::VmStep => "vmstep",
             Command::Echo(_) => "echo",
             Command::ClearEcho => "clear-echo",
             Command::Breakpoint { .. } => "breakpoint",
             Command::ClearBreakpoints => "clear-breakpoints",
             Command::BuiltinMethod { .. } => "built-in method",
-            Command::Unsupported { .. } => "unsupported command",
         }
     }
 }

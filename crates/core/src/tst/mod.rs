@@ -1,15 +1,17 @@
 //! The `.tst` front-end: lexer, parser and static analysis of test scripts
-//! for the hardware simulator dialect.
+//! for the Hardware Simulator, CPU Emulator and VM Emulator dialects.
 //!
 //! Commands, format letters and variable names are matched case-insensitively
 //! (with exact-case preference for HDL names); file names are exact.
 
 pub mod ast;
+pub mod emulator;
 pub mod format;
 pub mod lexer;
 pub mod parser;
 pub mod semantic;
 
+pub use ast::Dialect;
 pub use format::{format as format_source, format_with_options};
 pub use semantic::{ChipLoader, ScriptAnalysis, analyze};
 

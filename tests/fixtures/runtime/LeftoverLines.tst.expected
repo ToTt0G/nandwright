@@ -1,2 +1,1 @@
-failed: comparison failure at line 3: the script ended, but the compare file expects more output:
-  expected: | 1 | 1 | 1 |
+passed (2 lines compared; 1 compare line(s) never reached)

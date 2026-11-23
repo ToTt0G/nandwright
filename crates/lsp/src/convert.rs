@@ -1,7 +1,5 @@
 //! Conversions between core types and LSP types.
 
-use std::path::{Path, PathBuf};
-
 use lsp_types as lsp;
 use lsp_types::Url;
 use n2t_core::diagnostic::{Diagnostic, Severity};
@@ -46,29 +44,59 @@ pub fn range_in(text: &str, span: Span) -> lsp::Range {
     Text::new(text, &lines).range(span)
 }
 
-pub fn path_to_url(path: &Path) -> Option<Url> {
-    Url::from_file_path(path).ok()
+/// The scheme of the read-only documents that show a built-in chip's
+/// interface (`n2t-builtin:/And.hdl`). The editor serves their content from
+/// the `n2t/builtinSource` request.
+pub const BUILTIN_SCHEME: &str = "n2t-builtin";
+
+/// Characters a path segment may keep unescaped in a `file:` URL.
+const PATH_SEGMENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~')
+    .remove(b'/');
+
+/// The `file:` URL of an engine-form path (see [`n2t_core::host`]):
+/// `C:/Users/me/And.hdl` becomes `file:///C:/Users/me/And.hdl`,
+/// `//server/share/And.hdl` becomes `file://server/share/And.hdl`.
+pub fn path_to_url(path: &str) -> Option<Url> {
+    let encode = |text: &str| percent_encoding::utf8_percent_encode(text, PATH_SEGMENT).to_string();
+    let text = if let Some(unc) = path.strip_prefix("//") {
+        let (host, rest) = unc.split_once('/').unwrap_or((unc, ""));
+        format!("file://{host}/{}", encode(rest))
+    } else if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        format!("file:///{}:{}", &path[..1], encode(&path[2..]))
+    } else if path.starts_with('/') {
+        format!("file://{}", encode(path))
+    } else {
+        return None;
+    };
+    Url::parse(&text).ok()
 }
 
-pub fn url_to_path(url: &Url) -> Option<PathBuf> {
+/// The engine-form path of a `file:` URL, as editors write them: VS Code
+/// sends `file:///c%3A/Users/me/My%20Chips/And.hdl` on Windows.
+pub fn url_to_path(url: &Url) -> Option<String> {
     if url.scheme() != "file" {
         return None;
     }
-    url.to_file_path().ok()
-}
-
-/// Canonicalises a path whose file may not exist yet (canonicalising the parent).
-pub fn canonical_path(path: &Path) -> PathBuf {
-    if let Ok(p) = path.canonicalize() {
-        return p;
+    let decoded = percent_encoding::percent_decode_str(url.path())
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    if let Some(host) = url.host_str()
+        && !host.is_empty()
+        && host != "localhost"
+    {
+        return Some(format!("//{host}{decoded}"));
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) => parent
-            .canonicalize()
-            .unwrap_or_else(|_| parent.to_path_buf())
-            .join(name),
-        _ => path.to_path_buf(),
+    let bytes = decoded.as_bytes();
+    // `/c:/Users/...` is a Windows drive path with a leading slash.
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        return Some(n2t_core::host::path::normalize(&decoded[1..]));
     }
+    Some(n2t_core::host::path::normalize(&decoded))
 }
 
 fn severity(severity: Severity) -> lsp::DiagnosticSeverity {
@@ -147,4 +175,44 @@ pub fn clean_doc(doc: &str) -> String {
         .rposition(|l| !l.trim().is_empty())
         .map_or(start, |e| e + 1);
     lines[start..end].join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(url: &str, path: &str) {
+        let parsed = Url::parse(url).unwrap();
+        assert_eq!(url_to_path(&parsed).as_deref(), Some(path), "{url}");
+        let back = path_to_url(path).unwrap();
+        assert_eq!(url_to_path(&back).as_deref(), Some(path), "{back}");
+    }
+
+    #[test]
+    fn converts_file_urls_on_every_platform() {
+        // What VS Code sends on Windows: lower-case drive, encoded colon.
+        round_trip(
+            "file:///c%3A/Users/me/OneDrive%20-%20Uni/nand2tetris/projects/01/And.hdl",
+            "c:/Users/me/OneDrive - Uni/nand2tetris/projects/01/And.hdl",
+        );
+        round_trip("file:///C:/course/And.hdl", "C:/course/And.hdl");
+        round_trip("file:///home/me/n2t/01/And.hdl", "/home/me/n2t/01/And.hdl");
+        round_trip(
+            "file://server/share/n2t/And.hdl",
+            "//server/share/n2t/And.hdl",
+        );
+        round_trip(
+            "file:///home/me/caf%C3%A9%20%23%251/And.hdl",
+            "/home/me/caf\u{e9} #%1/And.hdl",
+        );
+        assert_eq!(
+            path_to_url("c:/My Chips/And.hdl").unwrap().as_str(),
+            "file:///c:/My%20Chips/And.hdl"
+        );
+        assert_eq!(
+            url_to_path(&Url::parse("untitled:Untitled-1").unwrap()),
+            None
+        );
+        assert_eq!(path_to_url("relative/And.hdl"), None);
+    }
 }

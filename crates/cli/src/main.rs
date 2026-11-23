@@ -1,4 +1,8 @@
-//! `n2t` — command-line tools for Nand to Tetris hardware projects.
+//! `n2t`: the Nandwright engine on the command line.
+//!
+//! The same engine ships inside the VS Code extension as WebAssembly. This
+//! native build exists for the test suite and for the conformance harness,
+//! which diffs it against the official Java tools.
 
 mod report;
 
@@ -10,13 +14,16 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use n2t_core::Severity;
 use n2t_core::builtins::BuiltinLibrary;
-use n2t_core::hdl::definition::NetKind;
-use n2t_core::hdl::resolve::{FsSourceProvider, SourceFile, is_valid_chip_name};
+use n2t_core::hdl::resolve::{HostSourceProvider, SourceFile, is_valid_chip_name};
 use n2t_core::hdl::{Elaborator, ElaboratorOptions};
-use n2t_simulator::runner::{Event, load_failure};
+use n2t_core::host::{Encoding, SharedHost, StdHost, decode_text, encode_text, path};
+use n2t_core::source::LineIndex;
+use n2t_simulator::runner::Event;
 use n2t_simulator::{
-    BuiltinRegistry, Circuit, Outcome, RunnerOptions, ScriptRunner, StartError, SuspendReason,
+    HardwareMachine, Machine, Newline, Outcome, Role, RunnerOptions, ScriptRunner, StartError,
+    SuspendReason,
 };
+use serde_json::json;
 
 use crate::report::Reporter;
 
@@ -24,7 +31,7 @@ use crate::report::Reporter;
 #[command(
     name = "n2t",
     version,
-    about = "Nand to Tetris HDL and test-script tools"
+    about = "Nand to Tetris tools: check, test, evaluate and format"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -37,9 +44,6 @@ enum Command {
     Check {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Report empty `PARTS:` stubs as warnings rather than errors.
-        #[arg(long)]
-        allow_stubs: bool,
         /// Exit with failure if there are warnings.
         #[arg(long)]
         deny_warnings: bool,
@@ -49,7 +53,7 @@ enum Command {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         /// Stop a script after this many commands (guards against infinite loops).
-        #[arg(long, default_value_t = 10_000_000)]
+        #[arg(long, default_value_t = 50_000_000)]
         max_commands: u64,
         /// Treat scripts without `compare-to` as failures.
         #[arg(long)]
@@ -57,11 +61,18 @@ enum Command {
         /// Treat `!` pauses and breakpoints as failures instead of continuing.
         #[arg(long)]
         strict_pauses: bool,
-        /// Comma-separated keys or numeric keycodes to feed to interactive Keyboard wait loops (e.g. `--keys K,Y` for `Memory.tst`).
-        #[arg(long, value_delimiter = ',')]
-        keys: Vec<String>,
+        /// Do not press the key a script is waiting for (as the official
+        /// tools require a person to).
+        #[arg(long)]
+        no_keys: bool,
+        /// Write `.out` files with CRLF line endings, as the official tools do on Windows.
+        #[arg(long)]
+        crlf: bool,
+        /// Print one JSON object per script instead of text.
+        #[arg(long)]
+        json: bool,
     },
-    /// Load a chip, set inputs, evaluate, and print its outputs.
+    /// Load a chip, set inputs, evaluate, and print its pins.
     Eval {
         /// The chip's `.hdl` file.
         chip: PathBuf,
@@ -84,9 +95,6 @@ enum Command {
         /// Indent with tabs instead of spaces.
         #[arg(long)]
         tabs: bool,
-        /// Maximum line width before wrapping long lists.
-        #[arg(long, default_value_t = 100)]
-        max_width: usize,
     },
     /// List the built-in chips.
     Builtins,
@@ -99,16 +107,27 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Check {
             paths,
-            allow_stubs,
             deny_warnings,
-        } => check(&paths, allow_stubs, deny_warnings),
+        } => check(&paths, deny_warnings),
         Command::Test {
             paths,
             max_commands,
             require_compare,
             strict_pauses,
-            keys,
-        } => test(&paths, max_commands, require_compare, strict_pauses, &keys),
+            no_keys,
+            crlf,
+            json,
+        } => test(
+            &paths,
+            &TestOptions {
+                max_commands,
+                require_compare,
+                strict_pauses,
+                auto_keyboard: !no_keys,
+                crlf,
+                json,
+            },
+        ),
         Command::Eval {
             chip,
             inputs,
@@ -119,8 +138,7 @@ fn main() -> ExitCode {
             check,
             indent,
             tabs,
-            max_width,
-        } => fmt(&paths, check, indent, tabs, max_width),
+        } => fmt(&paths, check, indent, tabs),
         Command::Builtins => {
             for chip in BuiltinLibrary::standard().iter() {
                 println!("{}", chip.interface);
@@ -141,29 +159,37 @@ fn main() -> ExitCode {
     }
 }
 
-/// Expands directories into the files with one of `extensions`, sorted.
-fn collect(paths: &[PathBuf], extensions: &[&str]) -> Result<Vec<PathBuf>, String> {
-    fn walk(dir: &Path, extensions: &[&str], out: &mut Vec<PathBuf>) -> Result<(), String> {
-        let entries =
-            std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
+fn host() -> SharedHost {
+    Arc::new(StdHost)
+}
+
+/// Files with one of `extensions` under the given paths, as engine-form
+/// absolute paths, sorted.
+fn collect(paths: &[PathBuf], extensions: &[&str]) -> Result<Vec<String>, String> {
+    fn walk(dir: &Path, extensions: &[&str], out: &mut Vec<String>) -> Result<(), String> {
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read `{}`: {e}", display_native(dir)))?;
         for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, extensions, out)?;
-            } else if has_extension(&path, extensions) {
-                out.push(path);
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                walk(&entry_path, extensions, out)?;
+            } else {
+                let file = StdHost::absolute(&entry_path);
+                if extensions.iter().any(|e| path::has_extension(&file, e)) {
+                    out.push(file);
+                }
             }
         }
         Ok(())
     }
     let mut files = Vec::new();
-    for path in paths {
-        if path.is_dir() {
-            walk(path, extensions, &mut files)?;
-        } else if path.exists() {
-            files.push(path.clone());
+    for item in paths {
+        if item.is_dir() {
+            walk(item, extensions, &mut files)?;
+        } else if item.exists() {
+            files.push(StdHost::absolute(item));
         } else {
-            return Err(format!("`{}` does not exist", path.display()));
+            return Err(format!("`{}` does not exist", display_native(item)));
         }
     }
     files.sort();
@@ -171,64 +197,54 @@ fn collect(paths: &[PathBuf], extensions: &[&str]) -> Result<Vec<PathBuf>, Strin
     Ok(files)
 }
 
-fn has_extension(path: &Path, extensions: &[&str]) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| extensions.contains(&e))
+fn display_native(native: &Path) -> String {
+    display(&StdHost::absolute(native))
 }
 
-fn display(path: &Path) -> String {
-    let cwd = std::env::current_dir().ok();
-    cwd.and_then(|c| path.strip_prefix(c).ok().map(|p| p.display().to_string()))
-        .unwrap_or_else(|| path.display().to_string())
+/// A path as shown to the user: relative to the working directory when it is
+/// inside it. Never the `\\?\` form.
+fn display(file: &str) -> String {
+    let cwd = std::env::current_dir()
+        .map(|c| StdHost::absolute(&c))
+        .unwrap_or_default();
+    path::relative_to(file, &cwd).to_string()
 }
 
-fn stem(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn project_dir(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+fn read(file: &str) -> Result<n2t_core::host::TextFile, String> {
+    std::fs::read(file)
+        .map(decode_text)
+        .map_err(|e| format!("cannot read `{}`: {e}", display(file)))
 }
 
 // -------------------------------------------------------------------------
 // check
 // -------------------------------------------------------------------------
 
-fn check(paths: &[PathBuf], allow_stubs: bool, deny_warnings: bool) -> Result<bool, String> {
+fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
     let files = collect(paths, &["hdl", "tst"])?;
     let builtins = Arc::new(BuiltinLibrary::standard());
-    let options = if allow_stubs {
-        ElaboratorOptions::editor()
-    } else {
-        ElaboratorOptions::default()
-    };
-    let mut by_dir: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    let mut by_dir: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in files {
-        by_dir.entry(project_dir(&file)).or_default().push(file);
+        by_dir
+            .entry(path::dir(&file).to_string())
+            .or_default()
+            .push(file);
     }
 
     let mut reporter = Reporter::new();
     let mut checked = 0;
     for (dir, files) in by_dir {
         let mut elaborator = Elaborator::with_options(
-            FsSourceProvider::new(&dir),
+            HostSourceProvider::new(host(), &dir),
             builtins.clone(),
-            options.clone(),
+            ElaboratorOptions::editor(),
         );
         for file in files {
             checked += 1;
-            let text = n2t_core::source::read_text_file(&file)
-                .map_err(|e| format!("cannot read `{}`: {e}", file.display()))?;
+            let text = read(&file)?.text;
             let shown = display(&file);
-            if has_extension(&file, &["hdl"]) {
-                let name = stem(&file);
+            if path::has_extension(&file, "hdl") {
+                let name = path::stem(&file).to_string();
                 let unit = if is_valid_chip_name(&name) {
                     elaborator.compile(&name)
                 } else {
@@ -273,151 +289,208 @@ fn check(paths: &[PathBuf], allow_stubs: bool, deny_warnings: bool) -> Result<bo
 // test
 // -------------------------------------------------------------------------
 
-fn parse_key(spec: &str) -> Result<u16, String> {
-    let trimmed = spec.trim();
-    if let Ok(code) = trimmed.parse::<u16>() {
-        return Ok(code);
-    }
-    let mut chars = trimmed.chars();
-    if let (Some(c), None) = (chars.next(), chars.next())
-        && (c as u32) <= u16::MAX as u32
-    {
-        return Ok(c as u16);
-    }
-    Err(format!(
-        "invalid key `{spec}`: expected a single character (e.g. `K`) or numeric Hack keycode (e.g. `75`)"
-    ))
-}
-
-fn test(
-    paths: &[PathBuf],
+struct TestOptions {
     max_commands: u64,
     require_compare: bool,
     strict_pauses: bool,
-    keys: &[String],
-) -> Result<bool, String> {
-    let key_codes: Vec<u16> = keys
-        .iter()
-        .map(|k| parse_key(k))
-        .collect::<Result<Vec<_>, _>>()?;
+    auto_keyboard: bool,
+    crlf: bool,
+    json: bool,
+}
+
+/// The name of a key code, for messages.
+fn key_name(code: u16) -> String {
+    match char::from_u32(code as u32) {
+        Some(c) if (33..127).contains(&code) => format!("'{c}'"),
+        _ => format!("code {code}"),
+    }
+}
+
+fn test(paths: &[PathBuf], options: &TestOptions) -> Result<bool, String> {
     let scripts = collect(paths, &["tst"])?;
     if scripts.is_empty() {
         return Err("no `.tst` files found".into());
     }
-    let builtins = Arc::new(BuiltinLibrary::standard());
-    let registry = BuiltinRegistry::standard();
     let mut reporter = Reporter::new();
     let (mut passed, mut failed) = (0, 0);
 
     for script in &scripts {
         let shown = display(script);
-        let source = n2t_core::source::read_text_file(script).unwrap_or_default();
-        let options = RunnerOptions {
-            max_commands: Some(max_commands),
-            cancel: None,
+        let source = read(script).map(|f| f.text).unwrap_or_default();
+        let lines = LineIndex::new(&source);
+        let position =
+            |span: Option<n2t_core::Span>| span.map(|s| lines.line_col_one_based(&source, s.start));
+        let runner_options = RunnerOptions {
+            max_commands: Some(options.max_commands),
+            newline: if options.crlf {
+                Newline::CrLf
+            } else {
+                Newline::Lf
+            },
+            auto_keyboard: options.auto_keyboard,
+            ..Default::default()
         };
-        let mut runner =
-            match ScriptRunner::open(script, builtins.clone(), registry.clone(), options) {
-                Ok(runner) => runner,
-                Err(StartError::Syntax(diagnostics)) => {
-                    for d in &diagnostics {
+        let mut runner = match ScriptRunner::open(host(), script, runner_options) {
+            Ok(runner) => runner,
+            Err(e) => {
+                failed += 1;
+                if options.json {
+                    let (message, at) = match &e {
+                        StartError::Syntax(diagnostics) => {
+                            let first = diagnostics.iter().find(|d| d.is_error());
+                            (
+                                first.map_or_else(|| e.to_string(), |d| d.message.clone()),
+                                position(first.and_then(|d| d.span)),
+                            )
+                        }
+                        other => (other.to_string(), None),
+                    };
+                    let mut error = json!({ "message": message });
+                    if let Some((line, column)) = at {
+                        error["line"] = json!(line);
+                        error["column"] = json!(column);
+                    }
+                    println!(
+                        "{}",
+                        json!({ "script": script, "outcome": "error", "error": error })
+                    );
+                } else if let StartError::Syntax(diagnostics) = &e {
+                    for d in diagnostics {
                         reporter.diagnostic(&shown, &source, d);
                     }
                     println!("{} {shown} (syntax errors)", reporter.red("FAIL"));
-                    failed += 1;
-                    continue;
-                }
-                Err(e) => {
+                } else {
                     println!("{} {shown}: {e}", reporter.red("FAIL"));
-                    failed += 1;
-                    continue;
                 }
-            };
+                continue;
+            }
+        };
 
         let mut pauses = 0;
-        let outcome = if key_codes.is_empty() {
-            loop {
-                match runner.run() {
-                    Outcome::Suspended {
-                        reason: SuspendReason::Pause | SuspendReason::Breakpoint,
-                        ..
-                    } if !strict_pauses => pauses += 1,
-                    outcome => break outcome,
+        let mut keys = Vec::new();
+        let outcome = loop {
+            let outcome = runner.run();
+            for event in runner.take_events() {
+                if let Event::KeyPressed(code) = event {
+                    keys.push(code);
                 }
             }
-        } else {
-            let mut key_idx = 0usize;
-            let mut key_held = false;
-            loop {
-                let outcome = runner.step_command();
-                let events = runner.take_events();
-                for event in &events {
-                    if let Event::OutputLine(_) = event
-                        && key_held
-                        && !runner.in_while_loop()
-                    {
-                        if let Some(c) = runner.circuit_mut() {
-                            c.set_key(0);
-                        }
-                        key_held = false;
-                        key_idx += 1;
-                    }
-                }
-                match outcome {
-                    Outcome::Suspended {
-                        reason: SuspendReason::StepEnd,
-                        ..
-                    } => {
-                        // A `while` loop that completes an iteration while an echo prompt
-                        // is active indicates an interactive keyboard wait loop (such as
-                        // `Memory.tst`, with either `eval,` or `eval;`/`tick, tock;`).
-                        if !key_held
-                            && runner.in_while_loop()
-                            && runner.loop_iteration() >= 1
-                            && runner.echo().is_some()
-                            && let Some(&code) = key_codes.get(key_idx)
-                        {
-                            if let Some(c) = runner.circuit_mut() {
-                                c.set_key(code);
-                            }
-                            key_held = true;
-                        }
-                    }
-                    Outcome::Suspended {
-                        reason: SuspendReason::Pause | SuspendReason::Breakpoint,
-                        ..
-                    } if !strict_pauses => pauses += 1,
-                    other => break other,
-                }
+            match outcome {
+                Outcome::Suspended {
+                    reason: SuspendReason::Pause | SuspendReason::Breakpoint,
+                    ..
+                } if !options.strict_pauses => pauses += 1,
+                outcome => break outcome,
             }
         };
         let last_echo = runner.echo().map(str::to_string);
-        let note = if pauses > 0 {
-            format!(
+        let mut note = String::new();
+        if pauses > 0 {
+            note.push_str(&format!(
                 " [continued past {pauses} pause{}]",
                 if pauses == 1 { "" } else { "s" }
-            )
-        } else {
-            String::new()
-        };
+            ));
+        }
+        if !keys.is_empty() {
+            let names: Vec<String> = keys.iter().map(|&k| key_name(k)).collect();
+            note.push_str(&format!(" [pressed {} for the script]", names.join(", ")));
+        }
 
-        let ok = match &outcome {
-            Outcome::Passed { compared_lines } => {
+        let ok = outcome.is_success()
+            && !(options.require_compare && matches!(outcome, Outcome::CompletedUnchecked));
+        if ok {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+
+        if options.json {
+            let mut record = json!({
+                "script": script,
+                "dialect": runner.dialect().as_str(),
+            });
+            if let Some(out) = runner.output_path() {
+                record["out_file"] = json!(out);
+            }
+            if !keys.is_empty() {
+                record["keys_pressed"] = json!(keys);
+            }
+            let with_position = |mut value: serde_json::Value, span: Option<n2t_core::Span>| {
+                if let Some((line, column)) = position(span) {
+                    value["script_line"] = json!(line);
+                    value["script_column"] = json!(column);
+                }
+                value
+            };
+            match &outcome {
+                Outcome::Passed {
+                    compared_lines,
+                    unreached_lines,
+                } => {
+                    record["outcome"] = json!("passed");
+                    record["compared_lines"] = json!(compared_lines);
+                    if *unreached_lines > 0 {
+                        record["unreached_lines"] = json!(unreached_lines);
+                    }
+                }
+                Outcome::CompletedUnchecked => record["outcome"] = json!("unchecked"),
+                Outcome::FailedComparison { mismatch, span } => {
+                    record["outcome"] = json!("failed");
+                    record["mismatch"] = with_position(
+                        json!({
+                            "line": mismatch.line,
+                            "column": mismatch.column,
+                            "expected": mismatch.expected,
+                            "actual": mismatch.actual,
+                        }),
+                        *span,
+                    );
+                }
+                Outcome::FailedError(error) => {
+                    record["outcome"] = json!("error");
+                    let mut value = json!({ "message": error.message });
+                    if let Some((line, column)) = position(error.span) {
+                        value["line"] = json!(line);
+                        value["column"] = json!(column);
+                    }
+                    record["error"] = value;
+                }
+                Outcome::Suspended { span, .. } => {
+                    record["outcome"] = json!("error");
+                    record["error"] = with_position(
+                        json!({ "message": "the script was suspended" }),
+                        Some(*span),
+                    );
+                }
+                Outcome::LimitExceeded => record["outcome"] = json!("limit"),
+                Outcome::Cancelled => record["outcome"] = json!("cancelled"),
+            }
+            println!("{record}");
+            continue;
+        }
+
+        match &outcome {
+            Outcome::Passed {
+                compared_lines,
+                unreached_lines,
+            } => {
                 println!(
                     "{} {shown} ({compared_lines} lines compared){note}",
                     reporter.green("PASS")
                 );
-                true
+                if *unreached_lines > 0 {
+                    eprintln!(
+                        "  note: the compare file has {unreached_lines} more line(s) that the script never reached; the official tools pass this too"
+                    );
+                }
             }
             Outcome::CompletedUnchecked => {
-                let ok = !require_compare;
                 let label = if ok {
                     reporter.yellow("DONE")
                 } else {
                     reporter.red("FAIL")
                 };
                 println!("{label} {shown} (no compare file){note}");
-                ok
             }
             Outcome::FailedComparison { mismatch, span } => {
                 println!("{} {shown}{note}", reporter.red("FAIL"));
@@ -428,12 +501,21 @@ fn test(
                     &source,
                     *span,
                 );
-                false
+                if let Some(failure) = runner.failures().first() {
+                    let internal: Vec<String> = failure
+                        .state
+                        .iter()
+                        .filter(|o| o.role == Role::Internal)
+                        .map(|o| format!("{}={}", o.name, pin_text(o.bits, o.width)))
+                        .collect();
+                    if !internal.is_empty() {
+                        eprintln!("  internal pins at that step: {}", internal.join(", "));
+                    }
+                }
             }
             Outcome::FailedError(error) => {
                 println!("{} {shown}{note}", reporter.red("FAIL"));
                 reporter.message(Severity::Error, &error.message, &shown, &source, error.span);
-                false
             }
             Outcome::Suspended { reason, span } => {
                 println!("{} {shown}: suspended ({reason:?})", reporter.red("FAIL"));
@@ -444,43 +526,48 @@ fn test(
                     &source,
                     Some(*span),
                 );
-                false
             }
             Outcome::LimitExceeded => {
                 println!(
-                    "{} {shown}: exceeded {max_commands} commands",
-                    reporter.red("FAIL")
+                    "{} {shown}: still running after {} commands",
+                    reporter.red("FAIL"),
+                    options.max_commands
                 );
                 if let Some(echo) = &last_echo {
-                    eprintln!("  note: last echo message: \"{echo}\"");
-                    eprintln!(
-                        "  hint: if this script waits for interactive Keyboard input (e.g. Memory.tst), run it in the official HardwareSimulator GUI or pass `--keys K,Y`"
-                    );
+                    eprintln!("  note: the script's last message was: \"{echo}\"");
                 }
-                false
+                eprintln!(
+                    "  hint: a script that loops forever or waits for a key press is meant to be run interactively"
+                );
             }
             Outcome::Cancelled => {
                 println!("{} {shown}: cancelled", reporter.red("FAIL"));
-                false
             }
-        };
-        if ok {
-            passed += 1;
-        } else {
-            failed += 1;
         }
     }
 
-    let summary = format!("{passed} passed, {failed} failed");
-    println!(
-        "{}",
-        if failed == 0 {
-            reporter.green(&summary)
-        } else {
-            reporter.red(&summary)
-        }
-    );
+    if !options.json {
+        let summary = format!("{passed} passed, {failed} failed");
+        println!(
+            "{}",
+            if failed == 0 {
+                reporter.green(&summary)
+            } else {
+                reporter.red(&summary)
+            }
+        );
+    }
     Ok(failed == 0)
+}
+
+fn pin_text(bits: u64, width: u32) -> String {
+    if width == 1 {
+        bits.to_string()
+    } else if width == 16 {
+        format!("{}", bits as u16 as i16)
+    } else {
+        format!("{bits}")
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -503,27 +590,21 @@ fn parse_number(text: &str) -> Option<i64> {
 }
 
 fn eval(chip: &Path, inputs: &[String], cycles: u64) -> Result<bool, String> {
-    let dir = project_dir(chip);
-    let name = stem(chip);
-    let mut elaborator = Elaborator::new(
-        FsSourceProvider::new(&dir),
+    let file = StdHost::absolute(chip);
+    let dir = path::dir(&file).to_string();
+    let name = path::stem(&file).to_string();
+    let mut machine = HardwareMachine::new(
+        Box::new(HostSourceProvider::new(host(), &dir)),
         Arc::new(BuiltinLibrary::standard()),
     );
-    let unit = elaborator.compile(&name);
-    let Some(definition) = unit.definition.clone() else {
-        let mut reporter = Reporter::new();
-        let shown = display(chip);
-        let source = unit.text().unwrap_or("").to_string();
-        if unit.diagnostics.is_empty() {
-            return Err(load_failure(&format!("{name}.hdl"), &unit));
-        }
-        for d in &unit.diagnostics {
-            reporter.diagnostic(&shown, &source, d);
-        }
+    if let Err(e) = machine.load_chip(&name, path::file_name(&file), n2t_core::Span::default()) {
+        eprintln!("error: {}", e.message);
+        return Ok(false);
+    }
+    let Some(circuit) = machine.circuit_mut() else {
         return Ok(false);
     };
-    let mut circuit = Circuit::new(definition.clone(), &BuiltinRegistry::standard())
-        .map_err(|e| e.to_string())?;
+    let definition = circuit.definition().clone();
 
     for assignment in inputs {
         let (pin, value) = assignment
@@ -544,48 +625,28 @@ fn eval(chip: &Path, inputs: &[String], cycles: u64) -> Result<bool, String> {
     for _ in 0..cycles {
         circuit.step().map_err(|e| e.to_string())?;
     }
+    let time = circuit.time();
 
-    let internals: Vec<_> = circuit
-        .pins()
-        .iter()
-        .filter(|p| p.kind == NetKind::Internal)
-        .collect();
-    let width = definition
-        .interface
-        .inputs
-        .iter()
-        .chain(&definition.interface.outputs)
-        .map(|p| p.name.len())
-        .chain(internals.iter().map(|p| p.name.len()))
-        .max()
-        .unwrap_or(0);
-    for (label, pins) in [
-        ("IN", &definition.interface.inputs),
-        ("OUT", &definition.interface.outputs),
-    ] {
-        for pin in pins.iter() {
-            let value = circuit.get(&pin.name).unwrap_or(0);
-            let binary = format!("{value:0w$b}", w = pin.width as usize);
+    let observed = machine.observe();
+    let width = observed.iter().map(|o| o.name.len()).max().unwrap_or(0);
+    for role in [Role::Input, Role::Output, Role::Internal] {
+        let label = match role {
+            Role::Input => "IN",
+            Role::Output => "OUT",
+            _ => "INT",
+        };
+        for pin in observed.iter().filter(|o| o.role == role) {
+            let binary = format!("{:0w$b}", pin.bits, w = pin.width as usize);
             let signed = if pin.width == 16 {
-                value as u16 as i16 as i64
+                pin.bits as u16 as i16 as i64
             } else {
-                value as i64
+                pin.bits as i64
             };
             println!("{label:<3} {:<width$}  {binary}  ({signed})", pin.name);
         }
     }
-    for pin in internals {
-        let value = circuit.read(pin);
-        let binary = format!("{value:0w$b}", w = pin.width as usize);
-        let signed = if pin.width == 16 {
-            value as u16 as i16 as i64
-        } else {
-            value as i64
-        };
-        println!("INT {:<width$}  {binary}  ({signed})", pin.name);
-    }
     if cycles > 0 {
-        println!("time {}", circuit.time());
+        println!("time {time}");
     }
     Ok(true)
 }
@@ -594,13 +655,7 @@ fn eval(chip: &Path, inputs: &[String], cycles: u64) -> Result<bool, String> {
 // fmt
 // -------------------------------------------------------------------------
 
-fn fmt(
-    paths: &[PathBuf],
-    check_only: bool,
-    indent: usize,
-    tabs: bool,
-    max_width: usize,
-) -> Result<bool, String> {
+fn fmt(paths: &[PathBuf], check_only: bool, indent: usize, tabs: bool) -> Result<bool, String> {
     let files = collect(paths, &["hdl", "tst"])?;
     if files.is_empty() {
         return Err("no `.hdl` or `.tst` files found".into());
@@ -608,36 +663,39 @@ fn fmt(
     let options = n2t_core::FormatOptions {
         tab_size: indent.max(1),
         use_tabs: tabs,
-        max_line_width: max_width.max(20),
         trailing_newline: true,
     };
 
     let mut changed = 0usize;
     let mut skipped = 0usize;
     for file in &files {
-        let source = n2t_core::source::read_text_file(file)
-            .map_err(|e| format!("cannot read `{}`: {e}", file.display()))?;
-        let formatted = if has_extension(file, &["hdl"]) {
-            n2t_core::hdl::format_with_options(&source, &options)
+        let source = read(file)?;
+        let formatted = if path::has_extension(file, "hdl") {
+            n2t_core::hdl::format_with_options(&source.text, &options)
         } else {
-            n2t_core::tst::format_with_options(&source, &options)
+            n2t_core::tst::format_with_options(&source.text, &options)
         };
         let shown = display(file);
         let Some(formatted) = formatted else {
-            eprintln!("skipped {shown} (contains syntax errors)");
+            eprintln!("skipped {shown} (it has syntax errors; fix them and format again)");
             skipped += 1;
             continue;
         };
-        if formatted != source {
-            changed += 1;
-            if check_only {
-                println!("would format {shown}");
-            } else {
-                std::fs::write(file, &formatted)
-                    .map_err(|e| format!("cannot write `{}`: {e}", file.display()))?;
-                println!("formatted {shown}");
-            }
+        if formatted == source.text {
+            continue;
         }
+        changed += 1;
+        if check_only {
+            println!("would format {shown}");
+            continue;
+        }
+        // Write the file back in the encoding it was read in: formatting
+        // changes whitespace, never the bytes of a comment.
+        let bytes = encode_text(&formatted, source.encoding)
+            .or_else(|| encode_text(&formatted, Encoding::Utf8))
+            .unwrap_or_default();
+        std::fs::write(file, bytes).map_err(|e| format!("cannot write `{shown}`: {e}"))?;
+        println!("formatted {shown}");
     }
 
     if check_only {

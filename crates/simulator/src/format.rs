@@ -190,16 +190,19 @@ impl Comparator {
         }
     }
 
-    /// Fails if expected lines remain.
-    pub fn finish(&self) -> Result<(), Mismatch> {
-        match self.lines.get(self.next) {
-            None => Ok(()),
-            Some(expected) => Err(Mismatch {
-                line: self.next + 1,
-                column: None,
-                expected: Some(expected.clone()),
-                actual: None,
-            }),
-        }
+    /// Expected lines not yet compared, ignoring blank lines at the end of
+    /// the file.
+    pub fn remaining(&self) -> usize {
+        let end = self
+            .lines
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        end.saturating_sub(self.next)
+    }
+
+    /// The expected lines, for display.
+    pub fn expected_lines(&self) -> &[String] {
+        &self.lines
     }
 }

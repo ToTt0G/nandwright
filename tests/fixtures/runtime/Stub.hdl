@@ -1,0 +1,11 @@
+/**
+ * An unimplemented chip, the way every course project starts:
+ * the interface is given and PARTS is still empty.
+ */
+CHIP Stub {
+    IN a, b;
+    OUT out;
+
+    PARTS:
+    // Put your code here:
+}

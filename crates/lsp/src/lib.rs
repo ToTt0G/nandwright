@@ -13,43 +13,145 @@ mod workspace;
 
 use std::error::Error;
 
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
+use lsp_server::{ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types as lsp;
 use lsp_types::Url;
 use lsp_types::notification::{self as notif, Notification as _};
 use lsp_types::request::{self as req, Request as _};
+use n2t_core::host::SharedHost;
 use serde_json::Value;
 
 use crate::workspace::{DocKind, Workspace};
 
+pub use crate::convert::{BUILTIN_SCHEME, path_to_url, url_to_path};
+
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
+/// The request that returns the text of a built-in chip's interface:
+/// `{ "name": "And" }` gives `{ "text": "CHIP And { … }" }` or `null`.
+pub const BUILTIN_SOURCE_REQUEST: &str = "n2t/builtinSource";
+
 /// Runs the server over stdin/stdout until the client shuts it down.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_stdio() -> Result<()> {
-    let (connection, io_threads) = Connection::stdio();
-    run(connection)?;
+    let (connection, io_threads) = lsp_server::Connection::stdio();
+    run(connection, std::sync::Arc::new(n2t_core::host::StdHost))?;
     io_threads.join()?;
     Ok(())
 }
 
 /// Runs the server on an established connection.
-pub fn run(connection: Connection) -> Result<()> {
+///
+/// A request that fails, or even panics, costs that one request: the client
+/// gets an error response and the server keeps running. A student's half-typed
+/// file must never take the language server down.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run(connection: lsp_server::Connection, host: SharedHost) -> Result<()> {
     let capabilities = serde_json::to_value(capabilities())?;
     let params: lsp::InitializeParams =
         serde_json::from_value(connection.initialize(capabilities)?)?;
-    let mut server = Server::new(&params);
+    let mut server = Server::new(&params, host);
     while let Ok(message) = connection.receiver.recv() {
         if let Message::Request(request) = &message
             && connection.handle_shutdown(request)?
         {
             return Ok(());
         }
-        server.handle(message)?;
+        let request_id = match &message {
+            Message::Request(request) => Some(request.id.clone()),
+            _ => None,
+        };
+        let handled =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.handle(message)));
+        let failure = match handled {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(_) => Some("the language server hit an internal error".to_string()),
+        };
         for message in server.take_outgoing() {
-            connection.sender.send(message)?;
+            if connection.sender.send(message).is_err() {
+                return Ok(());
+            }
+        }
+        if let (Some(message), Some(id)) = (failure, request_id) {
+            let response = Response::new_err(id, ErrorCode::InternalError as i32, message);
+            if connection.sender.send(Message::Response(response)).is_err() {
+                return Ok(());
+            }
         }
     }
     Ok(())
+}
+
+/// A server driven by JSON text instead of a connection: one JSON-RPC message
+/// in, any number out. This is the entry point of the WebAssembly build,
+/// where the editor's Node process owns the transport. It performs the
+/// `initialize` / `shutdown` handshake itself.
+pub struct JsonServer {
+    host: SharedHost,
+    server: Option<Server>,
+}
+
+impl JsonServer {
+    pub fn new(host: SharedHost) -> Self {
+        Self { host, server: None }
+    }
+
+    /// Handles one JSON-RPC message and returns the messages to send back.
+    /// Never panics on malformed input.
+    pub fn handle(&mut self, message: &str) -> Vec<String> {
+        let Ok(message) = serde_json::from_str::<Message>(message) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        match message {
+            Message::Request(request) if request.method == req::Initialize::METHOD => {
+                let params: lsp::InitializeParams =
+                    serde_json::from_value(request.params).unwrap_or_default();
+                self.server = Some(Server::new(&params, self.host.clone()));
+                let result = lsp::InitializeResult {
+                    capabilities: capabilities(),
+                    server_info: Some(lsp::ServerInfo {
+                        name: "nandwright".to_string(),
+                        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                    }),
+                };
+                out.push(Message::Response(Response::new_ok(request.id, result)));
+            }
+            Message::Request(request) if request.method == req::Shutdown::METHOD => {
+                out.push(Message::Response(Response::new_ok(request.id, Value::Null)));
+            }
+            message => match &mut self.server {
+                Some(server) => {
+                    let request_id = match &message {
+                        Message::Request(request) => Some(request.id.clone()),
+                        _ => None,
+                    };
+                    let failed = server.handle(message).err();
+                    out.extend(server.take_outgoing());
+                    if let (Some(e), Some(id)) = (failed, request_id) {
+                        out.push(Message::Response(Response::new_err(
+                            id,
+                            ErrorCode::InternalError as i32,
+                            e.to_string(),
+                        )));
+                    }
+                }
+                None => {
+                    if let Message::Request(request) = message {
+                        out.push(Message::Response(Response::new_err(
+                            request.id,
+                            ErrorCode::ServerNotInitialized as i32,
+                            "the server has not been initialized".to_string(),
+                        )));
+                    }
+                }
+            },
+        }
+        out.iter()
+            .filter_map(|m| serde_json::to_string(m).ok())
+            .collect()
+    }
 }
 
 /// The capabilities advertised in the `initialize` response.
@@ -103,7 +205,7 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(params: &lsp::InitializeParams) -> Self {
+    pub fn new(params: &lsp::InitializeParams, host: SharedHost) -> Self {
         let snippets = params
             .capabilities
             .text_document
@@ -113,7 +215,7 @@ impl Server {
             .and_then(|i| i.snippet_support)
             .unwrap_or(false);
         Self {
-            workspace: Workspace::new(),
+            workspace: Workspace::new(host),
             snippets,
             outbox: Vec::new(),
         }
@@ -258,12 +360,7 @@ impl Server {
             }
             req::RangeFormatting::METHOD => {
                 let p = params::<req::RangeFormatting>(request)?;
-                ok(format::range(
-                    ws,
-                    &p.text_document.uri,
-                    p.range,
-                    &p.options,
-                ))
+                ok(format::range(ws, &p.text_document.uri, p.range, &p.options))
             }
             req::InlayHintRequest::METHOD => {
                 let p = params::<req::InlayHintRequest>(request)?;
@@ -277,6 +374,17 @@ impl Server {
                 let p = params::<req::SemanticTokensFullRequest>(request)?;
                 ok(semantic_tokens::full(ws, &p.text_document.uri)
                     .map(lsp::SemanticTokensResult::Tokens))
+            }
+            BUILTIN_SOURCE_REQUEST => {
+                let name = request
+                    .params
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                ok(ws
+                    .builtins
+                    .get(name)
+                    .map(|chip| serde_json::json!({ "text": &*chip.source })))
             }
             other => Err((
                 ErrorCode::MethodNotFound,
@@ -341,7 +449,7 @@ impl Server {
         self.refresh_dir(&dir)
     }
 
-    fn refresh_dir(&mut self, dir: &std::path::Path) -> Result<()> {
+    fn refresh_dir(&mut self, dir: &str) -> Result<()> {
         self.workspace.invalidate_scripts(dir);
         for uri in self.workspace.docs_in(dir) {
             let diagnostics = self.workspace.diagnostics(&uri);

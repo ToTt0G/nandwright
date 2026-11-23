@@ -151,6 +151,10 @@ impl ScriptAnalysis {
 }
 
 pub fn analyze(script: &Script, loader: &mut dyn ChipLoader) -> ScriptAnalysis {
+    let dialect = script.dialect();
+    if dialect != Dialect::Hardware {
+        return crate::tst::emulator::analyze(script, dialect);
+    }
     let mut analyzer = Analyzer {
         loader,
         current: None,
@@ -305,16 +309,46 @@ impl Analyzer<'_> {
                     self.builtin_method(target, method, arguments);
                 }
             }
-            Command::Echo(_)
-            | Command::ClearEcho
-            | Command::ClearBreakpoints
-            | Command::Unsupported { .. } => {}
+            Command::TickTock | Command::VmStep => {
+                let tool = if matches!(statement.command, Command::TickTock) {
+                    Dialect::Cpu.tool()
+                } else {
+                    Dialect::Vm.tool()
+                };
+                self.error(
+                    DiagnosticCode::UnsupportedCommand,
+                    format!(
+                        "`{}` is a {tool} command, but this script loads a chip, so it runs in the Hardware Simulator; use `eval`, or `tick` and `tock`",
+                        statement.keyword.name
+                    ),
+                    keyword,
+                );
+            }
+            Command::Echo(_) | Command::ClearEcho | Command::ClearBreakpoints => {}
         }
     }
 
     fn load(&mut self, file: &FileName) {
         // File name problems were reported by the parser.
-        if check_basename(&file.name).is_some() || file.extension() != Some("hdl") {
+        if check_basename(&file.name).is_some()
+            || !file
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("hdl"))
+        {
+            // An extension `load` does not know was reported by the parser.
+            let known_kind = file.extension().is_none_or(|e| {
+                crate::tst::parser::LOAD_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str())
+            });
+            if check_basename(&file.name).is_none() && known_kind {
+                self.error(
+                    DiagnosticCode::InvalidFileName,
+                    format!(
+                        "this script runs in the Hardware Simulator, which loads chips; `{}` is not a `.hdl` file",
+                        if file.name.is_empty() { "load" } else { &file.name }
+                    ),
+                    file.span,
+                );
+            }
             self.current = Some(Current {
                 name: file.stem().to_string(),
                 interface: None,

@@ -26,7 +26,7 @@ fn test_server() -> Server {
         },
         ..Default::default()
     };
-    Server::new(&params)
+    Server::new(&params, std::sync::Arc::new(n2t_core::host::StdHost))
 }
 
 fn open_doc(server: &mut Server, uri: &Url, language_id: &str, text: &str) {
@@ -57,7 +57,11 @@ fn send_request<R: req::Request>(server: &mut Server, id: i32, params: R::Params
             _ => None,
         })
         .expect("expected LSP response");
-    assert!(resp.error.is_none(), "unexpected LSP error: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "unexpected LSP error: {:?}",
+        resp.error
+    );
     serde_json::from_value(resp.result.unwrap_or(Value::Null)).unwrap()
 }
 
@@ -105,8 +109,8 @@ fn capabilities_advertise_formatting_and_intelligence() {
 #[test]
 fn formats_hdl_document_and_is_idempotent() {
     let mut server = test_server();
-    let uri = Url::parse("file:///tmp/And.hdl").unwrap();
-    let messy = "CHIP   And{IN a,b;OUT out;PARTS: }";
+    let uri = Url::parse("file:///tmp/Nor.hdl").unwrap();
+    let messy = "CHIP   Nor{\nIN a,b;\n  OUT out;\n\n\nPARTS:\nOr(a=a,b=b,out=w);\n      Not(in=w,out=out);\n}";
     open_doc(&mut server, &uri, "hdl", messy);
     let _ = server.take_outgoing();
 
@@ -128,7 +132,7 @@ fn formats_hdl_document_and_is_idempotent() {
     let formatted = apply_edits(messy, &edits);
     assert_eq!(
         formatted,
-        "CHIP And {\n    IN a, b;\n    OUT out;\n\n    PARTS: }\n"
+        "CHIP Nor {\n    IN a, b;\n    OUT out;\n\n    PARTS:\n    Or(a=a, b=b, out=w);\n    Not(in=w, out=out);\n}\n"
     );
 
     // Re-open formatted text and ensure formatting returns empty edit list.
@@ -154,18 +158,21 @@ fn formats_hdl_document_and_is_idempotent() {
 #[test]
 fn range_formatting_updates_only_selected_lines_when_line_count_matches() {
     let mut server = test_server();
-    let uri = Url::parse("file:///tmp/And.hdl").unwrap();
+    let uri = Url::parse("file:///tmp/Nor.hdl").unwrap();
     let src = "\
-CHIP And {
+CHIP Nor {
   IN a,b;
     OUT out;
 
-    PARTS: }
+    PARTS:
+  Or( a=a , b=b , out=w );
+  Not( in=w , out=out );
+}
 ";
     open_doc(&mut server, &uri, "hdl", src);
     let _ = server.take_outgoing();
 
-    // Only format line 5 (`  Nand( a=a , b=b , out=w );`).
+    // Only format line 5 (`  Or( a=a , b=b , out=w );`).
     let edits = send_request::<req::RangeFormatting>(
         &mut server,
         1,
@@ -183,9 +190,12 @@ CHIP And {
     .unwrap();
 
     let updated = apply_edits(src, &edits);
-    assert!(updated.contains("  IN a,b;\n"), "line 1 should stay untouched");
     assert!(
-        updated.contains("    Nand(a=a, b=b, out=w);\n"),
+        updated.contains("  IN a,b;\n"),
+        "line 1 should stay untouched"
+    );
+    assert!(
+        updated.contains("    Or(a=a, b=b, out=w);\n"),
         "line 5 should be formatted"
     );
     assert!(
@@ -227,13 +237,16 @@ fn formats_tst_document() {
 #[test]
 fn completion_suggests_chips_formal_pins_and_signals() {
     let mut server = test_server();
-    let uri = Url::parse("file:///tmp/Xor.hdl").unwrap();
+    let uri = Url::parse("file:///tmp/Nor.hdl").unwrap();
     let src = "\
-CHIP Xor {
+CHIP Nor {
     IN a, b;
     OUT out;
 
-    PARTS: }
+    PARTS:
+    Or(a=a, b=b, out=w);
+    Not(in=);
+}
 ";
     open_doc(&mut server, &uri, "hdl", src);
     let _ = server.take_outgoing();
@@ -261,5 +274,8 @@ CHIP Xor {
     assert!(labels.contains(&"b"), "labels: {labels:?}");
     assert!(labels.contains(&"w"), "labels: {labels:?}");
     assert!(labels.contains(&"true"), "labels: {labels:?}");
-    assert!(!labels.contains(&"out"), "top-level output cannot feed an input pin");
+    assert!(
+        !labels.contains(&"out"),
+        "top-level output cannot feed an input pin"
+    );
 }

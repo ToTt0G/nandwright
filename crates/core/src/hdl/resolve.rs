@@ -6,8 +6,9 @@
 //! elaborator; providers only report what exists in the project.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::host::{HostError, SharedHost, path, read_text};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
@@ -70,60 +71,63 @@ pub fn is_valid_chip_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Reads `<project_dir>/<Name>.hdl`, enforcing exact-case file names even on
-/// case-insensitive file systems.
-#[derive(Debug, Clone)]
-pub struct FsSourceProvider {
-    project_dir: PathBuf,
+/// Reads `<project_dir>/<Name>.hdl` through a [`Host`].
+///
+/// The lookup is whatever the host's file system does with that name, which
+/// is what the official simulator does too: on Windows `and.hdl` satisfies a
+/// part named `And`, on Linux it does not and the built-in chip is used.
+#[derive(Clone)]
+pub struct HostSourceProvider {
+    host: SharedHost,
+    project_dir: String,
 }
 
-impl FsSourceProvider {
-    pub fn new(project_dir: impl Into<PathBuf>) -> Self {
-        let project_dir = project_dir.into();
-        let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
-        Self { project_dir }
+impl std::fmt::Debug for HostSourceProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostSourceProvider")
+            .field("project_dir", &self.project_dir)
+            .finish()
+    }
+}
+
+impl HostSourceProvider {
+    /// `project_dir` is an engine-form path (see [`crate::host`]).
+    pub fn new(host: SharedHost, project_dir: impl Into<String>) -> Self {
+        Self {
+            host,
+            project_dir: project_dir.into(),
+        }
     }
 
-    pub fn project_dir(&self) -> &Path {
+    pub fn host(&self) -> &SharedHost {
+        &self.host
+    }
+
+    pub fn project_dir(&self) -> &str {
         &self.project_dir
     }
 
     /// The path a chip's source would have.
-    pub fn chip_path(&self, chip_name: &str) -> PathBuf {
-        self.project_dir.join(format!("{chip_name}.hdl"))
+    pub fn chip_path(&self, chip_name: &str) -> String {
+        path::join(&self.project_dir, &format!("{chip_name}.hdl"))
     }
 }
 
-impl SourceProvider for FsSourceProvider {
+impl SourceProvider for HostSourceProvider {
     fn load_chip(&self, chip_name: &str) -> SourceLookup {
         let path = self.chip_path(chip_name);
-        let display = path.display().to_string();
         if !is_valid_chip_name(chip_name) {
             return SourceLookup::NotFound {
-                searched: vec![display],
+                searched: vec![path],
             };
         }
-        let file_name = format!("{chip_name}.hdl");
-        let exact_entry_exists = match std::fs::read_dir(&self.project_dir) {
-            Ok(entries) => entries
-                .filter_map(Result::ok)
-                .any(|e| e.file_name().to_str() == Some(file_name.as_str())),
-            Err(e) => {
-                return SourceLookup::Error {
-                    id: self.project_dir.display().to_string(),
-                    message: format!("cannot read project directory: {e}"),
-                };
-            }
-        };
-        if !exact_entry_exists {
-            return SourceLookup::NotFound {
-                searched: vec![display],
-            };
-        }
-        match crate::source::read_text_file(&path) {
-            Ok(text) => SourceLookup::Found(SourceFile::new(display, text)),
+        match read_text(self.host.as_ref(), &path) {
+            Ok(file) => SourceLookup::Found(SourceFile::new(path, file.text)),
+            Err(HostError::NotFound) => SourceLookup::NotFound {
+                searched: vec![path],
+            },
             Err(e) => SourceLookup::Error {
-                id: display,
+                id: path,
                 message: e.to_string(),
             },
         }
