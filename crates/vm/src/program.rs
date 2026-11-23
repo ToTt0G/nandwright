@@ -18,6 +18,8 @@ pub const STATIC_BASE: u16 = 16;
 /// The last RAM address usable by `static` variables (`RAM[16..=254]`, 239 slots,
 /// matching the official Java VM Emulator's `Out of segment space` boundary).
 pub const STATIC_MAX: u16 = 254;
+/// Java uses signed 16-bit command addresses, including in RAM call frames.
+const MAX_COMMANDS: usize = i16::MAX as usize;
 
 /// A built-in Jack OS function implemented natively by the emulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -370,6 +372,30 @@ impl Program {
     /// segment overflow).
     pub fn link(mut files: Vec<ParsedVm>) -> (Self, Vec<Diagnostic>) {
         let mut diagnostics = Vec::new();
+        let command_count = files
+            .iter()
+            .map(|file| file.commands.len())
+            .fold(0usize, usize::saturating_add);
+        if command_count > MAX_COMMANDS {
+            diagnostics.push(Diagnostic::new(
+                n2t_core::Severity::Error,
+                DiagnosticCode::Other("vm-program-too-large"),
+                format!("VM program has {command_count} commands, exceeding the {MAX_COMMANDS}-command limit"),
+                None,
+            ));
+            return (
+                Self {
+                    ops: Vec::new(),
+                    meta: Vec::new(),
+                    files: Vec::new(),
+                    functions: Vec::new(),
+                    func_by_name: HashMap::new(),
+                    entry: EntryPoint::StartOfProgram { pc: 0 },
+                    has_builtin_calls: false,
+                },
+                diagnostics,
+            );
+        }
 
         // Place the file defining `Sys.init` (or named `Sys`) first, matching
         // the official Java VM Emulator's load order.

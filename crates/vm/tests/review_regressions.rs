@@ -45,6 +45,32 @@ fn linking_a_forged_command_scope_cannot_overflow() {
 }
 
 #[test]
+fn linked_program_rejects_unrepresentable_return_addresses() {
+    // The original snippet loaded in Java at 32767 commands. The same
+    // snippet at 32768 commands crashed the Java loader.
+    let source = format!(
+        "goto START\n{}label START\npush constant 84\npop temp 0\n",
+        "label PAD\n".repeat(32_763)
+    );
+    let file = parse("Main", &source);
+    let (program, diagnostics) = Program::link(vec![file.clone()]);
+    assert!(!diagnostics.iter().any(|d| d.is_error()), "{diagnostics:?}");
+    assert_eq!(program.len(), 32_767);
+    let mut vm = Vm::new(program);
+    assert_eq!(vm.run(10, 0, &Breakpoints::new()), RunStatus::Halted);
+    assert_eq!(vm.ram(5), 84);
+
+    let (oversized, diagnostics) = Program::link(vec![file, parse("Extra", "push constant 0")]);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].is_error());
+    assert_eq!(
+        diagnostics[0].code,
+        n2t_core::DiagnosticCode::Other("vm-program-too-large")
+    );
+    assert!(oversized.is_empty());
+}
+
+#[test]
 fn endless_recursion_with_flat_sp_keeps_the_shadow_call_stack_bounded() {
     // Main.f pops its own frame and calls itself again: SP never grows, so
     // the program runs forever without a stack overflow.
