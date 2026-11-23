@@ -228,6 +228,7 @@ pub fn standard_machine(dialect: Dialect, host: &SharedHost, dir: &str) -> Box<d
 pub fn hardware_machine(dialect: Dialect, provider: Box<dyn SourceProvider>) -> Box<dyn Machine> {
     match dialect {
         Dialect::Cpu => Box::new(crate::cpu_machine::CpuMachine::new()),
+        Dialect::Vm => Box::new(crate::vm_machine::VmMachine::new()),
         _ => Box::new(HardwareMachine::new(
             provider,
             Arc::new(BuiltinLibrary::standard()),

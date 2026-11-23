@@ -14,3 +14,8 @@
 case = "broken/exp2/t2_bad_format/Not.tst"
 what = "script_line: java=4, n2t=3"
 reason = "The invalid format `%Q1.2` is on line 3 (`output-list in%Q1.2 out%B3.1.3;`). Java's script tokenizer advances past `;` and the newline before raising the error, reporting line 4 (`set in 1,`). Pointing to line 3 is deliberate."
+
+[[difference]]
+case = "solved/05/Memory.tst"
+what = "outcome: java=timeout, n2t=passed"
+reason = "The script waits in `while out <> 75 { eval, }` for a person to hold down the K key (and later Y) in the simulator window. Headless Java has no keyboard, so it never ends. Nandwright presses the key the loop is waiting for and says so; the 54 lines it then produces equal Memory.cmp. With `n2t test --no-keys` it waits at the same line as Java does."

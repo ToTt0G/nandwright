@@ -15,6 +15,7 @@ pub mod machine;
 pub mod primitives;
 pub mod program;
 pub mod runner;
+pub mod vm_machine;
 
 pub use circuit::{Circuit, SimError, Time};
 pub use cpu_machine::CpuMachine;
@@ -24,3 +25,4 @@ pub use runner::{
     Event, Failure, Newline, Outcome, RunError, RunnerOptions, ScriptRunner, StartError,
     SuspendReason,
 };
+pub use vm_machine::VmMachine;

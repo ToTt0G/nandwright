@@ -356,6 +356,14 @@ version = "0.1.0"
 dependencies = [
  "n2t-core",
  "n2t-hack",
+ "n2t-vm",
+]
+
+[[package]]
+name = "n2t-vm"
+version = "0.1.0"
+dependencies = [
+ "n2t-core",
 ]
 
 [[package]]
