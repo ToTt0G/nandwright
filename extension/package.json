@@ -190,11 +190,25 @@
     ],
     "configurationDefaults": {
       "[hdl]": {
-        "editor.semanticHighlighting.enabled": true
+        "editor.semanticHighlighting.enabled": true,
+        "files.autoGuessEncoding": true
       },
       "[cmp]": {
         "editor.wordWrap": "off",
-        "editor.renderWhitespace": "none"
+        "editor.renderWhitespace": "none",
+        "files.autoGuessEncoding": true
+      },
+      "[tst]": {
+        "files.autoGuessEncoding": true
+      },
+      "[hack-asm]": {
+        "files.autoGuessEncoding": true
+      },
+      "[vm]": {
+        "files.autoGuessEncoding": true
+      },
+      "[jack]": {
+        "files.autoGuessEncoding": true
       }
     },
     "configuration": {
@@ -256,7 +270,7 @@
       },
       {
         "command": "nandwright.compareWithReference",
-        "title": "Compare with Reference Output (for Your Own Assembler, Analyzer or Compiler)",
+        "title": "Compare with Reference Output",
         "category": "Nand2Tetris",
         "icon": "$(diff)"
       },
@@ -496,6 +510,17 @@
             },
             "completionEvents": [
               "onCommand:nandwright.openChip"
+            ]
+          },
+          {
+            "id": "programs",
+            "title": "Run programs on the Hack computer",
+            "description": "From project 4 on you write programs: Hack assembly, VM code, Jack. Run them with the screen and keyboard, pause at breakpoints, and inspect registers and memory.\n[Run the open program](command:nandwright.runProgram)",
+            "media": {
+              "markdown": "media/walkthrough/programs.md"
+            },
+            "completionEvents": [
+              "onCommand:nandwright.runProgram"
             ]
           }
         ]

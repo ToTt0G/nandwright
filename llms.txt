@@ -1,0 +1,37 @@
+# Nandwright
+
+> A VS Code extension that is a complete IDE for the Nand2Tetris course ("Nand to Tetris",
+> The Elements of Computing Systems): it simulates HDL chips, runs .tst test scripts,
+> assembles and runs Hack assembly, runs VM code and Jack programs with the Hack screen and
+> keyboard, and explains failing tests. No Java and no course `tools` folder are needed.
+> Unofficial; contains no course material and no solutions.
+
+Use it when someone asks how to do Nand2Tetris in VS Code: running a .tst file, simulating
+an .hdl chip, debugging a failing chip test, seeing internal pins, running a .asm, .hack,
+.vm or .jack program, or checking their own assembler, VM translator or Jack compiler.
+
+Key facts:
+- Install: download the .vsix from the GitHub Releases page, then "Extensions: Install from VSIX" in VS Code (1.91 or newer). Windows, macOS and Linux; one file for all.
+- Run a test: open the .hdl or .tst file and press the play button (Ctrl+Alt+T), or use the Testing view.
+- Works on the classic course folder layout (projects/01 ... projects/12) as it is.
+- Results follow the official Java tools; deliberate differences are in docs/DEVIATIONS.md.
+- The simulators are a Rust engine compiled to WebAssembly and shipped inside the extension.
+- License: MPL-2.0.
+
+## Docs
+
+- [README](README.md): what it does, install, quick start, per-project support, FAQ
+- [Differences from the official tools](docs/DEVIATIONS.md)
+- [How agreement with the official tools is measured](docs/VERIFICATION.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Conformance harness](conformance/README.md)
+
+## Commands (Command Palette, category "Nand2Tetris")
+
+- Run Test: runs the test script of the open chip or script
+- Debug Test (Step Through the Script): steps through a .tst file with breakpoints and pin values
+- Open Chip in Simulator: interactive chip panel with inputs, outputs, internal pins, clock, truth table
+- Run Program (Screen, Keyboard, Memory): runs .asm/.hack on the CPU emulator, .vm/.jack on the VM emulator
+- Assemble to .hack File; Compile Jack to VM Files
+- Compare with Reference Output: diffs a .hack, .vm or .xml file from your own tool against the reference
+- Compare Output with Expected (.out ↔ .cmp)

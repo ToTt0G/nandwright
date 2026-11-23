@@ -1,0 +1,13 @@
+/**
+ * A finished chip built on one that is not written yet (Stub, in this folder).
+ * The official simulator runs it with Stub's output at 0, so the test fails
+ * on a comparison instead of refusing to load.
+ */
+CHIP UsesStub {
+    IN a, b;
+    OUT out;
+
+    PARTS:
+    Stub(a=a, b=b, out=inner);
+    Not(in=inner, out=out);
+}

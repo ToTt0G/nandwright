@@ -1,0 +1,8 @@
+// Adds the two arguments and doubles the result, leaving it on the stack.
+push argument 0
+push argument 1
+add
+pop temp 0
+push temp 0
+push temp 0
+add

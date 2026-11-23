@@ -11,10 +11,15 @@ twice from the same source:
 
 ```
 extension/            VS Code extension (TypeScript)
-  src/extension.ts      activation, commands, Testing view, panels, debug adapter
-  src/server/           language-server process: LSP transport around the wasm engine
-  src/runtime/          worker thread: test runs, simulators, emulators (wasm engine)
-  media/                webview panels (chip, computer screen/keyboard/memory)
+  src/extension.ts      activation and commands
+  src/engine/wasm.ts    loads the engine and gives it the file system
+  src/server/           language-server process: LSP transport around the engine
+  src/runtime/          worker thread: test runs, simulators, emulators
+  src/testing.ts        the Testing view
+  src/chipPanel.ts      the chip simulator panel        (webview: src/webview/chip.ts)
+  src/computerPanel.ts  the CPU / VM emulator panel     (webview: src/webview/computer.ts)
+  src/debug.ts          debug adapter that steps through test scripts
+  src/outputs.ts        assemble, compile, compare with the reference
 crates/
   core/        n2t-core        HDL + TST front-ends, built-in chip interfaces, formatters,
                                diagnostics, the `Host` file-system abstraction
@@ -28,6 +33,8 @@ crates/
 conformance/          harness that runs the official Java tools and `n2t` on the same
                       inputs and diffs them (course files live outside the repository)
 tests/fixtures/       original chips and programs (never course assignments)
+examples/             practice chips, assembly and Jack programs to try the extension on
+scripts/              the check that keeps course material out of the repository
 ```
 
 ## Rules every crate follows
@@ -141,12 +148,29 @@ editor should not.
 
 ## The wasm ABI
 
-`n2t-wasm` exports `nw_alloc`, `nw_free` and `nw_call(ptr, len) -> u64` (JSON in, JSON
-out, pointer and length packed into the result) and imports `host_read`,
-`host_list`, `host_write` and `host_log`. Two instances run in the extension:
+`n2t-wasm` exports `nw_alloc`, `nw_free` and `nw_call(ptr, len) -> ptr` (JSON in, JSON
+out) and imports `read`, `list`, `write` and `log` from the module `host`. `Engine::call`
+in `crates/wasm/src/lib.rs` is the whole API, and the crate's tests drive that same
+function natively. Two instances run in the extension:
 
 - the **language server** process feeds LSP JSON-RPC messages to `{"op":"lsp"}` and
-  sends back whatever messages come out;
-- the **runtime** worker thread owns *sessions*: a test run, an interactive chip, a
-  CPU or a VM. Sessions are stepped with a budget so a runaway program can always be
-  paused or cancelled, and a trap in wasm tears down one instance, not the editor.
+  sends back whatever messages come out. If the engine traps, the process makes a new
+  instance and replays the handshake and the open documents;
+- the **runtime** worker thread owns *sessions*: a test run (`test.*`), an interactive
+  chip (`chip.*`), a Hack computer (`cpu.*`) or a VM (`vm.*`). Sessions are stepped
+  with a budget so a runaway program can always be paused or cancelled, and a trap
+  tears down one instance, not the editor.
+
+Unsaved editor buffers are pushed to the runtime as overlays (`overlay.set`) before a
+run, so tests and simulators use what is on screen. Output that a student's own tool
+may have produced (`.hack`, `.vm`) is written only when asked (`asm.assemble`,
+`jack.compile` with `"write": true`).
+
+## The extension's surfaces
+
+Native VS Code surfaces are used wherever one exists: the Testing view for test
+scripts, the Problems panel and hovers for diagnostics, CodeLens and the editor title
+for actions, the debugger for stepping through scripts, the diff editor for
+comparisons. Two webview panels exist for what is inherently visual: a chip's pins and
+a computer's screen, keyboard and memory. They are drawn with VS Code's theme
+variables only.

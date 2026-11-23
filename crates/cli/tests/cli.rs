@@ -317,6 +317,56 @@ fn fmt_keeps_the_encoding_of_windows_1252_files() {
     );
 }
 
+/// Review finding A4: a chip built on a neighbour that is not written yet
+/// loads, and fails on a comparison, as in the official simulator.
+#[test]
+fn a_chip_using_an_unimplemented_neighbour_still_runs() {
+    let dir = scratch_copy(&samples().join("runtime"), "neighbour");
+    let (code, stdout, stderr) = n2t(&["test", dir.join("UsesStub.tst").to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(stderr.contains("comparison failure at line 3"), "{stderr}");
+    assert!(!stderr.contains("cannot load"), "{stderr}");
+}
+
+/// Review finding A5: a compare file that does not exist is reported.
+#[test]
+fn a_missing_compare_file_is_an_error() {
+    let dir = scratch_copy(&samples().join("runtime"), "nocmp");
+    let (code, stdout, stderr) = n2t(&["test", dir.join("MissingCompare.tst").to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("the compare file `NoSuchFile.cmp` does not exist"),
+        "{stderr}"
+    );
+}
+
+/// Review finding A3: scripts for the CPU and VM emulators are not errors,
+/// and they run.
+#[test]
+fn cpu_and_vm_emulator_scripts_check_clean_and_pass() {
+    let dir = scratch_copy(&samples().join("programs"), "dialects");
+    let (code, _, stderr) = n2t(&["check", dir.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains(" 0 errors, 0 warnings"), "{stderr}");
+    let (code, stdout, stderr) = n2t(&["test", "--json", dir.to_str().unwrap()]);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let dialects: Vec<String> = stdout
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .map(|r| {
+            format!(
+                "{}:{}",
+                r["dialect"].as_str().unwrap(),
+                r["outcome"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(dialects, ["vm:passed", "cpu:passed"]);
+}
+
 /// Review finding A7: messages never show the Windows `\\?\` path form, and
 /// an unsupported file type is not called a syntax error.
 #[test]
@@ -328,4 +378,18 @@ fn messages_use_plain_paths() {
         !stdout.contains(r"\\?\") && !stderr.contains(r"\\?\"),
         "{stdout}{stderr}"
     );
+}
+
+/// Review finding A7: a file the formatter does not handle is called
+/// unsupported, not syntactically wrong.
+#[test]
+fn fmt_says_when_a_file_type_is_not_supported() {
+    let asm = samples().join("programs/Countdown.asm");
+    let (code, stdout, stderr) = n2t(&["fmt", "--check", asm.to_str().unwrap()]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("only `.hdl` and `.tst` files can be formatted"),
+        "{stdout}{stderr}"
+    );
+    assert!(!stderr.contains("syntax errors"), "{stderr}");
 }

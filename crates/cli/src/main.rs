@@ -709,7 +709,18 @@ fn eval(chip: &Path, inputs: &[String], cycles: u64) -> Result<bool, String> {
 // -------------------------------------------------------------------------
 
 fn fmt(paths: &[PathBuf], check_only: bool, indent: usize, tabs: bool) -> Result<bool, String> {
-    let files = collect(paths, &["hdl", "tst"])?;
+    let all = collect(paths, &["hdl", "tst"])?;
+    // A file named on the command line that is not HDL or a test script is
+    // said to be unsupported, not to have syntax errors.
+    let (files, unsupported): (Vec<String>, Vec<String>) = all
+        .into_iter()
+        .partition(|f| path::has_extension(f, "hdl") || path::has_extension(f, "tst"));
+    for file in &unsupported {
+        eprintln!(
+            "skipped {}: only `.hdl` and `.tst` files can be formatted",
+            display(file)
+        );
+    }
     if files.is_empty() {
         return Err("no `.hdl` or `.tst` files found".into());
     }
