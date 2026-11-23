@@ -1,0 +1,16 @@
+# Explained / deliberate differences between `n2t` and the official Java tools.
+#
+# Each entry suppresses a non-zero exit ONLY when the difference is intentional
+# and documented (see also `docs/DEVIATIONS.md`). Engine bugs must NOT be added
+# here — they should remain unexplained mismatches until fixed.
+#
+# Format:
+# [[difference]]
+# case = "scenario/path/or/glob"
+# what = "short description of what differs"
+# reason = "why the difference is deliberate"
+
+[[difference]]
+case = "broken/exp2/t2_bad_format/Not.tst"
+what = "script_line: java=4, n2t=3"
+reason = "The invalid format `%Q1.2` is on line 3 (`output-list in%Q1.2 out%B3.1.3;`). Java's script tokenizer advances past `;` and the newline before raising the error, reporting line 4 (`set in 1,`). Pointing to line 3 is deliberate."
