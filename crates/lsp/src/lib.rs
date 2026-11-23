@@ -194,6 +194,12 @@ pub fn capabilities() -> lsp::ServerCapabilities {
         document_range_formatting_provider: Some(lsp::OneOf::Left(true)),
         inlay_hint_provider: Some(lsp::OneOf::Left(true)),
         folding_range_provider: Some(lsp::FoldingRangeProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp::CodeActionProviderCapability::Options(
+            lsp::CodeActionOptions {
+                code_action_kinds: Some(vec![lsp::CodeActionKind::QUICKFIX]),
+                ..Default::default()
+            },
+        )),
         signature_help_provider: Some(lsp::SignatureHelpOptions {
             trigger_characters: Some(vec!["(".into(), ",".into()]),
             retrigger_characters: Some(vec![",".into()]),
@@ -421,6 +427,14 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Jack) => jack::signature_help(ws, &uri, position),
                     Some(DocKind::Hdl) => hdl::signature_help(ws, &uri, position),
+                    _ => None,
+                })
+            }
+            req::CodeActionRequest::METHOD => {
+                let p = params::<req::CodeActionRequest>(request)?;
+                let uri = p.text_document.uri;
+                ok(match kind(ws, &uri) {
+                    Some(DocKind::Hdl) => Some(hdl::code_actions(ws, &uri, p.range)),
                     _ => None,
                 })
             }

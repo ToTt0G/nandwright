@@ -341,10 +341,14 @@ impl Workspace {
             return Vec::new();
         };
         let core: Vec<n2t_core::Diagnostic> = match kind {
-            DocKind::Hdl => self
-                .hdl_unit(uri)
-                .map(|u| u.diagnostics.clone())
-                .unwrap_or_default(),
+            DocKind::Hdl => {
+                let mut diagnostics = self
+                    .hdl_unit(uri)
+                    .map(|u| quiet_while_typing(&u.diagnostics))
+                    .unwrap_or_default();
+                diagnostics.extend(crate::hdl::extra_diagnostics(self, uri));
+                diagnostics
+            }
             DocKind::Tst => self
                 .tst_state(uri)
                 .map(|(p, a)| {
@@ -410,6 +414,31 @@ impl Workspace {
             convert::range_in(&chip.source, span),
         ))
     }
+}
+
+/// While a chip has a syntax error, warnings about connections and use are
+/// mostly about what has not been typed yet: they are left out until the
+/// syntax is fixed.
+fn quiet_while_typing(diagnostics: &[n2t_core::Diagnostic]) -> Vec<n2t_core::Diagnostic> {
+    use n2t_core::DiagnosticCode as C;
+    let syntax_error = diagnostics
+        .iter()
+        .any(|d| d.is_error() && d.code == C::UnexpectedToken);
+    diagnostics
+        .iter()
+        .filter(|d| {
+            !syntax_error
+                || !matches!(
+                    d.code,
+                    C::UnconnectedPartInput
+                        | C::UnusedInput
+                        | C::UnusedSignal
+                        | C::UndrivenOutput
+                        | C::UndrivenSignal
+                )
+        })
+        .cloned()
+        .collect()
 }
 
 fn source_by_id(

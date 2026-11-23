@@ -71,6 +71,18 @@ impl Harness {
 
     /// Replaces a document's text and returns its new diagnostics.
     pub fn change(&mut self, uri: &Url, text: &str) -> Vec<lsp::Diagnostic> {
+        self.send_change(uri, text);
+        self.diagnostics_for(uri)
+    }
+
+    /// Replaces a document's text and returns every diagnostics notification
+    /// it caused (other documents of the folder are refreshed too).
+    pub fn change_all(&mut self, uri: &Url, text: &str) -> Vec<(Url, Vec<lsp::Diagnostic>)> {
+        self.send_change(uri, text);
+        self.published()
+    }
+
+    fn send_change(&mut self, uri: &Url, text: &str) {
         let params = lsp::DidChangeTextDocumentParams {
             text_document: lsp::VersionedTextDocumentIdentifier {
                 uri: uri.clone(),
@@ -88,7 +100,6 @@ impl Harness {
                 params,
             )))
             .expect("didChange failed");
-        self.diagnostics_for(uri)
     }
 
     /// All diagnostics published since the last call, by document.

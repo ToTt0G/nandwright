@@ -10,8 +10,9 @@ use n2t_core::hdl::ast::ChipImpl;
 use n2t_core::hdl::interface::{ChipInterface, ChipOrigin, PinDirection, PinInfo};
 use n2t_core::hdl::lexer::{Keyword, Token, TokenContent};
 use n2t_core::hdl::resolve::is_valid_chip_name;
-use n2t_core::hdl::semantic::{SignalKind, SymbolTarget};
+use n2t_core::hdl::semantic::{ChipAnalysis, SignalKind, SymbolTarget};
 use n2t_core::source::Span;
+use n2t_core::{Diagnostic, DiagnosticCode};
 
 use crate::convert::clean_doc;
 use crate::workspace::Workspace;
@@ -160,13 +161,22 @@ pub fn hover(ws: &mut Workspace, uri: &Url, position: lsp::Position) -> Option<l
                     let width = signal.width.map_or("unknown width".to_string(), |w| {
                         format!("{w} bit{}", if w == 1 { "" } else { "s" })
                     });
+                    let describe = |spans: &[Span]| -> String {
+                        let names: Vec<String> = spans
+                            .iter()
+                            .filter_map(|s| binding_description(analysis, *s))
+                            .collect();
+                        if names.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            names.join(", ")
+                        }
+                    };
                     format!(
-                        "internal signal `{}` ({width})\n\n{} driver{}, {} reader{}",
+                        "internal pin `{}` ({width})\n\ndriven by {}\n\nread by {}",
                         signal.name,
-                        signal.drivers.len(),
-                        if signal.drivers.len() == 1 { "" } else { "s" },
-                        signal.readers.len(),
-                        if signal.readers.len() == 1 { "" } else { "s" },
+                        describe(&signal.drivers),
+                        describe(&signal.readers),
                     )
                 }
             }
@@ -881,14 +891,473 @@ pub fn inlay_hints(ws: &mut Workspace, uri: &Url, range: lsp::Range) -> Vec<lsp:
         .collect()
 }
 
+/// `` `Or` (out) ``: the part and formal pin of the binding whose right-hand
+/// side is at `span`.
+fn binding_description(analysis: &ChipAnalysis, span: Span) -> Option<String> {
+    let part = analysis
+        .parts
+        .iter()
+        .find(|p| p.span.start <= span.start && span.end <= p.span.end)?;
+    let binding = part
+        .bindings
+        .iter()
+        .find(|b| b.span.start <= span.start && span.end <= b.span.end)?;
+    let pin = binding
+        .formal
+        .and_then(|f| part.interface.as_ref()?.pin_by_index(f.direction, f.index))
+        .map(|p| format!(" ({})", p.name))
+        .unwrap_or_default();
+    Some(format!("`{}`{pin}", part.chip_name))
+}
+
 // -------------------------------------------------------------------------
-// Signature help
+// Part calls: signature help and missing connections
 // -------------------------------------------------------------------------
 
+/// The part call around the cursor.
+struct PartCall {
+    chip: String,
+    /// Formal pin names already connected, in order (anywhere in the call).
+    connected: Vec<String>,
+    /// The formal pin of the connection the cursor is in, if named yet.
+    current: Option<String>,
+}
+
+fn part_call(tokens: &[Token], offset: usize) -> Option<PartCall> {
+    let significant: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !t.is_trivia() && t.content != TokenContent::Eof)
+        .collect();
+    let before = significant.partition_point(|t| t.span.end <= offset);
+    let mut depth = 0usize;
+    let mut open = None;
+    for i in (0..before).rev() {
+        match &significant.get(i)?.content {
+            TokenContent::RightParen => depth += 1,
+            TokenContent::LeftParen => {
+                if depth == 0 {
+                    open = Some(i);
+                    break;
+                }
+                depth -= 1;
+            }
+            TokenContent::Semicolon | TokenContent::LeftBrace | TokenContent::RightBrace => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    let open = open?;
+    let TokenContent::Ident(chip) = &significant.get(open.checked_sub(1)?)?.content else {
+        return None;
+    };
+    // The connections, split at commas, up to the closing parenthesis.
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    let mut start = open + 1;
+    let mut end = significant.len();
+    let mut depth = 0usize;
+    for (i, t) in significant.iter().enumerate().skip(open + 1) {
+        match t.content {
+            TokenContent::LeftBracket => depth += 1,
+            TokenContent::RightBracket => depth = depth.saturating_sub(1),
+            TokenContent::Comma if depth == 0 => {
+                segments.push((start, i));
+                start = i + 1;
+            }
+            TokenContent::RightParen
+            | TokenContent::Semicolon
+            | TokenContent::LeftBrace
+            | TokenContent::RightBrace => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    segments.push((start, end));
+    let name = |(a, b): (usize, usize)| -> Option<String> {
+        match &significant.get(a..b)?.first()?.content {
+            TokenContent::Ident(n) => Some(n.clone()),
+            _ => None,
+        }
+    };
+    let connected = segments.iter().filter_map(|s| name(*s)).collect();
+    // The segment between the separators around the cursor.
+    let current = segments
+        .iter()
+        .find(|(a, b)| {
+            let lower = a
+                .checked_sub(1)
+                .and_then(|i| significant.get(i))
+                .map_or(0, |t| t.span.end);
+            let upper = significant.get(*b).map_or(usize::MAX, |t| t.span.start);
+            lower <= offset && offset <= upper
+        })
+        .and_then(|s| name(*s));
+    Some(PartCall {
+        chip: chip.clone(),
+        connected,
+        current,
+    })
+}
+
 pub fn signature_help(
-    _ws: &mut Workspace,
-    _uri: &Url,
-    _position: lsp::Position,
+    ws: &mut Workspace,
+    uri: &Url,
+    position: lsp::Position,
 ) -> Option<lsp::SignatureHelp> {
-    None
+    let unit = ws.hdl_unit(uri)?;
+    let doc = ws.docs.get(uri)?;
+    let dir = doc.dir.clone();
+    let offset = doc.text().offset(position);
+    let parsed = unit.parsed.clone()?;
+    let call = part_call(&parsed.tokens, offset)?;
+    let child = ws.project(&dir).elaborator.compile(&call.chip);
+    let interface = child.interface.clone()?;
+
+    let mut label = format!("{}(", interface.name);
+    let mut parameters = Vec::new();
+    let mut pins = Vec::new();
+    for (direction, list) in [
+        (PinDirection::Input, &interface.inputs),
+        (PinDirection::Output, &interface.outputs),
+    ] {
+        if list.is_empty() {
+            continue;
+        }
+        if !pins.is_empty() {
+            label.push_str("; ");
+        }
+        label.push_str(if direction == PinDirection::Input {
+            "IN "
+        } else {
+            "OUT "
+        });
+        for (i, pin) in list.iter().enumerate() {
+            if i > 0 {
+                label.push_str(", ");
+            }
+            let start = label.encode_utf16().count() as u32;
+            label.push_str(&pin.to_string());
+            let end = label.encode_utf16().count() as u32;
+            parameters.push(lsp::ParameterInformation {
+                label: lsp::ParameterLabel::LabelOffsets([start, end]),
+                documentation: Some(lsp::Documentation::String(format!(
+                    "{}{}",
+                    pin_text(direction, pin),
+                    doc_of(pin)
+                ))),
+            });
+            pins.push(pin.name.clone());
+        }
+    }
+    label.push(')');
+    let active = match &call.current {
+        Some(name) => pins.iter().position(|p| p == name),
+        None => pins.iter().position(|p| !call.connected.contains(p)),
+    };
+    let documentation = interface
+        .doc
+        .as_deref()
+        .map(clean_doc)
+        .filter(|d| !d.is_empty())
+        .map(lsp::Documentation::String);
+    Some(lsp::SignatureHelp {
+        signatures: vec![lsp::SignatureInformation {
+            label,
+            documentation,
+            parameters: Some(parameters),
+            active_parameter: active.map(|a| a as u32),
+        }],
+        active_signature: Some(0),
+        active_parameter: active.map(|a| a as u32),
+    })
+}
+
+// -------------------------------------------------------------------------
+// Code actions
+// -------------------------------------------------------------------------
+
+/// Optimal-string-alignment distance (insertions, deletions, substitutions
+/// and adjacent transpositions), on at most 64 characters of each name.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().take(64).collect();
+    let b: Vec<char> = b.chars().take(64).collect();
+    let width = b.len() + 1;
+    let mut d = vec![0usize; (a.len() + 1) * width];
+    let at = |i: usize, j: usize| i * width + j;
+    for i in 0..=a.len() {
+        d[at(i, 0)] = i;
+    }
+    for j in 0..=b.len() {
+        d[at(0, j)] = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut v = (d[at(i - 1, j)] + 1)
+                .min(d[at(i, j - 1)] + 1)
+                .min(d[at(i - 1, j - 1)] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(d[at(i - 2, j - 2)] + 1);
+            }
+            d[at(i, j)] = v;
+        }
+    }
+    d[at(a.len(), b.len())]
+}
+
+/// The candidates `name` was probably meant to be: a case-insensitive match
+/// if there is one, otherwise the nearest names by edit distance.
+pub fn suggestions(name: &str, candidates: &[String]) -> Vec<String> {
+    let exact: Vec<String> = candidates
+        .iter()
+        .filter(|c| c.as_str() != name && c.eq_ignore_ascii_case(name))
+        .cloned()
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    let lower = name.to_lowercase();
+    let limit = (1 + name.chars().count() / 4).min(3);
+    let mut scored: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter(|c| c.as_str() != name)
+        .map(|c| (edit_distance(&lower, &c.to_lowercase()), c))
+        .filter(|(d, _)| *d <= limit)
+        .collect();
+    scored.sort();
+    scored.into_iter().take(3).map(|(_, c)| c.clone()).collect()
+}
+
+fn quick_fix(
+    title: String,
+    uri: &Url,
+    edits: Vec<lsp::TextEdit>,
+    diagnostic: Option<lsp::Diagnostic>,
+    preferred: bool,
+) -> lsp::CodeActionOrCommand {
+    let mut changes = HashMap::new();
+    changes.insert(uri.clone(), edits);
+    lsp::CodeActionOrCommand::CodeAction(lsp::CodeAction {
+        title,
+        kind: Some(lsp::CodeActionKind::QUICKFIX),
+        diagnostics: diagnostic.map(|d| vec![d]),
+        edit: Some(lsp::WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }),
+        is_preferred: Some(preferred),
+        ..Default::default()
+    })
+}
+
+pub fn code_actions(
+    ws: &mut Workspace,
+    uri: &Url,
+    range: lsp::Range,
+) -> Vec<lsp::CodeActionOrCommand> {
+    let Some(unit) = ws.hdl_unit(uri) else {
+        return Vec::new();
+    };
+    let Some(doc) = ws.docs.get(uri) else {
+        return Vec::new();
+    };
+    let dir = doc.dir.clone();
+    let source = doc.text.clone();
+    let lines = doc.lines.clone();
+    let text = crate::convert::Text::new(&source, &lines);
+    let (start, end) = (text.offset(range.start), text.offset(range.end));
+    let touches = |span: Span| span.start <= end && start <= span.end;
+    let mut actions = Vec::new();
+
+    // "Did you mean": unknown chips and pins.
+    for d in unit
+        .diagnostics
+        .iter()
+        .filter(|d| d.span.is_some_and(touches))
+    {
+        let Some(span) = d.span else { continue };
+        let Some(name) = source.get(span.start..span.end) else {
+            continue;
+        };
+        let candidates: Vec<String> = match d.code {
+            DiagnosticCode::UnknownChip => ws
+                .project(&dir)
+                .all_chips()
+                .into_iter()
+                .filter(|c| *c != unit.name)
+                .collect(),
+            DiagnosticCode::UnknownPin => {
+                let Some(interface) = unit.analysis.as_ref().and_then(|a| {
+                    a.parts
+                        .iter()
+                        .find(|p| p.span.start <= span.start && span.end <= p.span.end)?
+                        .interface
+                        .clone()
+                }) else {
+                    continue;
+                };
+                interface
+                    .inputs
+                    .iter()
+                    .chain(&interface.outputs)
+                    .map(|p| p.name.clone())
+                    .collect()
+            }
+            _ => continue,
+        };
+        let lsp_diagnostic = Some(lsp::Diagnostic {
+            range: text.range(span),
+            message: d.message.clone(),
+            ..Default::default()
+        });
+        for (i, suggestion) in suggestions(name, &candidates).into_iter().enumerate() {
+            actions.push(quick_fix(
+                format!("Did you mean `{suggestion}`?"),
+                uri,
+                vec![lsp::TextEdit::new(text.range(span), suggestion)],
+                lsp_diagnostic.clone(),
+                i == 0,
+            ));
+        }
+    }
+
+    // Missing connections of the parts in range.
+    let Some(analysis) = &unit.analysis else {
+        return actions;
+    };
+    let Some(ChipImpl::Composite { parts, .. }) =
+        unit.decl().and_then(|d| d.implementation.as_ref())
+    else {
+        return actions;
+    };
+    for part in parts.iter().filter(|p| touches(p.span)) {
+        let Some(interface) = analysis
+            .parts
+            .iter()
+            .find(|p| p.span == part.span)
+            .and_then(|p| p.interface.clone())
+        else {
+            continue;
+        };
+        let connected: Vec<&str> = part
+            .connections
+            .iter()
+            .map(|c| c.pin.name.name.as_str())
+            .collect();
+        let missing = |pins: &[PinInfo]| -> Vec<String> {
+            pins.iter()
+                .filter(|p| !connected.contains(&p.name.as_str()))
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        let inputs = missing(&interface.inputs);
+        let outputs = missing(&interface.outputs);
+        // Insert before the part's closing parenthesis.
+        let Some(part_text) = source.get(part.span.start..part.span.end) else {
+            continue;
+        };
+        let Some(close) = part_text.rfind(')').map(|i| part.span.start + i) else {
+            continue;
+        };
+        let inside = source.get(part.span.start..close).unwrap_or("");
+        let has_connections = inside
+            .rsplit('(')
+            .next()
+            .is_some_and(|s| !s.trim().is_empty());
+        let insert = |pins: &[String]| -> lsp::TextEdit {
+            let list: Vec<String> = pins.iter().map(|p| format!("{p}=")).collect();
+            let prefix = if has_connections { ", " } else { "" };
+            let at = text.position(close);
+            lsp::TextEdit::new(
+                lsp::Range::new(at, at),
+                format!("{prefix}{}", list.join(", ")),
+            )
+        };
+        if !inputs.is_empty() {
+            actions.push(quick_fix(
+                format!(
+                    "Add the missing input connections of `{}` ({})",
+                    part.chip_name.name,
+                    inputs.join(", ")
+                ),
+                uri,
+                vec![insert(&inputs)],
+                None,
+                false,
+            ));
+        }
+        if !outputs.is_empty() {
+            let all: Vec<String> = inputs.iter().chain(&outputs).cloned().collect();
+            actions.push(quick_fix(
+                format!(
+                    "Add all missing connections of `{}` ({})",
+                    part.chip_name.name,
+                    all.join(", ")
+                ),
+                uri,
+                vec![insert(&all)],
+                None,
+                false,
+            ));
+        }
+    }
+    actions
+}
+
+// -------------------------------------------------------------------------
+// Editor-only diagnostics
+// -------------------------------------------------------------------------
+
+/// Diagnostics the editor adds to a chip's own: a hint on each part whose
+/// chip is a local, still empty skeleton that hides a built-in chip.
+pub fn extra_diagnostics(ws: &mut Workspace, uri: &Url) -> Vec<Diagnostic> {
+    let Some(unit) = ws.hdl_unit(uri) else {
+        return Vec::new();
+    };
+    let Some(dir) = ws.docs.get(uri).map(|d| d.dir.clone()) else {
+        return Vec::new();
+    };
+    let Some(analysis) = &unit.analysis else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for part in &analysis.parts {
+        let name = part.chip_name.as_str();
+        if name == unit.name || ws.builtins.get(name).is_none() {
+            continue;
+        }
+        let child = ws.project(&dir).elaborator.compile(name);
+        if !matches!(child.origin, n2t_core::hdl::UnitOrigin::Source(_)) {
+            continue;
+        }
+        let skeleton = matches!(
+            child.decl().and_then(|d| d.implementation.as_ref()),
+            Some(ChipImpl::Composite { parts, .. }) if parts.is_empty()
+        );
+        if !skeleton {
+            continue;
+        }
+        let first = !seen.contains(&name);
+        seen.push(name);
+        let message = if first {
+            format!(
+                "`{name}.hdl` in this folder is an unimplemented skeleton, and it hides the \
+                 built-in `{name}`: the simulator uses the local file, so this part outputs only \
+                 zeros and every test that depends on it fails. Implement `{name}.hdl`, or move \
+                 it out of this folder to use the built-in chip."
+            )
+        } else {
+            format!("`{name}.hdl` is still an unimplemented skeleton (see above)")
+        };
+        out.push(Diagnostic::new(
+            n2t_core::Severity::Hint,
+            DiagnosticCode::Other("hdl-skeleton-shadows-builtin"),
+            message,
+            Some(part.chip_name_span),
+        ));
+    }
+    out
 }
