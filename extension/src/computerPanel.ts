@@ -254,8 +254,32 @@ class ComputerPanel {
             }
             return;
         }
-        this.accept(reply);
+        this.accept(isError(reply) || request.op !== 'state' ? reply : this.refreshed(reply));
         this.post();
+    }
+
+    /**
+     * A reply to a pure refresh (`state`) only reports what is in the machine:
+     * the engine does not remember why a program is stopped, so it always
+     * says `paused`. It must not change that. While a run is in progress the
+     * run's own frames own the status, so only the memory window and screen
+     * are taken; when nothing has executed since the state the panel already
+     * has, the status and error text stay (a breakpoint stays a breakpoint).
+     * `halted` and `error` replies are never downgraded, as they are taken as
+     * they come.
+     */
+    private refreshed(reply: MachineState): MachineState {
+        const before = this.state;
+        if (!before) {
+            return reply;
+        }
+        if (this.running) {
+            return { ...before, ram: reply.ram, screen: reply.screen };
+        }
+        if (reply.status === 'paused' && before.steps === reply.steps && before.status !== 'running') {
+            return { ...reply, status: before.status, error: before.error };
+        }
+        return reply;
     }
 
     private async handle(message: FromComputer): Promise<void> {

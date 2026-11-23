@@ -16,7 +16,15 @@ const EXTENSION_ID = 'nandwright.nandwright';
 const workspace = process.env.NANDWRIGHT_TEST_WORKSPACE!;
 const file = (...parts: string[]) => vscode.Uri.file(path.join(workspace, ...parts));
 
-async function until<T>(what: string, probe: () => T | undefined | false | Promise<T | undefined | false>, timeoutMs = 20_000): Promise<T> {
+/** What a panel shows, for the message of a timeout. */
+function shows(computer: { snapshot(): { state: { status: string; line: number | null; steps: number } | null; running: boolean; problem: string | null } }): () => string {
+    return () => {
+        const { state, running, problem } = computer.snapshot();
+        return `the panel showed status=${state?.status}, line=${state?.line}, steps=${state?.steps}, running=${running}, problem=${problem}`;
+    };
+}
+
+async function until<T>(what: string, probe: () => T | undefined | false | Promise<T | undefined | false>, timeoutMs = 20_000, describe?: () => string): Promise<T> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
         const value = await probe();
@@ -24,7 +32,7 @@ async function until<T>(what: string, probe: () => T | undefined | false | Promi
             return value;
         }
         if (Date.now() > deadline) {
-            throw new Error(`timed out waiting for ${what}`);
+            throw new Error(`timed out waiting for ${what}${describe ? `; ${describe()}` : ''}`);
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -432,7 +440,7 @@ describe('Nandwright', function () {
             assert.equal(computer.snapshot().state?.steps, 1);
             await computer.simulate({ type: 'run' });
             assert.equal(computer.snapshot().running, true);
-            await until('the program to draw', () => /[1-9a-f]/.test(computer.snapshot().state?.screen ?? ''));
+            await until('the program to draw', () => /[1-9a-f]/.test(computer.snapshot().state?.screen ?? ''), 20_000, shows(computer));
             await computer.simulate({ type: 'pause' });
             assert.equal(computer.snapshot().running, false);
             assert.ok((computer.snapshot().state?.steps ?? 0) > 100);
@@ -453,7 +461,7 @@ describe('Nandwright', function () {
                 await computer.simulate({ type: 'set', target: 'RAM', address: 0, value: '3' });
                 await computer.simulate({ type: 'memory', start: 100 });
                 await computer.simulate({ type: 'run' });
-                await until('the breakpoint', () => computer.snapshot().state?.status === 'breakpoint');
+                await until('the breakpoint', () => computer.snapshot().state?.status === 'breakpoint', 20_000, shows(computer));
                 const { state, running } = computer.snapshot();
                 assert.equal(running, false);
                 assert.equal(state?.line, done + 1);
@@ -497,14 +505,23 @@ describe('Nandwright', function () {
                 assert.equal(computer.snapshot().problem, null);
                 assert.equal(computer.snapshot().state?.kind, 'vm');
                 await computer.simulate({ type: 'run' });
-                await until('the Jack breakpoint', () => computer.snapshot().state?.status === 'breakpoint');
+                await until('the Jack breakpoint', () => computer.snapshot().state?.status === 'breakpoint', 20_000, shows(computer));
                 assert.equal(computer.snapshot().state?.line, line);
                 assert.equal(computer.snapshot().state?.callStack?.[0].function, 'Main.main');
+                // A refresh (a fresh page, a moved memory window) must not turn
+                // a breakpoint into a plain pause.
+                const stopped = computer.snapshot().state;
+                for (const message of [{ type: 'ready' }, { type: 'memory', start: 16 }] as const) {
+                    await computer.simulate(message);
+                    assert.equal(computer.snapshot().state?.status, 'breakpoint', `after ${message.type}`);
+                    assert.equal(computer.snapshot().state?.line, line);
+                    assert.equal(computer.snapshot().state?.steps, stopped?.steps);
+                }
                 await computer.simulate({ type: 'step', unit: 'line' });
                 assert.equal(computer.snapshot().state?.line, line + 1);
                 vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
                 await computer.simulate({ type: 'run' });
-                await until('the program to end', () => computer.snapshot().state?.status === 'halted');
+                await until('the program to end', () => computer.snapshot().state?.status === 'halted', 20_000, shows(computer));
                 assert.match(computer.snapshot().state?.screen ?? '', /[1-9a-f]/, 'the program printed nothing');
                 assert.ok(!fs.existsSync(file('jack', 'Main.vm').fsPath), 'running Jack wrote a .vm file');
                 computer.panel.dispose();
@@ -549,7 +566,7 @@ describe('Nandwright', function () {
                     await until(`the breakpoint, press ${press + 1}`, () => {
                         const { state, running } = computer.snapshot();
                         return !running && state?.status === 'breakpoint' && (press === 0 || state.steps > steps[press - 1]);
-                    });
+                    }, 20_000, shows(computer));
                     const { state } = computer.snapshot();
                     assert.equal(state?.line, line);
                     steps.push(state!.steps);
@@ -559,7 +576,13 @@ describe('Nandwright', function () {
             } finally {
                 vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
                 await closeAll();
-                fs.rmSync(dir.fsPath, { recursive: true, force: true });
+                // Best effort: on Windows VS Code may still hold the folder. The
+                // runner removes the whole temporary workspace afterwards.
+                try {
+                    fs.rmSync(dir.fsPath, { recursive: true, force: true });
+                } catch {
+                    // left for the runner
+                }
             }
         });
 
