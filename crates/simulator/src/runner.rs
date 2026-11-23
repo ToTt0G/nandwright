@@ -372,6 +372,11 @@ impl ScriptRunner {
         self.compare.as_ref().map(|(path, _)| path.as_str())
     }
 
+    /// The lines of the compare file, if one is open.
+    pub fn expected_lines(&self) -> Option<&[String]> {
+        self.compare.as_ref().map(|(_, c)| c.expected_lines())
+    }
+
     /// Every comparison failure seen so far. With
     /// [`RunnerOptions::collect_all_mismatches`] this goes beyond the first.
     pub fn failures(&self) -> &[Failure] {

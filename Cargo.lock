@@ -340,6 +340,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "n2t-wasm"
+version = "0.1.0"
+dependencies = [
+ "n2t-core",
+ "n2t-lsp",
+ "n2t-simulator",
+ "serde_json",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
