@@ -1,6 +1,7 @@
 /**
  * An unimplemented chip, the way every course project starts:
  * the interface is given and PARTS is still empty.
+ * (When written, out = 1 only when a is 0 and b is 1.)
  */
 CHIP Stub {
     IN a, b;

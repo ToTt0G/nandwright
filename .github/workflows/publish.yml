@@ -1,0 +1,40 @@
+name: Publish
+
+# Publishes the VSIX of an existing GitHub release to the Visual Studio
+# Marketplace and to Open VSX. Run it by hand, once the release exists.
+#
+# Needs two repository secrets:
+#   VSCE_PAT  a Marketplace personal access token for the publisher in
+#             extension/package.json
+#   OVSX_PAT  an Open VSX access token (optional; that step is skipped without it)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to publish, for example v0.1.0
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download the VSIX from the release
+        run: gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --pattern '*.vsix'
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Publish to the Visual Studio Marketplace
+        run: npx --yes @vscode/vsce publish --packagePath *.vsix
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != ''
+        run: npx --yes ovsx publish *.vsix
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}

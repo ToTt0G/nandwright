@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The engine, natively, on every platform: this is where a path or
+  # line-ending assumption that only holds on Linux shows up.
+  engine:
+    name: Engine (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+      - name: No course material in the repository
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/check-no-course-material.py
+
+  # One VSIX, built once. Every platform below tests these same bytes.
+  vsix:
+    name: Build the VSIX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+        working-directory: extension
+      - run: npm run typecheck
+        working-directory: extension
+      - run: npm run package
+        working-directory: extension
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: |
+            dist/*.vsix
+            extension/dist/engine.wasm
+          if-no-files-found: error
+
+  # The VSIX installed into a real VS Code on Linux, Windows and macOS.
+  extension:
+    name: Extension (${{ matrix.os }})
+    needs: vsix
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+      - run: npm ci
+        working-directory: extension
+      - name: Unit tests (the engine through its loader)
+        run: npm run test:unit
+        working-directory: extension
+      - name: Integration tests against the VSIX (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:integration -- --vsix ../dist/nandwright-*.vsix
+        working-directory: extension
+      - name: Integration tests against the VSIX (Windows, macOS)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: npm run test:integration -- --vsix ../dist/nandwright-*.vsix
+        working-directory: extension

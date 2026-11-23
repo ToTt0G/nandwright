@@ -1,0 +1,18 @@
+# Only what the extension needs at run time goes into the VSIX.
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!NOTICE.md
+!dist/extension.js
+!dist/server.js
+!dist/runtime.js
+!dist/engine.wasm
+!dist/webview/*.js
+!media/icon.png
+!media/example/**
+!media/walkthrough/**
+!syntaxes/**
+!snippets/**
+!language-configuration/**

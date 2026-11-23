@@ -1,0 +1,39 @@
+name: Release
+
+# Pushing a tag like v0.1.0 builds the VSIX and attaches it to a GitHub
+# release. Publishing to the Marketplace is a separate, manual workflow.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+        working-directory: extension
+      - name: The tag matches the extension version
+        run: test "v$(node -p "require('./extension/package.json').version")" = "$GITHUB_REF_NAME"
+      - run: npm run package
+        working-directory: extension
+      - name: Test the VSIX
+        run: xvfb-run -a npm run test:integration -- --vsix ../dist/nandwright-*.vsix
+        working-directory: extension
+      - name: Create the release
+        run: gh release create "$GITHUB_REF_NAME" dist/*.vsix --title "Nandwright ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
