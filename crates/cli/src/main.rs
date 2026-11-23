@@ -40,7 +40,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check `.hdl`, `.tst`, `.asm`, `.hack` and `.jack` files for errors
+    /// Check `.hdl`, `.tst`, `.asm`, `.hack`, `.vm` and `.jack` files for errors
     /// (directories are searched recursively).
     Check {
         #[arg(required = true)]
@@ -222,7 +222,7 @@ fn read(file: &str) -> Result<n2t_core::host::TextFile, String> {
 // -------------------------------------------------------------------------
 
 fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
-    let files = collect(paths, &["hdl", "tst", "asm", "hack", "jack"])?;
+    let files = collect(paths, &["hdl", "tst", "asm", "hack", "vm", "jack"])?;
     let builtins = Arc::new(BuiltinLibrary::standard());
     let mut by_dir: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in files {
@@ -265,6 +265,10 @@ fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
                 }
             } else if path::has_extension(&file, "asm") {
                 for d in &n2t_hack::assemble(&text).diagnostics {
+                    reporter.diagnostic(&shown, &text, d);
+                }
+            } else if path::has_extension(&file, "vm") {
+                for d in &n2t_vm::parse(path::stem(&file), &text).diagnostics {
                     reporter.diagnostic(&shown, &text, d);
                 }
             } else if path::has_extension(&file, "hack")

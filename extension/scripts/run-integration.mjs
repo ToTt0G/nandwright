@@ -8,7 +8,7 @@
 
 import { downloadAndUnzipVSCode, resolveCliArgsFromVSCodeExecutablePath, runTests } from '@vscode/test-electron';
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,13 +70,24 @@ try {
     let extensionDevelopmentPath = extension;
     if (vsix) {
         const [cli, ...cliArgs] = resolveCliArgsFromVSCodeExecutablePath(vscodeExecutablePath);
-        const installed = spawnSync(
-            cli,
-            [...cliArgs, `--extensions-dir=${extensionsDir}`, `--user-data-dir=${userData}`, '--install-extension', vsix, '--force'],
-            { stdio: 'inherit', shell: process.platform === 'win32' },
-        );
-        if (installed.status !== 0) {
-            throw new Error(`could not install ${vsix}`);
+        const installArgs = [
+            ...cliArgs,
+            `--extensions-dir=${extensionsDir}`,
+            `--user-data-dir=${userData}`,
+            '--install-extension',
+            vsix,
+            '--force',
+        ];
+        // On Windows the CLI is `code.cmd`, which only runs through a shell,
+        // and a shell splits unquoted arguments at spaces. The scratch folder
+        // has a space in its name on purpose, so quote everything.
+        const installed =
+            process.platform === 'win32'
+                ? spawnSync([cli, ...installArgs].map((arg) => `"${arg}"`).join(' '), { stdio: 'inherit', shell: true })
+                : spawnSync(cli, installArgs, { stdio: 'inherit' });
+        const present = existsSync(extensionsDir) && readdirSync(extensionsDir).some((name) => /nandwright/i.test(name));
+        if (installed.status !== 0 || !present) {
+            throw new Error(`could not install ${vsix} into ${extensionsDir}`);
         }
         extensionDevelopmentPath = join(extension, 'test-harness');
         console.log(`Testing the installed VSIX: ${vsix}`);

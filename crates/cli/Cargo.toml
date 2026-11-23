@@ -13,6 +13,7 @@ path = "src/main.rs"
 n2t-core.workspace = true
 n2t-hack.workspace = true
 n2t-jack.workspace = true
+n2t-vm.workspace = true
 n2t-lsp.workspace = true
 n2t-simulator.workspace = true
 clap = { version = "4", features = ["derive"] }

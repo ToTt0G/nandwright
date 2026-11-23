@@ -9,6 +9,7 @@ repository.workspace = true
 n2t-core.workspace = true
 n2t-hack.workspace = true
 n2t-jack.workspace = true
+n2t-vm.workspace = true
 lsp-server = "0.7"
 lsp-types = "0.95"
 percent-encoding = "2"

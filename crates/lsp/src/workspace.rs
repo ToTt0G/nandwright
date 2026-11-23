@@ -94,6 +94,8 @@ pub enum DocKind {
     /// Hack machine code.
     Hack,
     Jack,
+    /// A VM program file.
+    Vm,
     /// An expected-output file of a test script.
     Cmp,
     /// An output file written by a test script.
@@ -111,6 +113,7 @@ impl DocKind {
             "asm" => DocKind::Asm,
             "hack" => DocKind::Hack,
             "jack" => DocKind::Jack,
+            "vm" => DocKind::Vm,
             "cmp" => DocKind::Cmp,
             "out" => DocKind::Out,
             _ => DocKind::Other,
@@ -373,6 +376,11 @@ impl Workspace {
                 .and_then(|d| n2t_hack::parse_hack(&d.text).err())
                 .unwrap_or_default(),
             DocKind::Jack => crate::jack::diagnostics(self, uri),
+            DocKind::Vm => self
+                .docs
+                .get(uri)
+                .map(|d| n2t_vm::parse(&d.stem, &d.text).diagnostics)
+                .unwrap_or_default(),
             DocKind::Out => crate::compare::diagnostics(self, uri),
             DocKind::Cmp | DocKind::Other => Vec::new(),
         };
