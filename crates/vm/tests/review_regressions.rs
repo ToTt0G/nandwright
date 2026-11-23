@@ -71,6 +71,26 @@ fn linked_program_rejects_unrepresentable_return_addresses() {
 }
 
 #[test]
+fn sequential_return_skips_entire_files_of_labels() {
+    let labels = "label PAD\n".repeat(8_192);
+    let mut vm = make_vm(&[
+        ("Entry", "call Worker.answer 0\n"),
+        ("PaddingA", &labels),
+        ("PaddingB", &labels),
+        ("Result", "pop temp 0\nlabel STOP\ngoto STOP\n"),
+        (
+            "Worker",
+            "function Worker.answer 0\npush constant 74\nreturn\n",
+        ),
+    ]);
+    let bp = Breakpoints::new();
+    assert_eq!(vm.run(1, 0, &bp), RunStatus::Budget);
+    assert_eq!(vm.ram(256), 16_385);
+    assert_eq!(vm.run(10, 0, &bp), RunStatus::Budget);
+    assert_eq!(vm.ram(5), 74);
+}
+
+#[test]
 fn endless_recursion_with_flat_sp_keeps_the_shadow_call_stack_bounded() {
     // Main.f pops its own frame and calls itself again: SP never grows, so
     // the program runs forever without a stack overflow.
