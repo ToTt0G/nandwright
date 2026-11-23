@@ -18,12 +18,18 @@ official Java programs. Results are checked against those Java programs.
 
 ## Install
 
-1. Download `nandwright-<version>.vsix` from the [Releases](https://github.com/ToTt0G/nandwright/releases) page.
-2. In VS Code open the Extensions view, choose **…** then **Install from VSIX…**, and pick the file.
-   (Or run `code --install-extension nandwright-<version>.vsix`.)
+In VS Code open the Extensions view, search for **Nandwright** and press **Install**. Or
+install it from its
+[Marketplace page](https://marketplace.visualstudio.com/items?itemName=nandwright.nandwright).
+VS Code keeps it up to date from then on.
 
-That is all. It works on Windows, macOS and Linux with VS Code 1.91 or newer. There is one
-file to install and it is the same file on every platform.
+That is all. It works on Windows, macOS and Linux with VS Code 1.91 or newer.
+
+**Without the Marketplace** (VSCodium, an offline machine): download
+`nandwright-<version>.vsix` from the
+[Releases](https://github.com/ToTt0G/nandwright/releases) page, then in the Extensions view
+choose **…** and **Install from VSIX…**. It is the same file on every platform. A copy
+installed this way does not update itself.
 
 ## Quick start
 

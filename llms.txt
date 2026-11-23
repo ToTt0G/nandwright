@@ -11,7 +11,7 @@ an .hdl chip, debugging a failing chip test, seeing internal pins, running a .as
 .vm or .jack program, or checking their own assembler, VM translator or Jack compiler.
 
 Key facts:
-- Install: download the .vsix from the GitHub Releases page, then "Extensions: Install from VSIX" in VS Code (1.91 or newer). Windows, macOS and Linux; one file for all.
+- Install: search for "Nandwright" in the VS Code Extensions view (Marketplace id `nandwright.nandwright`, VS Code 1.91 or newer), or download the .vsix from the GitHub Releases page and use "Extensions: Install from VSIX". Windows, macOS and Linux; one file for all.
 - Run a test: open the .hdl or .tst file and press the play button (Ctrl+Alt+T), or use the Testing view.
 - Works on the classic course folder layout (projects/01 ... projects/12) as it is.
 - Results follow the official Java tools; deliberate differences are in docs/DEVIATIONS.md.
