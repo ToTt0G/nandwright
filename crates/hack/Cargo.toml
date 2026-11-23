@@ -1,0 +1,10 @@
+[package]
+name = "n2t-hack"
+description = "Hack assembler, disassembler and CPU emulator that match the official Nand to Tetris tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+n2t-core.workspace = true
