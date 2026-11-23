@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
-use n2t_vm::{Breakpoints, Program, RunStatus, Vm, parse};
+use n2t_vm::{Breakpoints, Program, RunStatus, Vm, VmError, parse};
 
 fn number<T: FromStr>(s: &str) -> T
 where
@@ -114,9 +114,21 @@ fn replay(name: &str) {
         );
     }
     if faults {
-        assert_ne!(java_status, "End of script", "{name}: Java did not fault");
         assert_eq!(status, RunStatus::Budget, "{name}");
-        assert!(matches!(vm.run(1, 0, &bp), RunStatus::Error(_)), "{name}");
+        let actual = vm.run(1, 0, &bp);
+        let matches_java = match java_status {
+            s if s.starts_with("Stack overflow in ") => {
+                matches!(actual, RunStatus::Error(VmError::StackOverflow { .. }))
+            }
+            s if s.starts_with("Out of segment space in ") => {
+                matches!(actual, RunStatus::Error(VmError::OutOfSegmentSpace { .. }))
+            }
+            "A built-in function tried to access memory outside the Heap or Screen range" => {
+                matches!(actual, RunStatus::Error(VmError::MemoryOutOfRange { .. }))
+            }
+            _ => false,
+        };
+        assert!(matches_java, "{name}: Java {java_status}, Rust {actual:?}");
     } else if java_halted {
         assert_eq!(status, RunStatus::Halted, "{name}");
     } else if java_error {
@@ -144,4 +156,14 @@ java_probes!(
     kb_readline_backspace_bounds,
     kb_readline_edit,
     kb_readline_long,
+    negative_circle_bottom,
+    negative_circle_end_aligned,
+    negative_circle_keyboard,
+    negative_circle_large,
+    negative_circle_min,
+    negative_circle_start_aligned,
+    negative_circle_top,
+    negative_circle_word_boundary,
+    screen_edge_details,
+    screen_edges,
 );

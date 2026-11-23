@@ -6,11 +6,12 @@
 //!   (`x1 <= x2` when `|dx| >= |dy|`, `y1 <= y2` when `|dy| > |dx|`), stepping
 //!   the minor axis when `d >= 0`.
 //! - `drawCircle`: filled midpoint circle algorithm (`d = 1 - r`) drawing
-//!   symmetric horizontal spans; negative radius is a silent no-op (matching Java),
-//!   radius `> 181` or extending outside the 512x256 screen raises `ERR13`.
+//!   symmetric horizontal spans. A negative radius still draws the initial
+//!   endpoints and reversed center span. A positive radius `> 181` or extending
+//!   outside the 512x256 screen raises `ERR13`.
 
 use crate::error::VmError;
-use crate::os::memory::{SCREEN_END, SCREEN_START};
+use crate::os::memory::{HEAP_START, KEYBOARD_ADDR, SCREEN_END, SCREEN_START};
 
 pub const SCREEN_WIDTH: i16 = 512;
 pub const SCREEN_HEIGHT: i16 = 256;
@@ -44,12 +45,30 @@ impl ScreenState {
     fn draw_pixel_unchecked(&self, ram: &mut [i16], x: i16, y: i16) {
         let addr = SCREEN_START as usize + (y as usize) * 32 + ((x as usize) >> 4);
         let mask = 1u16 << (x & 15);
-        let word = ram[addr] as u16;
-        ram[addr] = if self.color {
-            (word | mask) as i16
+        self.draw_word_mask(&mut ram[addr], mask);
+    }
+
+    #[inline]
+    fn draw_word_mask(&self, word: &mut i16, mask: u16) {
+        let current = *word as u16;
+        *word = if self.color {
+            (current | mask) as i16
         } else {
-            (word & !mask) as i16
+            (current & !mask) as i16
         };
+    }
+
+    fn draw_circle_word(&self, ram: &mut [i16], addr: i32, mask: u16) -> Result<(), VmError> {
+        // The built-in passes the linear address as a Hack word to memory.
+        let address = addr as i16;
+        if !(HEAP_START as i16..=KEYBOARD_ADDR as i16).contains(&address) {
+            return Err(VmError::MemoryOutOfRange {
+                function: "Screen.drawCircle",
+                address,
+            });
+        }
+        self.draw_word_mask(&mut ram[address as usize], mask);
+        Ok(())
     }
 
     pub fn draw_pixel(&self, ram: &mut [i16], x: i16, y: i16) -> Result<(), VmError> {
@@ -193,18 +212,25 @@ impl ScreenState {
                 message: "illegal center coordinates".to_string(),
             });
         }
-        // Verified against the Java VM Emulator: a negative radius does not
-        // raise ERR13; its initial top/bottom pixels `(cx, cy + r)` and
-        // `(cx, cy - r)` are drawn when inside screen bounds, and the loop
-        // exits immediately.
+        // A negative radius skips the circle loop, but Java draws its initial
+        // endpoints and reversed horizontal span through linear RAM addresses.
         if r < 0 {
-            let y1 = i32::from(cy) + i32::from(r);
-            let y2 = i32::from(cy) - i32::from(r);
-            if (0..i32::from(SCREEN_HEIGHT)).contains(&y1) {
-                self.draw_pixel_unchecked(ram, cx, y1 as i16);
-            }
-            if (0..i32::from(SCREEN_HEIGHT)).contains(&y2) {
-                self.draw_pixel_unchecked(ram, cx, y2 as i16);
+            let row = i32::from(SCREEN_START) + i32::from(cy) * 32;
+            let x = i32::from(cx);
+            let r = i32::from(r);
+            let pixel = row + (x >> 4);
+            let mask = 1 << (x & 15);
+            self.draw_circle_word(ram, pixel + r * 32, mask)?;
+            self.draw_circle_word(ram, pixel - r * 32, mask)?;
+            let start = x - r;
+            let end = x + r;
+            let start_word = start >> 4;
+            // In one word the two masks cancel. Across words Java writes the
+            // right-hand mask into the word following the start, even when
+            // the end coordinate lies to the left of the start.
+            if start_word != end >> 4 {
+                self.draw_circle_word(ram, row + start_word, u16::MAX << (start & 15))?;
+                self.draw_circle_word(ram, row + start_word + 1, u16::MAX >> (15 - (end & 15)))?;
             }
             return Ok(());
         }

@@ -1,0 +1,9 @@
+function Main.main 0
+push constant 3
+push constant 20
+push constant 32767
+not
+call Screen.drawCircle 3
+pop temp 0
+push constant 0
+return

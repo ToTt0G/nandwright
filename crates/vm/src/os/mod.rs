@@ -493,6 +493,10 @@ impl OsState {
                     value: 0,
                     screen_touched: true,
                 },
+                Err(error @ VmError::MemoryOutOfRange { .. }) => BuiltinOutcome::Error {
+                    error,
+                    screen_touched: true,
+                },
                 Err(error) => {
                     let code = if !(0..screen::SCREEN_WIDTH).contains(&a0)
                         || !(0..screen::SCREEN_HEIGHT).contains(&a1)
