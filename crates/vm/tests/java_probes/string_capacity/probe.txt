@@ -1,0 +1,4 @@
+steps 50
+ram 2050 2055
+ram 8000 8001
+screen

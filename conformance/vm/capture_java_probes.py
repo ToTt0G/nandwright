@@ -9,6 +9,7 @@ material) and a `probe.txt` header:
     keys 65 66 129 128     # optional: keys typed, one press+release each
     codes 65 66 129 128    # optional: actual Hack codes if Java's GUI remaps keys
     fast                   # optional: type keys quickly (long lines)
+    observe 22             # compare the first 22 screen rows between key events
     ram 8000 8020          # RAM range [lo, hi) to record (repeatable)
     set RAM[0] 2046        # script variable setup (repeatable)
     single                 # load Main.vm directly rather than bootstrap a directory
@@ -32,6 +33,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -54,7 +56,7 @@ def compile_driver() -> None:
 
 
 def read_header(path: Path) -> dict:
-    h = {"steps": 500, "keys": [], "fast": False, "ram": [], "set": [],
+    h = {"steps": 500, "keys": [], "fast": False, "ram": [], "set": [], "observe": 0,
          "screen": False, "single": False, "fault": False}
     for line in path.read_text().splitlines():
         parts = line.split("#", 1)[0].split()
@@ -64,6 +66,8 @@ def read_header(path: Path) -> dict:
             h["steps"] = int(parts[1])
         elif parts[0] == "keys":
             h["keys"] = [int(x) for x in parts[1:]]
+        elif parts[0] == "observe":
+            h["observe"] = int(parts[1])
         elif parts[0] == "codes":
             continue  # Rust replay only; send the original AWT events here.
         elif parts[0] in {"fast", "single", "screen", "fault"}:
@@ -108,10 +112,12 @@ def capture(probe: Path) -> None:
     per_key = 0.15 if h["fast"] else 0.55
     timeout = int(120 + per_key * len(events))
     cp = ":".join([str(CLASSES), "."] + LIBS)
-    proc = subprocess.run(["xvfb-run", "-a", "-s", "-screen 0 1600x1200x24",
-                           "timeout", str(timeout + 30), str(JAVA), "-cp", cp, "KeyDrive",
-                           str(work / "T.tst"), str(timeout), *events],
-                          cwd=TOOLS, capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(dir=WORK) as xvfb_tmp:
+        proc = subprocess.run(["env", f"TMPDIR={xvfb_tmp}", "xvfb-run", "-a", "-s",
+                               "-screen 0 1600x1200x24", "timeout", str(timeout + 30),
+                               str(JAVA), "-cp", cp, "KeyDrive", str(work / "T.tst"),
+                               str(timeout), str(h["observe"]), *events],
+                              cwd=TOOLS, capture_output=True, text=True)
     log = proc.stdout + proc.stderr
     statuses = [l[len("STATUS: "):] for l in log.splitlines() if l.startswith("STATUS: ")]
     dialogs = [l for l in log.splitlines() if l.startswith("CLICK ") and "No implementation" not in l]
@@ -125,7 +131,7 @@ def capture(probe: Path) -> None:
     if (proc.returncode or len(values) != len(addrs) or "TIMEOUT" in log or not statuses
             or (events and "KEYS DONE" not in log)):
         raise RuntimeError(f"{probe.name}: captured {len(values)}/{len(addrs)} values\n{log[-2000:]}")
-    lines = [f"java {statuses[-1] if statuses else '?'}"]
+    lines = [f"java {statuses[-1]}"]
     lines += [f"java-dialog {d[len('CLICK '):]}" for d in dialogs]
     ram_count = len(addrs) - (8192 if h["screen"] else 0)
     for i, (a, v) in enumerate(zip(addrs, values)):
@@ -133,6 +139,16 @@ def capture(probe: Path) -> None:
             lines.append(f"ram {a} {v}")
         elif v != 0:
             lines.append(f"screen {a - 16384} {v}")
+    if h["observe"]:
+        snapshots = [line.split()[1:] for line in log.splitlines() if line.startswith("SCREEN ")]
+        if len(snapshots) != 1 + 2 * len(events):
+            raise RuntimeError(f"{probe.name}: captured {len(snapshots)} screen snapshots")
+        for phase, (actual_phase, *words) in enumerate(snapshots):
+            if int(actual_phase) != phase or len(words) != h["observe"] * 32:
+                raise RuntimeError(f"{probe.name}: invalid screen snapshot for phase {phase}")
+            lines.append(f"snapshot {phase}")
+            lines.extend(f"snap {phase} {i} {word}" for i, word in enumerate(words)
+                         if int(word) != 0)
     (probe / "expected.txt").write_text("\n".join(lines) + "\n")
     print(f"{probe.name}: {lines[0]} ({len(lines) - 1} lines)", flush=True)
 

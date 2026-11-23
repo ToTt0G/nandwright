@@ -45,6 +45,52 @@ fn linking_a_forged_command_scope_cannot_overflow() {
 }
 
 #[test]
+fn linked_program_rejects_unrepresentable_return_addresses() {
+    // The original snippet loaded in Java at 32767 commands. The same
+    // snippet at 32768 commands crashed the Java loader.
+    let source = format!(
+        "goto START\n{}label START\npush constant 84\npop temp 0\n",
+        "label PAD\n".repeat(32_763)
+    );
+    let file = parse("Main", &source);
+    let (program, diagnostics) = Program::link(vec![file.clone()]);
+    assert!(!diagnostics.iter().any(|d| d.is_error()), "{diagnostics:?}");
+    assert_eq!(program.len(), 32_767);
+    let mut vm = Vm::new(program);
+    assert_eq!(vm.run(10, 0, &Breakpoints::new()), RunStatus::Halted);
+    assert_eq!(vm.ram(5), 84);
+
+    let (oversized, diagnostics) = Program::link(vec![file, parse("Extra", "push constant 0")]);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].is_error());
+    assert_eq!(
+        diagnostics[0].code,
+        n2t_core::DiagnosticCode::Other("vm-program-too-large")
+    );
+    assert!(oversized.is_empty());
+}
+
+#[test]
+fn sequential_return_skips_entire_files_of_labels() {
+    let labels = "label PAD\n".repeat(8_192);
+    let mut vm = make_vm(&[
+        ("Entry", "call Worker.answer 0\n"),
+        ("PaddingA", &labels),
+        ("PaddingB", &labels),
+        ("Result", "pop temp 0\nlabel STOP\ngoto STOP\n"),
+        (
+            "Worker",
+            "function Worker.answer 0\npush constant 74\nreturn\n",
+        ),
+    ]);
+    let bp = Breakpoints::new();
+    assert_eq!(vm.run(1, 0, &bp), RunStatus::Budget);
+    assert_eq!(vm.ram(256), 16_385);
+    assert_eq!(vm.run(10, 0, &bp), RunStatus::Budget);
+    assert_eq!(vm.ram(5), 74);
+}
+
+#[test]
 fn endless_recursion_with_flat_sp_keeps_the_shadow_call_stack_bounded() {
     // Main.f pops its own frame and calls itself again: SP never grows, so
     // the program runs forever without a stack overflow.
@@ -163,4 +209,38 @@ fn keyboard_line_budget_is_bounded_and_reset_discards_input() {
     assert_eq!(key(&mut vm, 128), RunStatus::Halted);
     let ptr = vm.ram(5) as u16;
     assert_eq!(&vm.ram_slice()[ptr as usize..][..3], &[1, 1, 90]);
+}
+
+#[test]
+fn suspended_builtin_keeps_debugger_on_the_vm_frame_with_its_own_locals() {
+    let mut vm = make_vm(&[
+        (
+            "Main",
+            "function Main.main 0\npush constant 42\ncall Other.pause 1\nreturn\n",
+        ),
+        (
+            "Other",
+            "function Other.pause 1\npush constant 71\npop local 0\n\
+                   push constant 5\ncall Sys.wait 1\npop temp 0\npush constant 0\nreturn\n",
+        ),
+    ]);
+    let mut bp = Breakpoints::new();
+    bp.insert("Other", 4);
+    assert_eq!(
+        vm.run(100, 10, &bp),
+        RunStatus::Breakpoint {
+            file: "Other".to_string(),
+            line: 4
+        },
+    );
+    assert_eq!(vm.program().location(vm.pc()), Some(("Other", 4)));
+    let before = vm.call_stack();
+    let active = before.last().unwrap();
+    assert_eq!(active.file.as_deref(), Some("Other"));
+    assert_eq!(active.line, Some(4));
+    assert_eq!(active.locals, [71]);
+    assert_eq!(active.arguments, [42]);
+    assert_eq!(vm.step(10), StepStatus::Sleeping { until_ms: 15 });
+    assert_eq!(vm.call_stack(), before);
+    assert_eq!(vm.run(100, 15, &bp), RunStatus::Halted);
 }

@@ -1,0 +1,3 @@
+push constant 101
+push constant 202
+pop temp 0

@@ -1,0 +1,12 @@
+single
+steps 8
+set local 256
+set argument 2047
+set this 2048
+set that 24576
+set RAM[2047] 34
+set RAM[2048] 56
+set RAM[24576] 78
+ram 0 5
+ram 12 13
+ram 256 260

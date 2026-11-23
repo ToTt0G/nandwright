@@ -18,6 +18,8 @@ pub const STATIC_BASE: u16 = 16;
 /// The last RAM address usable by `static` variables (`RAM[16..=254]`, 239 slots,
 /// matching the official Java VM Emulator's `Out of segment space` boundary).
 pub const STATIC_MAX: u16 = 254;
+/// Java uses signed 16-bit command addresses, including in RAM call frames.
+const MAX_COMMANDS: usize = i16::MAX as usize;
 
 /// A built-in Jack OS function implemented natively by the emulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -370,6 +372,30 @@ impl Program {
     /// segment overflow).
     pub fn link(mut files: Vec<ParsedVm>) -> (Self, Vec<Diagnostic>) {
         let mut diagnostics = Vec::new();
+        let command_count = files
+            .iter()
+            .map(|file| file.commands.len())
+            .fold(0usize, usize::saturating_add);
+        if command_count > MAX_COMMANDS {
+            diagnostics.push(Diagnostic::new(
+                n2t_core::Severity::Error,
+                DiagnosticCode::Other("vm-program-too-large"),
+                format!("VM program has {command_count} commands, exceeding the {MAX_COMMANDS}-command limit"),
+                None,
+            ));
+            return (
+                Self {
+                    ops: Vec::new(),
+                    meta: Vec::new(),
+                    files: Vec::new(),
+                    functions: Vec::new(),
+                    func_by_name: HashMap::new(),
+                    entry: EntryPoint::StartOfProgram { pc: 0 },
+                    has_builtin_calls: false,
+                },
+                diagnostics,
+            );
+        }
 
         // Place the file defining `Sys.init` (or named `Sys`) first, matching
         // the official Java VM Emulator's load order.
@@ -530,18 +556,7 @@ impl Program {
                 }
             }
 
-            // Precompute non-label index within each function (and top-level) and
-            // next non-label PC for sequential fallthrough / return addresses.
             let n = parsed.commands.len();
-            let mut next_non_label_in_file = vec![(pc_base + n) as u32; n];
-            let mut next_exec = (pc_base + n) as u32;
-            for i in (0..n).rev() {
-                next_non_label_in_file[i] = next_exec;
-                if !matches!(parsed.commands[i].kind, CommandKind::Label(_)) {
-                    next_exec = (pc_base + i) as u32;
-                }
-            }
-
             let mut idx_in_func: i32 = 0;
             let mut prev_scope: Option<u32> = None;
 
@@ -567,10 +582,6 @@ impl Program {
                     idx_in_func += 1;
                     cur
                 };
-
-                // Sequential fallthrough skips labels, even across file boundaries
-                // (though normal programs end functions with `return` or a loop).
-                let next_pc = next_non_label_in_file[cmd_idx];
 
                 let op = match &cmd.kind {
                     CommandKind::Push { segment, index, .. } => match segment {
@@ -675,7 +686,7 @@ impl Program {
                         Op::Call {
                             target,
                             n_args: *n_args,
-                            return_pc: next_pc,
+                            return_pc: 0, // Filled in alongside sequential fallthrough below.
                         }
                     }
                     CommandKind::Return => Op::Return,
@@ -688,23 +699,21 @@ impl Program {
                     span: cmd.span,
                     func_id: enclosing_func_id,
                     index_in_func: op_index_in_func,
-                    next_pc,
+                    next_pc: 0,
                 });
             }
         }
 
-        // Fix up cross-file sequential fallthroughs (if a file ends and the next
-        // file starts with a label, skip leading labels of the next file).
-        for m in &mut meta {
-            let mut pc = m.next_pc as usize;
-            while pc < ops.len() && matches!(ops[pc], Op::Label) {
-                pc += 1;
-            }
-            m.next_pc = pc as u32;
-        }
-        for (i, op) in ops.iter_mut().enumerate() {
+        // Sequential fallthrough and call returns skip labels across files.
+        // Scan backward once so adjacent files of labels cost linear time.
+        let mut next_pc = ops.len() as u32;
+        for (pc, (op, meta)) in ops.iter_mut().zip(&mut meta).enumerate().rev() {
+            meta.next_pc = next_pc;
             if let Op::Call { return_pc, .. } = op {
-                *return_pc = meta[i].next_pc;
+                *return_pc = next_pc;
+            }
+            if !matches!(op, Op::Label) {
+                next_pc = pc as u32;
             }
         }
 
@@ -720,11 +729,7 @@ impl Program {
                 main_func_id: main_id,
             }
         } else {
-            let mut pc = 0usize;
-            while pc < ops.len() && matches!(ops[pc], Op::Label) {
-                pc += 1;
-            }
-            EntryPoint::StartOfProgram { pc: pc as u32 }
+            EntryPoint::StartOfProgram { pc: next_pc }
         };
 
         (

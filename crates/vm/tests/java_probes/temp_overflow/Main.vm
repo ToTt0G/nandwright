@@ -1,0 +1,2 @@
+push constant 101
+pop temp 8

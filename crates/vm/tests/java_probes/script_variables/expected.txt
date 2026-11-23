@@ -1,0 +1,10 @@
+java End of script
+ram 0 256
+ram 1 255
+ram 2 0
+ram 3 0
+ram 4 24576
+ram 13 46
+ram 255 70
+ram 2000 -1
+ram 24576 91

@@ -1,0 +1,4 @@
+java Out of segment space in .1
+ram 0 257
+ram 13 0
+ram 256 101

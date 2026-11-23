@@ -1,0 +1,19 @@
+function Main.main 0
+push constant 3
+call String.new 1
+pop temp 1
+push temp 1
+push constant 123
+call String.setInt 2
+pop temp 0
+push constant 8000
+push temp 1
+call String.intValue 1
+call Memory.poke 2
+pop temp 0
+push temp 1
+push constant 57
+call String.appendChar 2
+pop temp 0
+push constant 0
+return

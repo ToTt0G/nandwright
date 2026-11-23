@@ -1,0 +1,7 @@
+single
+steps 1
+set sp 2046
+ram 0 1
+ram 5 6
+ram 2046 2048
+fault

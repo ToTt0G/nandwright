@@ -12,9 +12,9 @@ VM Emulator across:
    and all 8192 screen words (with scripted `RAM[24576]` keyboard events for
    interactive programs like `Square`, `Pong`, and `SysTest`).
 3. **Built-in OS & Error Probes** (`--only probes`): original VM programs
-   covering every built-in OS class (`Math`, `Memory`, `Array`, `String`,
-   `Screen`, `Output`, `Keyboard`, `Sys`) and all 19 OS error conditions
-   (`ERR1`–`ERR20`), comparing RAM, screen output, and error/halt status.
+   covering all eight built-in OS classes and 19 error cases (18 numbered
+   library errors and one explicit `Sys.error` call), comparing RAM,
+   screen output, and error/halt status.
 
 ## Usage
 
@@ -24,3 +24,20 @@ N2T_COURSE_DIR=~/n2t-private/course python3 conformance/vm/diff.py
 
 When `N2T_COURSE_DIR` is unset or does not exist (as in CI), the script skips
 cleanly and exits `0`. Any mismatch exits non-zero.
+
+## Java golden probes
+
+`cargo test -p n2t-vm --test java_probes` replays original VM programs against
+committed Java RAM and screen captures. Java and the course tree are only
+needed to refresh captures.
+
+```sh
+python3 conformance/vm/capture_java_probes.py [probe-name ...]
+```
+
+The capture script uses the private Java tool copy under
+`~/n2t-private/tmp/vm`, a Java 17 compiler on PATH, and a temporary Xvfb
+display. `KeyDrive.java` injects press and release events through Swing.
+Probes with `observe` record the rendered screen before input, with each
+key held, and after its release. `codes` supplies the Hack codes for
+replay when Java's GUI translates an event, such as lowercase to uppercase.

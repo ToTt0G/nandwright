@@ -76,6 +76,31 @@ pub enum PendingBuiltin {
     },
 }
 
+impl PendingBuiltin {
+    pub(crate) fn frame(&self) -> (u16, u16, u32) {
+        match *self {
+            Self::Sleep {
+                frame_lcl,
+                frame_arg,
+                return_pc,
+                ..
+            }
+            | Self::ReadChar {
+                frame_lcl,
+                frame_arg,
+                return_pc,
+                ..
+            }
+            | Self::ReadLine {
+                frame_lcl,
+                frame_arg,
+                return_pc,
+                ..
+            } => (frame_lcl, frame_arg, return_pc),
+        }
+    }
+}
+
 /// Key press/release state machine for `Keyboard.readChar` and `Keyboard.readLine`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyPhase {

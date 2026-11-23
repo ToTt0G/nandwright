@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::error::{RunStatus, StepStatus, VmError};
 use crate::os::memory::{HEAP_END, HEAP_START, KEYBOARD_ADDR, RAM_LEN, SCREEN_END, SCREEN_START};
-use crate::os::{BuiltinOutcome, OsState, PendingBuiltin};
+use crate::os::{BuiltinOutcome, OsState};
 use crate::parse::Segment;
 use crate::program::{CallTarget, EntryPoint, Op, Program};
 
@@ -309,29 +309,10 @@ impl Vm {
     }
 
     fn resume_pending(&mut self, now_ms: u64) -> StepStatus {
-        let (frame_lcl, frame_arg, return_pc) = match self.os.pending {
-            Some(
-                PendingBuiltin::Sleep {
-                    frame_lcl,
-                    frame_arg,
-                    return_pc,
-                    ..
-                }
-                | PendingBuiltin::ReadChar {
-                    frame_lcl,
-                    frame_arg,
-                    return_pc,
-                    ..
-                }
-                | PendingBuiltin::ReadLine {
-                    frame_lcl,
-                    frame_arg,
-                    return_pc,
-                    ..
-                },
-            ) => (frame_lcl, frame_arg, return_pc),
-            None => return StepStatus::Stepped,
+        let Some(pending) = &self.os.pending else {
+            return StepStatus::Stepped;
         };
+        let (frame_lcl, frame_arg, return_pc) = pending.frame();
 
         match self.os.poll_pending(&mut *self.ram, now_ms) {
             BuiltinOutcome::Return {
@@ -1184,16 +1165,27 @@ impl Vm {
     }
 
     /// Snapshot of the current call stack from bottom (oldest caller) to top (active frame).
+    /// A suspended built-in is represented by the VM frame and source line
+    /// that called it.
     pub fn call_stack(&self) -> Vec<CallFrame> {
         let last_idx = self.call_frames.len().saturating_sub(1);
+        let (active_lcl, active_arg) =
+            self.os
+                .pending
+                .as_ref()
+                .map_or((self.ram[1], self.ram[2]), |pending| {
+                    let (builtin_lcl, _, _) = pending.frame();
+                    let lcl = builtin_lcl as usize;
+                    (self.ram[lcl - 4], self.ram[lcl - 3])
+                });
         self.call_frames
             .iter()
             .enumerate()
             .map(|(i, f)| {
                 let (local_base, argument_base, line) = if i == last_idx {
                     (
-                        self.ram[1].max(0) as u16,
-                        self.ram[2].max(0) as u16,
+                        active_lcl.max(0) as u16,
+                        active_arg.max(0) as u16,
                         self.current_line().or(f.call_line),
                     )
                 } else {

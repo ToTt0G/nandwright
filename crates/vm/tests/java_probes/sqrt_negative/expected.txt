@@ -1,0 +1,20 @@
+java End of script
+java-dialog OK DIALOG:Program Halted: Cannot compute square root of a negative number
+screen 32 4127
+screen 64 6195
+screen 96 7219
+screen 128 6707
+screen 160 6431
+screen 192 16155
+screen 224 6195
+screen 256 6195
+screen 288 15411
+screen 7807 7999
+screen 7839 13107
+screen 7871 13091
+screen 7903 13067
+screen 7935 7951
+screen 7967 6923
+screen 7999 13091
+screen 8031 13107
+screen 8063 13119
