@@ -132,6 +132,8 @@ export interface Expected {
     name: string;
     header: string[];
     rows: string[][];
+    /** The line of the file each row is on, from 1; a blank line is a line but not a row. */
+    lines: number[];
     /** Rows left out because the file is long. */
     more: number;
 }
@@ -151,8 +153,11 @@ export interface ChipTest {
     /** Lines of the compare file compared, the header included. */
     comparedLines?: number;
     failureCount?: number;
+    /** Data rows of the compare file the run reached, and how many of them differ. */
+    comparedRows?: number;
+    differingRows?: number;
     message?: string;
-    /** One mark per data row of the compare file shown: row `i` is line `i + 2`. */
+    /** One mark per data row of the compare file shown, matched to it by line. */
     rows?: ('match' | 'differ' | 'unreached')[];
     /** For a differing row, the cells of the line the chip produced, unpadded spacing kept. */
     actual?: Record<number, string[]>;

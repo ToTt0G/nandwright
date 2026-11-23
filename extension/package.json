@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -558,7 +558,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
   },

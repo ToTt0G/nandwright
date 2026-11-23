@@ -68,6 +68,9 @@ async function removeFolder(folder: string): Promise<void> {
     }
 }
 
+/** A script that takes a few seconds, so that something can happen while it runs. */
+const BUSY_SCRIPT = 'load Majority.hdl,\nrepeat 6000000 {\n    set a 1, eval;\n}\n';
+
 /** A scratch folder inside the workspace holding copies of fixture files, given as `folder/name`. */
 function scratchCopy(prefix: string, files: string[]): string {
     const folder = fs.mkdtempSync(path.join(workspace, prefix));
@@ -436,23 +439,104 @@ describe('Nandwright', function () {
             }
         });
 
-        it('ends with one current result for the last of two quick saves', async () => {
+        it('a newer save cancels the run still going and runs what it had not finished', async () => {
             const nandwright = await api();
             const folder = scratchCopy('on-save-twice-', majority);
+            fs.writeFileSync(path.join(folder, 'Busy.tst'), BUSY_SCRIPT);
             try {
                 const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const busy = vscode.Uri.file(path.join(folder, 'Busy.tst'));
                 const script = vscode.Uri.file(path.join(folder, 'Majority.tst'));
                 const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
                 const original = editor.document.getText();
                 await replaceAll(editor, original.replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
                 assert.ok(await editor.document.save());
+                // The first automatic run is under way (Busy.tst runs first and takes a while)...
+                await until('the first automatic run', () => nandwright.tests.statusOf(busy).status === 'running', 30_000);
                 await replaceAll(editor, original);
+                const secondSave = Date.now();
                 assert.ok(await editor.document.save());
-                await until('a current result', () => nandwright.tests.statusOf(script).status === 'current', 30_000);
+                // ...and the second save cancels it: both scripts end with results of the second run.
+                await until(
+                    'current results of both scripts',
+                    () => nandwright.tests.statusOf(script).status === 'current' && nandwright.tests.statusOf(busy).status === 'current',
+                    90_000,
+                    () => `Majority.tst ${nandwright.tests.statusOf(script).status}, Busy.tst ${nandwright.tests.statusOf(busy).status}`,
+                );
                 await nandwright.tests.savedRunsSettled();
                 const status = nandwright.tests.statusOf(script);
                 assert.equal(status.status, 'current');
                 assert.equal(status.result?.kind, 'passed', JSON.stringify(status.result));
+                assert.ok(nandwright.tests.statusOf(busy).result!.started >= secondSave, 'Busy.tst was not run again after the second save');
+            } finally {
+                await discardEdits();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('an edit made while a run is going makes the results of its later scripts stale', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('edit-during-run-', majority);
+            fs.writeFileSync(path.join(folder, 'Busy.tst'), BUSY_SCRIPT);
+            try {
+                const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const busy = vscode.Uri.file(path.join(folder, 'Busy.tst'));
+                const script = vscode.Uri.file(path.join(folder, 'Majority.tst'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                // Busy.tst runs first; Majority.tst starts only after the edit below.
+                const run = nandwright.tests.runScripts([busy, script], { quiet: true });
+                await until('Busy.tst to run', () => nandwright.tests.statusOf(busy).status === 'running', 30_000);
+                await replaceAll(editor, editor.document.getText().replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
+                const results = await run;
+                assert.equal(results.length, 2);
+                // Whichever text Majority.tst saw, the edit came after the run began: its result is not current.
+                assert.equal(nandwright.tests.statusOf(script).status, 'stale');
+            } finally {
+                await discardEdits();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('asks the engine about the script as it is now, not unsaved text from before a revert', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('forever-', majority);
+            try {
+                const script = vscode.Uri.file(path.join(folder, 'Majority.tst'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(script), { preview: false });
+                // (Not asked before the edit: that answer would be remembered for the file as saved.)
+                await replaceAll(editor, 'load Majority.hdl,\nrepeat {\n    eval;\n}\n');
+                assert.equal(await nandwright.tests.runsForever(script), true);
+                await vscode.commands.executeCommand('workbench.action.files.revert');
+                assert.equal(editor.document.isDirty, false);
+                assert.equal(await nandwright.tests.runsForever(script), false);
+            } finally {
+                await discardEdits();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('finds a script that names the saved file in quotes', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('quoted-', majority);
+            try {
+                fs.copyFileSync(path.join(folder, 'Majority.cmp'), path.join(folder, 'Reference.cmp'));
+                const tst = path.join(folder, 'Majority.tst');
+                fs.writeFileSync(tst, fs.readFileSync(tst, 'utf8').replace('compare-to Majority.cmp', 'compare-to "Reference.cmp"'));
+                const script = vscode.Uri.file(tst);
+                const reference = vscode.Uri.file(path.join(folder, 'Reference.cmp'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(reference), { preview: false });
+                await replaceAll(editor, `${editor.document.getText().trimEnd()}\n`);
+                const saved = Date.now();
+                assert.ok(await editor.document.save());
+                await until(
+                    'Majority.tst to run after Reference.cmp is saved',
+                    () => nandwright.tests.statusOf(script).status === 'current' && nandwright.tests.statusOf(script).result!.started >= saved,
+                    30_000,
+                );
+                assert.equal(nandwright.tests.statusOf(script).result?.kind, 'passed');
             } finally {
                 await discardEdits();
                 await closeAll();
@@ -755,6 +839,42 @@ describe('Nandwright', function () {
                     await until('the panel to show Parity4', () => panel.snapshot().state?.chip === 'Parity4');
                     await panel.settled();
                     assert.deepEqual(testOf(), { script: 'Parity4.tst', status: 'none' });
+                    panel.panel.dispose();
+                } finally {
+                    await discardEdits();
+                    await closeAll();
+                    await removeFolder(folder);
+                }
+            });
+        });
+
+        describe('the last test run, against the compare file the script names', () => {
+            it('shows that file and marks each row by its line, across a blank line', async () => {
+                const nandwright = await api();
+                const folder = scratchCopy('panel-reference-', ['chips/Majority.hdl', 'chips/Majority.tst', 'chips/Majority.cmp']);
+                try {
+                    const cmp = fs.readFileSync(path.join(folder, 'Majority.cmp'), 'utf8').split(/\r?\n/);
+                    // The rows the script compares with, with a blank line after the third row...
+                    fs.writeFileSync(path.join(folder, 'Reference.cmp'), [...cmp.slice(0, 4), '', ...cmp.slice(4)].join('\n'));
+                    // ...and a different Majority.cmp beside the chip, which the script does not use.
+                    fs.writeFileSync(path.join(folder, 'Majority.cmp'), cmp.slice(0, 2).join('\n') + '\n');
+                    const tst = path.join(folder, 'Majority.tst');
+                    fs.writeFileSync(tst, fs.readFileSync(tst, 'utf8').replace('compare-to Majority.cmp', 'compare-to "Reference.cmp"'));
+                    const panel = await nandwright.chips.open(vscode.Uri.file(path.join(folder, 'Majority.hdl')));
+                    assert.equal(panel.snapshot().expected?.name, 'Reference.cmp');
+                    await panel.simulate({ type: 'runTest' });
+                    const test = await until(
+                        'the run',
+                        () => panel.snapshot().test?.status === 'current' && panel.snapshot().test!,
+                        30_000,
+                        () => JSON.stringify(panel.snapshot().test),
+                    );
+                    // Lines 2-4 match; the blank line 5 meets the chip's fourth row, so lines 6-9
+                    // meet the rows after the ones they hold; line 10 is never reached.
+                    assert.equal(test.kind, 'failed');
+                    assert.deepEqual(test.rows, ['match', 'match', 'match', 'differ', 'differ', 'differ', 'differ', 'unreached']);
+                    assert.deepEqual(test.actual![3].map((cell) => cell.trim()), ['1', '0', '0', '0']);
+                    assert.deepEqual([test.differingRows, test.comparedRows], [4, 7]);
                     panel.panel.dispose();
                 } finally {
                     await discardEdits();

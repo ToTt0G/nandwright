@@ -7,8 +7,9 @@ import { Runtime } from './runtime/client';
 import { ChipState, ChipTest, ClockStep, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
 import { pathKey, samePath } from './paths';
-import { TestExplorer, textOf } from './testing';
-import { parseCompare, rawCells } from './values';
+import { resultRows } from './chipRows';
+import { TestExplorer, commandFiles, textOf } from './testing';
+import { parseCompare } from './values';
 import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
@@ -21,24 +22,18 @@ const HISTORY_STEPS = 100;
 const EXPECTED_ROWS = 256;
 
 /**
- * The compare file of a chip: `<Chip>.cmp` beside it, or else the one named
- * by the first `compare-to` of `<Chip>.tst`. Null when there is none.
+ * The compare file of a chip: the one the first `compare-to` of `<Chip>.tst`
+ * names (what the test compares with, so its results line up), or else
+ * `<Chip>.cmp` beside it. Null when there is none.
  */
 async function findExpected(chip: vscode.Uri): Promise<Expected | null> {
     const dir = path.dirname(chip.fsPath);
     const stem = path.basename(chip.fsPath, path.extname(chip.fsPath));
-    let file = path.join(dir, `${stem}.cmp`);
-    let text = await textOf(file);
-    if (text === null) {
-        const script = await textOf(path.join(dir, `${stem}.tst`));
-        // Comments may mention compare-to; only a command counts.
-        const named = script?.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').match(/compare-to\s+([^\s,;]+)/)?.[1];
-        if (!named) {
-            return null;
-        }
-        file = path.resolve(dir, named);
-        text = await textOf(file);
-    }
+    const script = await textOf(path.join(dir, `${stem}.tst`));
+    // Comments may mention compare-to; only a command counts.
+    const named = script === null ? undefined : commandFiles(script, 'compare-to')[0];
+    const file = named ? path.resolve(dir, named) : path.join(dir, `${stem}.cmp`);
+    const text = await textOf(file);
     const parsed = text === null ? null : parseCompare(text, EXPECTED_ROWS);
     return parsed ? { path: file, name: path.basename(file), ...parsed } : null;
 }
@@ -234,24 +229,12 @@ class ChipPanel {
         if (result.message !== undefined) {
             test.message = result.message;
         }
+        if (result.rows !== undefined) {
+            test.comparedRows = result.rows;
+            test.differingRows = result.differingRows ?? 0;
+        }
         if (this.expected && (result.kind === 'passed' || result.kind === 'failed')) {
-            // Compare-file line numbers count from 1 and include the header:
-            // data row `i` is line `i + 2`.
-            const failed = new Map(result.failures.map((failure) => [failure.line, failure.actual]));
-            test.rows = [];
-            test.actual = {};
-            this.expected.rows.forEach((_, i) => {
-                const line = i + 2;
-                if (failed.has(line)) {
-                    test.rows!.push('differ');
-                    const actual = failed.get(line);
-                    if (actual !== null && actual !== undefined) {
-                        test.actual![i] = rawCells(actual);
-                    }
-                } else {
-                    test.rows!.push(line <= result.comparedLines ? 'match' : 'unreached');
-                }
-            });
+            Object.assign(test, resultRows(this.expected.lines, result));
         }
         return test;
     }

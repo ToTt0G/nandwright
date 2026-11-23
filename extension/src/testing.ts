@@ -22,6 +22,7 @@ import {
     isError,
 } from './runtime/protocol';
 import { ignoresCase, pathKey, samePath } from './paths';
+import { FolderListing, StoredResult, countRows, replaces, restore, toSave } from './resultStore';
 import { describePin, keyName } from './values';
 
 /** A script is stopped after this many commands. The longest official test
@@ -41,20 +42,7 @@ const SAVE_DELAY_MS = 200;
 
 const STORE_KEY = 'nandwright.results';
 
-/** The last result of a script, kept for the simulator and the status bar. */
-export interface StoredResult {
-    kind: TestOutcome['kind'];
-    /** Lines of the compare file compared, the header included. */
-    comparedLines: number;
-    failureCount: number;
-    /** The compare-file line and what the chip gave there, for the failures kept. */
-    failures: { line: number; actual: string | null }[];
-    notes: string[];
-    /** The error message, or why there is no result (limit, skipped, cancelled, unchecked). */
-    message?: string;
-    started: number;
-    finished: number;
-}
+export type { StoredResult } from './resultStore';
 
 export type ScriptStatus =
     | { status: 'none' | 'running'; result?: StoredResult }
@@ -147,6 +135,8 @@ export class TestExplorer implements vscode.Disposable {
             if (at > (this.changedAt.get(folder) ?? 0)) {
                 this.changedAt.set(folder, at);
                 this.statusEmitter.fire(undefined);
+                // A result that has gone stale must not be saved as one that holds.
+                this.persist();
             }
         };
         // A file event can arrive well after the change (and after a run that
@@ -192,9 +182,9 @@ export class TestExplorer implements vscode.Disposable {
     }
 
     private store(uri: vscode.Uri, result: StoredResult): void {
-        // A cancelled run says nothing about the chip: keep what was known.
-        if (result.kind !== 'cancelled') {
-            this.results.set(pathKey(uri.fsPath), { uri, result });
+        const key = pathKey(uri.fsPath);
+        if (replaces(this.results.get(key)?.result, result)) {
+            this.results.set(key, { uri, result });
             this.persist();
         }
     }
@@ -216,44 +206,19 @@ export class TestExplorer implements vscode.Disposable {
         }
         clearTimeout(this.persistTimer);
         this.persistTimer = setTimeout(() => {
-            const saved: Record<string, StoredResult & { path: string }> = {};
-            for (const [key, { uri, result }] of this.results) {
-                saved[key] = { path: uri.fsPath, ...result, failures: result.failures.slice(0, 50), notes: result.notes.slice(0, 5) };
-            }
-            void this.state!.update(STORE_KEY, saved);
+            const entries = [...this.results.values()].map(({ uri, result }) => ({
+                path: uri.fsPath,
+                result,
+                current: this.statusOf(uri).status === 'current',
+            }));
+            void this.state!.update(STORE_KEY, toSave(entries, listFolder));
         }, 1000);
     }
 
-    /**
-     * Results of earlier sessions. A script that is gone is dropped; a folder
-     * whose engine files changed since is marked by their times.
-     */
+    /** Results of earlier sessions that still hold. */
     private load(): void {
-        const saved = this.state?.get<Record<string, StoredResult & { path: string }>>(STORE_KEY);
-        if (!saved) {
-            return;
-        }
-        const folders = new Set<string>();
-        for (const [key, { path: file, ...result }] of Object.entries(saved)) {
-            if (!fs.existsSync(file)) {
-                continue;
-            }
-            this.results.set(key, { uri: vscode.Uri.file(file), result });
-            folders.add(path.dirname(file));
-        }
-        for (const folder of folders) {
-            let latest = 0;
-            try {
-                for (const name of fs.readdirSync(folder)) {
-                    if (ENGINE_FILE.test(name)) {
-                        latest = Math.max(latest, fs.statSync(path.join(folder, name)).mtimeMs);
-                    }
-                }
-            } catch {
-                // An unreadable folder: its results stay as they were.
-            }
-            const key = pathKey(folder);
-            this.changedAt.set(key, Math.max(latest, this.changedAt.get(key) ?? 0));
+        for (const { path: file, result } of restore(this.state?.get(STORE_KEY), listFolder)) {
+            this.results.set(pathKey(file), { uri: vscode.Uri.file(file), result });
         }
         this.persist();
     }
@@ -281,9 +246,8 @@ export class TestExplorer implements vscode.Disposable {
         }
         let answer = false;
         try {
-            if (open?.isDirty) {
-                await this.runtime.syncUnsaved();
-            }
+            // Always: the engine may still hold unsaved text from before a save or a revert.
+            await this.runtime.syncUnsaved();
             const opened = await this.runtime.tryCall<TestOpened>({ op: 'test.open', path: script.fsPath });
             if (!isError(opened)) {
                 this.runtime.close(opened.session);
@@ -355,15 +319,13 @@ export class TestExplorer implements vscode.Disposable {
             if (tests.length === 0 || source.token.isCancellationRequested) {
                 return;
             }
-            const finished = this.onDidFinishScript((result) => {
+            // Only this run's own results count as done: a manual run of the
+            // same script finishing meanwhile does not finish it here.
+            const results = await this.runScripts(tests, { quiet: true, token: source.token });
+            for (const result of results) {
                 if (result.outcome.kind !== 'cancelled') {
                     pending.delete(pathKey(result.uri.fsPath));
                 }
-            });
-            try {
-                await this.runScripts(tests, { quiet: true, token: source.token });
-            } finally {
-                finished.dispose();
             }
         })()
             .catch(() => {
@@ -517,6 +479,9 @@ export class TestExplorer implements vscode.Disposable {
         const scripts = this.scripts(request);
         scripts.forEach((item) => run.enqueued(item));
         try {
+            // Every script of the run sees the files as they are now: a change
+            // after this moment is not in any of its results.
+            const synced = Date.now();
             await this.runtime.syncUnsaved();
             for (const item of scripts) {
                 if (token.isCancellationRequested) {
@@ -526,7 +491,7 @@ export class TestExplorer implements vscode.Disposable {
                 this.setRunning(item.uri!, 1);
                 let result: ScriptResult;
                 try {
-                    result = await this.runOne(run, item, token);
+                    result = await this.runOne(run, item, token, synced);
                 } finally {
                     this.setRunning(item.uri!, -1);
                 }
@@ -547,6 +512,7 @@ export class TestExplorer implements vscode.Disposable {
         run: vscode.TestRun,
         item: vscode.TestItem,
         token: vscode.CancellationToken,
+        synced: number,
     ): Promise<ScriptResult> {
         const uri = item.uri!;
         const name = path.basename(uri.fsPath);
@@ -555,7 +521,7 @@ export class TestExplorer implements vscode.Disposable {
         run.started(item);
         const notes: string[] = [];
         const remember = (kind: TestOutcome['kind'], details: Partial<StoredResult> = {}) =>
-            this.store(uri, { kind, comparedLines: 0, failureCount: 0, failures: [], notes, started, finished: Date.now(), ...details });
+            this.store(uri, { kind, comparedLines: 0, failureCount: 0, failures: [], notes, started: synced, finished: Date.now(), ...details });
 
         const errored = (message: string, range: Range | null, kind: 'error' | 'limit' = 'error'): ScriptResult => {
             const testMessage = new vscode.TestMessage(message);
@@ -625,7 +591,7 @@ export class TestExplorer implements vscode.Disposable {
             switch (outcome.kind) {
                 case 'passed': {
                     run.passed(item, duration);
-                    remember('passed', { comparedLines: outcome.comparedLines });
+                    remember('passed', { comparedLines: outcome.comparedLines, rows: Math.max(0, outcome.comparedLines - 1), differingRows: 0 });
                     say(`✓ ${name}: comparison ended successfully (${outcome.comparedLines} lines compared)`);
                     if (outcome.unreachedLines > 0) {
                         say(
@@ -644,9 +610,11 @@ export class TestExplorer implements vscode.Disposable {
                 case 'failed': {
                     const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
                     run.failed(item, failureMessages(uri, failures, inspection, notes), duration);
+                    // Every line the script wrote was compared, up to the end of the compare file.
+                    const comparedLines = Math.min(lines.length, inspection.expected?.length ?? lines.length);
                     remember('failed', {
-                        // Every line the script wrote was compared, up to the end of the compare file.
-                        comparedLines: Math.min(lines.length, inspection.expected?.length ?? lines.length),
+                        comparedLines,
+                        ...countRows(inspection.expected ?? [], comparedLines, failures.map((failure) => failure.line)),
                         failureCount: outcome.failureCount,
                         failures: failures.map((failure) => ({ line: failure.line, actual: failure.actual })),
                     });
@@ -802,9 +770,15 @@ export function withoutComments(text: string): string {
     return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
 }
 
+/** The files a script names in one kind of command; a name may be in double quotes. */
+export function commandFiles(script: string, command: 'load' | 'compare-to'): string[] {
+    const pattern = new RegExp(`\\b${command}\\s+(?:"([^"\\r\\n]+)"|([^\\s,;"]+))`, 'g');
+    return [...withoutComments(script).matchAll(pattern)].map((match) => match[1] ?? match[2]);
+}
+
 /** The files a script names in `load` and `compare-to` commands. */
 export function namedFiles(script: string): string[] {
-    return [...withoutComments(script).matchAll(/\b(?:load|compare-to)\s+([^\s,;]+)/g)].map((match) => match[1]);
+    return [...commandFiles(script, 'load'), ...commandFiles(script, 'compare-to')];
 }
 
 /**
@@ -839,4 +813,20 @@ export async function scriptsUsing(file: vscode.Uri): Promise<vscode.Uri[]> {
         }
     }
     return found;
+}
+
+/** The engine files beside a file, for telling whether a saved result still holds. Null when the file is gone. */
+function listFolder(file: string): FolderListing {
+    try {
+        if (!fs.statSync(file).isFile()) {
+            return null;
+        }
+        const folder = path.dirname(file);
+        return fs
+            .readdirSync(folder)
+            .filter((name) => ENGINE_FILE.test(name))
+            .map((name) => ({ name, mtimeMs: fs.statSync(path.join(folder, name)).mtimeMs }));
+    } catch {
+        return null;
+    }
 }

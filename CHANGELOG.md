@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Test results are never shown for an older version of your work: results from overlapping
+  runs, from edits made while tests were running, and from before a reload are now
+  discarded instead of displayed, and row marks in the simulator always line up with the
+  compare file the script uses.
+
 ## 0.3.0
 
 - Tests run when you save: saving a chip, a program, a test script or a compare file runs

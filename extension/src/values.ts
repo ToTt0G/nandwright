@@ -158,13 +158,25 @@ export function rawCells(line: string): string[] {
     return pieces;
 }
 
-/** The lines of a compare file as cells, at most `limit` rows after the header. */
-export function parseCompare(text: string, limit: number): { header: string[]; rows: string[][]; more: number } | null {
-    const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
-    if (lines.length === 0) {
+/**
+ * The lines of a compare file as cells, at most `limit` rows after the
+ * header, with the line of the file each row is on (from 1, as the test
+ * engine counts them: a blank line is a line, but not a row).
+ */
+export function parseCompare(text: string, limit: number): { header: string[]; rows: string[][]; lines: number[]; more: number } | null {
+    const numbered = text
+        .split(/\r?\n/)
+        .map((line, i) => ({ line, number: i + 1 }))
+        .filter(({ line }) => line.trim() !== '');
+    if (numbered.length === 0) {
         return null;
     }
     const cells = (line: string): string[] => rawCells(line).map((piece) => piece.trim());
-    const rows = lines.slice(1).map(cells);
-    return { header: cells(lines[0]), rows: rows.slice(0, limit), more: Math.max(0, rows.length - limit) };
+    const rows = numbered.slice(1);
+    return {
+        header: cells(numbered[0].line),
+        rows: rows.slice(0, limit).map(({ line }) => cells(line)),
+        lines: rows.slice(0, limit).map(({ number }) => number),
+        more: Math.max(0, rows.length - limit),
+    };
 }

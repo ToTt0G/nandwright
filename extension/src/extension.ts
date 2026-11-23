@@ -85,7 +85,7 @@ function chipNameOf(document: vscode.TextDocument): string | undefined {
 async function scriptsForChip(chip: vscode.Uri): Promise<vscode.Uri[]> {
     const dir = vscode.Uri.joinPath(chip, '..');
     const name = path.basename(chip.fsPath, path.extname(chip.fsPath));
-    const loads = new RegExp(`\\bload\\s+${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.hdl\\b`, 'i');
+    const loads = new RegExp(`\\bload\\s+"?${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.hdl\\b`, 'i');
     const found: vscode.Uri[] = [];
     let entries: [string, vscode.FileType][] = [];
     try {
@@ -110,7 +110,7 @@ async function scriptsForChip(chip: vscode.Uri): Promise<vscode.Uri[]> {
 /** The chip a script loads, if it is a chip script and the file exists. */
 async function chipForScript(script: vscode.Uri): Promise<vscode.Uri | undefined> {
     const document = await vscode.workspace.openTextDocument(script);
-    const match = /\bload\s+([A-Za-z_][A-Za-z0-9_]*\.hdl)\b/i.exec(document.getText().replace(/\/\/.*$/gm, ''));
+    const match = /\bload\s+"?([A-Za-z_][A-Za-z0-9_]*\.hdl)\b/i.exec(document.getText().replace(/\/\/.*$/gm, ''));
     if (!match) {
         return undefined;
     }
@@ -244,12 +244,13 @@ export function testResultLens(tests: TestExplorer, scripts: vscode.Uri[]): vsco
     const name = path.basename(script.fsPath);
     switch (result.kind) {
         case 'passed':
-            return text('$(pass) Test passes', `${name}: all ${Math.max(0, result.comparedLines - 1)} rows match.`);
+            return text('$(pass) Test passes', `${name}: all ${result.rows ?? Math.max(0, result.comparedLines - 1)} rows match.`);
         case 'unchecked':
             return text('$(pass) Test passes', `${name}: ${result.message ?? ''}`);
         case 'failed': {
-            const rows = Math.max(0, result.comparedLines - 1);
-            return text(`$(error) Test fails: ${result.failureCount} of ${rows} rows differ`, `${name} fails: ${result.failureCount} of ${rows} rows differ.`);
+            const rows = result.rows ?? Math.max(0, result.comparedLines - 1);
+            const differ = result.differingRows ?? result.failureCount;
+            return text(`$(error) Test fails: ${differ} of ${rows} rows differ`, `${name} fails: ${differ} of ${rows} rows differ.`);
         }
         case 'error':
         case 'limit':

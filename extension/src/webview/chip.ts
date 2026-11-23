@@ -191,7 +191,8 @@ function actionButton(label: string, action: 'eval' | 'tick' | 'tock' | 'step' |
  */
 /** One line on the last run of the chip's test script. */
 function testSummary(run: ChipTest): { text: string; fails: boolean } {
-    const compared = Math.max(0, (run.comparedLines ?? 0) - 1);
+    const compared = run.comparedRows ?? Math.max(0, (run.comparedLines ?? 0) - 1);
+    const differing = run.differingRows ?? run.failureCount ?? 0;
     switch (run.status) {
         case 'none':
             return { text: 'Not run yet.', fails: false };
@@ -204,7 +205,7 @@ function testSummary(run: ChipTest): { text: string; fails: boolean } {
         case 'passed':
             return { text: `${run.script} passes: all ${compared} rows match.`, fails: false };
         case 'failed':
-            return { text: `${run.script} fails: ${run.failureCount ?? 0} of ${compared} rows differ.`, fails: true };
+            return { text: `${run.script} fails: ${differing} of ${compared} rows differ.`, fails: true };
         case 'error':
             return { text: `${run.script} stopped with an error: ${run.message ?? ''}`, fails: true };
         default:

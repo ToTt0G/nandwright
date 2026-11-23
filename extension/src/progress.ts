@@ -4,7 +4,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { TestExplorer, textOf, withoutComments } from './testing';
+import { TestExplorer, commandFiles, textOf, withoutComments } from './testing';
 
 export type ProgressState = 'failing' | 'notRun' | 'notStarted' | 'passing' | 'demonstration';
 
@@ -135,7 +135,7 @@ export class Progress implements vscode.Disposable {
                     state = 'failing';
                     description =
                         result.kind === 'failed'
-                            ? `${result.failureCount} of ${Math.max(0, result.comparedLines - 1)} rows differ`
+                            ? `${result.differingRows ?? result.failureCount} of ${result.rows ?? Math.max(0, result.comparedLines - 1)} rows differ`
                             : `error: ${result.message ?? ''}`;
                 } else if (passes) {
                     state = 'passing';
@@ -209,7 +209,7 @@ async function scriptsIn(folder: string): Promise<vscode.Uri[]> {
 
 /** The file a script loads, if it is in the script's folder. */
 async function loadedFile(script: vscode.Uri, text: string): Promise<vscode.Uri | undefined> {
-    const name = /\bload\s+([^\s,;]+)/.exec(withoutComments(text))?.[1];
+    const name = commandFiles(text, 'load')[0];
     if (!name || /[\\/]/.test(name)) {
         return undefined;
     }
