@@ -187,9 +187,10 @@ impl Vm {
     /// Executes up to `budget` VM commands, stopping early on a breakpoint,
     /// halt, keyboard wait, sleep, or runtime error.
     ///
-    /// Breakpoints are checked before executing each command (except on the very
-    /// first command when resuming right on a breakpoint if desired — actually
-    /// we check before every command, including the first, unless `budget == 0`).
+    /// Breakpoints are checked before each command, including the first one.
+    /// Use `step` to advance past a breakpoint before continuing.
+    /// A runtime error is reported once. Later calls return `Halted` until
+    /// reset or an explicit script assignment to `line`.
     pub fn run(&mut self, budget: u64, now_ms: u64, breakpoints: &Breakpoints) -> RunStatus {
         if self.halted {
             return RunStatus::Halted;
@@ -1005,7 +1006,10 @@ impl Vm {
 
         match res {
             Ok(status) => status,
-            Err(e) => StepStatus::Error(e),
+            Err(e) => {
+                self.halted = true;
+                StepStatus::Error(e)
+            }
         }
     }
 
@@ -1291,10 +1295,16 @@ impl Vm {
             ("this", None) => self.write_script_ptr(name, 3, value),
             ("that", None) => self.write_script_ptr(name, 4, value),
             ("line", None) => {
-                if value < 0 || (value as usize) > self.program.ops.len() {
+                if self.os.pending.is_some() {
+                    return Err("Cannot set line while a built-in call is waiting".to_string());
+                }
+                let Ok(pc) = usize::try_from(value) else {
+                    return Err(format!("{value} is an illegal value for: line"));
+                };
+                if pc > self.program.ops.len() {
                     return Err(format!("{value} is an illegal value for: line"));
                 }
-                self.pc = value as usize;
+                self.pc = pc;
                 self.boot_pending = false;
                 self.halted = false;
                 Ok(())
