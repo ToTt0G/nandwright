@@ -344,7 +344,7 @@ impl VmSession {
                 // Read (and for Jack, compile) the program again.
                 let key = self.vm.key();
                 let (vm, files, from_jack) = load(&self.host, &self.target)?;
-                self.vm = Box::new(vm);
+                *self.vm = vm;
                 self.files = files;
                 self.from_jack = from_jack;
                 self.stopped = None;
