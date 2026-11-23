@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { NandwrightApi } from '../../extension';
+import { samePath } from '../../paths';
 import type { ScriptResult } from '../../testing';
 
 const EXTENSION_ID = 'nandwright.nandwright';
@@ -475,7 +476,7 @@ describe('Nandwright', function () {
                 const majority = path.join(folder, 'Majority.hdl');
                 fs.writeFileSync(majority, fs.readFileSync(majority, 'utf8').replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
                 await vscode.window.showTextDocument(vscode.Uri.file(path.join(folder, 'Parity4.hdl')), { preview: false });
-                await until('the item for the folder', () => nandwright.progress.shown.visible && nandwright.progress.shown.folder === folder);
+                await until('the item for the folder', () => nandwright.progress.shown.visible && samePath(nandwright.progress.shown.folder ?? '', folder));
                 await nandwright.progress.runAll(folder);
                 await nandwright.progress.update();
                 const progress = await nandwright.progress.of(folder);
@@ -497,9 +498,9 @@ describe('Nandwright', function () {
                     ],
                 );
                 await nandwright.progress.open(progress.entries[0]);
-                assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath, majority);
+                assert.ok(samePath(vscode.window.activeTextEditor?.document.uri.fsPath ?? '', majority), vscode.window.activeTextEditor?.document.uri.fsPath);
                 // A script without a chip of its own in the folder opens itself.
-                assert.equal(progress.entries[3].target.fsPath, path.join(folder, 'InfiniteLoop.tst'));
+                assert.ok(samePath(progress.entries[3].target.fsPath, path.join(folder, 'InfiniteLoop.tst')), progress.entries[3].target.fsPath);
                 // An edit: that folder's results no longer count.
                 const editor = vscode.window.activeTextEditor!;
                 await replaceAll(editor, `${editor.document.getText()}\n`);
