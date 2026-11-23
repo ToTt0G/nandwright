@@ -58,6 +58,15 @@ async function replaceAll(editor: vscode.TextEditor, text: string): Promise<void
     assert.ok(await editor.edit((edit) => edit.replace(whole, text)));
 }
 
+/** Removes a scratch folder; on Windows a folder just watched or edited in can stay locked for a moment, and a leftover is not a failure. */
+async function removeFolder(folder: string): Promise<void> {
+    try {
+        fs.rmSync(folder, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    } catch {
+        // Left for the temp folder's own cleanup.
+    }
+}
+
 async function closeAll(): Promise<void> {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 }
@@ -410,7 +419,7 @@ describe('Nandwright', function () {
                 } finally {
                     panel.panel.dispose();
                     await closeAll();
-                    fs.rmSync(folder, { recursive: true, force: true });
+                    await removeFolder(folder);
                 }
             });
 
@@ -435,7 +444,7 @@ describe('Nandwright', function () {
                     panel.panel.dispose();
                 } finally {
                     await closeAll();
-                    fs.rmSync(folder, { recursive: true, force: true });
+                    await removeFolder(folder);
                 }
             });
         });
