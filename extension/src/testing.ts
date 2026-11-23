@@ -791,7 +791,7 @@ export async function textOf(file: string): Promise<string | null> {
         return open.getText();
     }
     try {
-        return await fs.promises.readFile(file, 'latin1');
+        return await fs.promises.readFile(file, 'utf8');
     } catch {
         return null;
     }

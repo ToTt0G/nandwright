@@ -136,6 +136,22 @@ export interface Expected {
     more: number;
 }
 
+/** The last run of a chip's test script, as the simulator panel shows it. */
+export interface ChipTest {
+    /** The script's file name. */
+    script: string;
+    status: 'none' | 'running' | 'current' | 'stale';
+    kind?: TestOutcome['kind'];
+    /** Lines of the compare file compared, the header included. */
+    comparedLines?: number;
+    failureCount?: number;
+    message?: string;
+    /** One mark per data row of the compare file shown: row `i` is line `i + 2`. */
+    rows?: ('match' | 'differ' | 'unreached')[];
+    /** For a differing row, the cells of the line the chip produced, unpadded spacing kept. */
+    actual?: Record<number, string[]>;
+}
+
 export interface TruthTable {
     inputs: { name: string; width: number }[];
     outputs: { name: string; width: number }[];

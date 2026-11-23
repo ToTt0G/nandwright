@@ -1,14 +1,14 @@
 // The chip simulator panel: an interactive view of one chip, next to its
 // source. It reloads as the student types, so the loop is edit, look, edit.
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
-import { ChipState, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
+import { ChipState, ChipTest, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
 import { pathKey, samePath } from './paths';
-import { parseCompare } from './values';
+import { TestExplorer, textOf } from './testing';
+import { parseCompare, rawCells } from './values';
 import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
@@ -16,19 +16,6 @@ const RELOAD_DELAY_MS = 250;
 
 /** Rows of the compare file shown; the rest are counted, not listed. */
 const EXPECTED_ROWS = 256;
-
-/** The text of a file as the student sees it: an open editor's, saved or not, else the disk's. */
-async function textOf(file: string): Promise<string | null> {
-    const open = vscode.workspace.textDocuments.find((document) => document.uri.scheme === 'file' && samePath(document.uri.fsPath, file));
-    if (open) {
-        return open.getText();
-    }
-    try {
-        return await fs.promises.readFile(file, 'utf8');
-    } catch {
-        return null;
-    }
-}
 
 /**
  * The compare file of a chip: `<Chip>.cmp` beside it, or else the one named
@@ -53,6 +40,13 @@ async function findExpected(chip: vscode.Uri): Promise<Expected | null> {
     return parsed ? { path: file, name: path.basename(file), ...parsed } : null;
 }
 
+/** The test script of a chip: `<Chip>.tst` beside it, if there is one. */
+async function findScript(chip: vscode.Uri): Promise<vscode.Uri | null> {
+    const stem = path.basename(chip.fsPath, path.extname(chip.fsPath));
+    const file = path.join(path.dirname(chip.fsPath), `${stem}.tst`);
+    return (await textOf(file)) === null ? null : vscode.Uri.file(file);
+}
+
 class ChipPanel {
     private session: number | undefined;
     private state: ChipState | null = null;
@@ -61,6 +55,7 @@ class ChipPanel {
     private reloadTimer: NodeJS.Timeout | undefined;
     private expectedTimer: NodeJS.Timeout | undefined;
     private expected: Expected | null = null;
+    private script: vscode.Uri | null = null;
     private watcher: vscode.FileSystemWatcher | undefined;
     private disposed = false;
     /** The chip shown. It changes when the panel follows the editor. */
@@ -75,9 +70,11 @@ class ChipPanel {
         uri: vscode.Uri,
         readonly panel: vscode.WebviewPanel,
         private readonly runtime: Runtime,
+        private readonly tests: TestExplorer,
         private readonly onDispose: () => void,
     ) {
         this.chip = uri;
+        this.disposables.push(this.tests.onDidChangeStatus(() => this.post()));
         panel.webview.onDidReceiveMessage((message: FromPanel) => this.enqueue(() => this.handle(message)), null, this.disposables);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
         // The folder is read each time: the chip shown can change.
@@ -146,6 +143,7 @@ class ChipPanel {
         this.table = null;
         this.problem = null;
         this.expected = null;
+        this.script = null;
         this.watchFolder();
         this.panel.title = `${path.basename(next.fsPath, path.extname(next.fsPath))} · simulator`;
         this.post();
@@ -183,9 +181,11 @@ class ChipPanel {
     }
 
     private async readExpected(): Promise<void> {
-        const found = await findExpected(this.chip);
-        if (!this.disposed) {
+        const chip = this.chip;
+        const [found, script] = await Promise.all([findExpected(chip), findScript(chip)]);
+        if (!this.disposed && chip === this.chip) {
             this.expected = found;
+            this.script = script;
         }
     }
 
@@ -198,8 +198,53 @@ class ChipPanel {
         if (this.disposed) {
             return;
         }
-        const message: ToPanel = { type: 'state', state: this.state, table: this.table, problem: this.problem, expected: this.expected };
+        const message: ToPanel = {
+            type: 'state',
+            state: this.state,
+            table: this.table,
+            problem: this.problem,
+            expected: this.expected,
+            test: this.testState(),
+        };
         void this.panel.webview.postMessage(message);
+    }
+
+    /** The last run of the chip's test script, row by row against the compare file shown. */
+    private testState(): ChipTest | null {
+        if (!this.script) {
+            return null;
+        }
+        const { status, result } = this.tests.statusOf(this.script);
+        const test: ChipTest = { script: path.basename(this.script.fsPath), status };
+        if (!result) {
+            return test;
+        }
+        test.kind = result.kind;
+        test.comparedLines = result.comparedLines;
+        test.failureCount = result.failureCount;
+        if (result.message !== undefined) {
+            test.message = result.message;
+        }
+        if (this.expected && (result.kind === 'passed' || result.kind === 'failed')) {
+            // Compare-file line numbers count from 1 and include the header:
+            // data row `i` is line `i + 2`.
+            const failed = new Map(result.failures.map((failure) => [failure.line, failure.actual]));
+            test.rows = [];
+            test.actual = {};
+            this.expected.rows.forEach((_, i) => {
+                const line = i + 2;
+                if (failed.has(line)) {
+                    test.rows!.push('differ');
+                    const actual = failed.get(line);
+                    if (actual !== null && actual !== undefined) {
+                        test.actual![i] = rawCells(actual);
+                    }
+                } else {
+                    test.rows!.push(line <= result.comparedLines ? 'match' : 'unreached');
+                }
+            });
+        }
+        return test;
     }
 
     /** Applies an engine reply: a new state, or a problem to show. */
@@ -295,6 +340,14 @@ class ChipPanel {
             await this.openExpected();
             return;
         }
+        if (message.type === 'runTest') {
+            // The run is not waited for: the panel stays usable, and the
+            // results event brings the outcome.
+            if (this.script) {
+                void this.tests.runScripts([this.script], { quiet: true });
+            }
+            return;
+        }
         if (this.session === undefined) {
             await this.reload();
             if (this.session === undefined) {
@@ -353,8 +406,8 @@ class ChipPanel {
     }
 
     /** The state last shown, for tests. */
-    snapshot(): { state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null } {
-        return { state: this.state, table: this.table, problem: this.problem, expected: this.expected };
+    snapshot(): { state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null; test: ChipTest | null } {
+        return { state: this.state, table: this.table, problem: this.problem, expected: this.expected, test: this.testState() };
     }
 
     /** Handles a message as if the panel had sent it, for tests. */
@@ -398,6 +451,7 @@ export class ChipPanels implements vscode.Disposable {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly runtime: Runtime,
+        private readonly tests: TestExplorer,
     ) {
         this.subscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
             // Anything but a chip file (a script, a built-in chip, the panel
@@ -445,7 +499,7 @@ export class ChipPanels implements vscode.Disposable {
             },
         );
         panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'chip.js', `${name} simulator`, CHIP_STYLE);
-        const chip: ChipPanel = new ChipPanel(uri, panel, this.runtime, () => this.panels.delete(chip));
+        const chip: ChipPanel = new ChipPanel(uri, panel, this.runtime, this.tests, () => this.panels.delete(chip));
         this.panels.add(chip);
         await chip.load();
         return chip;
@@ -478,6 +532,13 @@ button.bit:hover { border-color: var(--vscode-focusBorder); }
 .bus { width: 100%; max-width: 260px; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent)); border-radius: 2px; }
 .expected td, .expected th { font-family: var(--vscode-editor-font-family); }
 .expected td.differs { color: var(--vscode-errorForeground); font-weight: 600; }
+.expected .mark { width: 2em; padding: 3px 4px; font-family: var(--vscode-font-family); }
+.expected td.mark.match { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
+.expected td.mark.differ { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground)); font-weight: 600; }
+.expected td.mark.unreached { color: var(--vscode-descriptionForeground); }
+.test-run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 8px; }
+.test-run .summary { flex: 1 1 16em; min-width: 0; overflow-wrap: anywhere; }
+.test-run .summary.fails { color: var(--vscode-errorForeground); }
 .link { padding: 0; border: 0; background: none; font: inherit; color: var(--vscode-textLink-foreground); text-decoration: underline; cursor: pointer; }
 .link:hover { color: var(--vscode-textLink-activeForeground); }
 .link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }

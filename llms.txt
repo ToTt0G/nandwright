@@ -18,6 +18,7 @@ Key facts:
 - The simulators are a Rust engine compiled to WebAssembly and shipped inside the extension.
 - License: MPL-2.0.
 - Tests run when you save a file, quietly, in the Testing view.
+- The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 
 ## Docs
 

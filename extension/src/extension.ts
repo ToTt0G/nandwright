@@ -237,7 +237,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const client = startLanguageClient(context, output);
     registerBuiltinDocuments(context, client);
     const tests = new TestExplorer(runtime, debugScript, context.workspaceState);
-    const chips = new ChipPanels(context.extensionUri, runtime);
+    const chips = new ChipPanels(context.extensionUri, runtime, tests);
     const computers = new ComputerPanels(context.extensionUri, runtime);
     const outputs = new Outputs(runtime);
     registerDebugger(context, runtime);

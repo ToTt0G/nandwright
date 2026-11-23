@@ -73,6 +73,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   truth table.
 - Clocked chips have **Tick**, **Tock** and the clock time, so you can watch a register load.
 - The panel follows the editor as you type. It follows you from chip to chip as you switch files. Below the pins it shows the expected output from the chip's `.cmp` file, and marks where your chip disagrees.
+- The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 
 ![The chip simulator beside the HDL source, with inputs, outputs, internal pins and a truth table](docs/images/chip-simulator.png)
 

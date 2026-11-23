@@ -5,6 +5,9 @@
 - Tests run when you save: saving a chip, a program, a test script or a compare file runs
   the test scripts in its folder that use it, quietly, in the Testing view. The setting
   `nandwright.test.runOnSave` turns this off.
+- The chip simulator shows the last test run: each row of the expected output is marked
+  as matching, differing (with what your chip gave) or not reached, and a Run test button
+  runs the chip's test from the panel.
 
 ## 0.2.0
 

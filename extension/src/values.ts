@@ -143,22 +143,28 @@ export function cellValue(cell: string, width: number): bigint | 'any' | null {
     return null;
 }
 
+/**
+ * The cells of a line of an output table, with their spacing: `|` and the
+ * cells joined give the line back.
+ */
+export function rawCells(line: string): string[] {
+    const pieces = line.split('|');
+    if (pieces[0].trim() === '') {
+        pieces.shift();
+    }
+    if (pieces.length > 0 && pieces[pieces.length - 1].trim() === '') {
+        pieces.pop();
+    }
+    return pieces;
+}
+
 /** The lines of a compare file as cells, at most `limit` rows after the header. */
 export function parseCompare(text: string, limit: number): { header: string[]; rows: string[][]; more: number } | null {
     const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
     if (lines.length === 0) {
         return null;
     }
-    const cells = (line: string): string[] => {
-        const pieces = line.split('|');
-        if (pieces[0].trim() === '') {
-            pieces.shift();
-        }
-        if (pieces.length > 0 && pieces[pieces.length - 1].trim() === '') {
-            pieces.pop();
-        }
-        return pieces.map((piece) => piece.trim());
-    };
+    const cells = (line: string): string[] => rawCells(line).map((piece) => piece.trim());
     const rows = lines.slice(1).map(cells);
     return { header: cells(lines[0]), rows: rows.slice(0, limit), more: Math.max(0, rows.length - limit) };
 }

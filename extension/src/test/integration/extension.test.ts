@@ -76,6 +76,15 @@ function scratchCopy(prefix: string, files: string[]): string {
     return folder;
 }
 
+async function discardEdits(): Promise<void> {
+    for (const document of vscode.workspace.textDocuments) {
+        if (document.isDirty) {
+            await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand('workbench.action.files.revert');
+        }
+    }
+}
+
 async function closeAll(): Promise<void> {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 }
@@ -90,12 +99,7 @@ describe('Nandwright', function () {
 
     afterEach(async () => {
         // Discard edits so one test's broken chip does not leak into the next.
-        for (const document of vscode.workspace.textDocuments) {
-            if (document.isDirty) {
-                await vscode.window.showTextDocument(document);
-                await vscode.commands.executeCommand('workbench.action.files.revert');
-            }
-        }
+        await discardEdits();
         await closeAll();
     });
 
@@ -382,6 +386,7 @@ describe('Nandwright', function () {
                 await replaceAll(editor, editor.document.getText().replace('// saved', '// edited'));
                 await until('the result to go stale', async () => (await statusOf(script)).status === 'stale');
             } finally {
+                await discardEdits();
                 await closeAll();
                 await removeFolder(folder);
             }
@@ -401,6 +406,7 @@ describe('Nandwright', function () {
                 assert.equal(nandwright.tests.statusOf(vscode.Uri.file(path.join(folder, 'Majority.tst'))).status, 'none');
             } finally {
                 await settings.update('runOnSave', undefined, vscode.ConfigurationTarget.Global);
+                await discardEdits();
                 await closeAll();
                 await removeFolder(folder);
             }
@@ -424,6 +430,7 @@ describe('Nandwright', function () {
                 assert.equal(status.status, 'current');
                 assert.equal(status.result?.kind, 'passed', JSON.stringify(status.result));
             } finally {
+                await discardEdits();
                 await closeAll();
                 await removeFolder(folder);
             }
@@ -497,6 +504,8 @@ describe('Nandwright', function () {
                     await until('the panel to show the lone chip', () => nandwright.chips.get(alone) === panel);
                     await panel.settled();
                     assert.equal(panel.snapshot().expected, null);
+                    // No script: no test result either.
+                    assert.equal(panel.snapshot().test, null);
                 } finally {
                     panel.panel.dispose();
                     await closeAll();
@@ -524,6 +533,59 @@ describe('Nandwright', function () {
                     );
                     panel.panel.dispose();
                 } finally {
+                    await closeAll();
+                    await removeFolder(folder);
+                }
+            });
+        });
+
+        describe('the last test run', () => {
+            it('runs the test from the panel and marks each row of the expected output', async () => {
+                const nandwright = await api();
+                const folder = scratchCopy('panel-test-', ['Majority', 'Parity4'].flatMap((name) => ['hdl', 'tst', 'cmp'].map((ext) => `chips/${name}.${ext}`)));
+                try {
+                    const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                    const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                    const panel = await nandwright.chips.open(chip);
+                    const testOf = () => panel.snapshot().test;
+                    assert.deepEqual(testOf(), { script: 'Majority.tst', status: 'none' });
+                    const current = (what: string) =>
+                        until(what, () => testOf()?.status === 'current' && testOf()!, 30_000, () => `the panel showed ${JSON.stringify(testOf())}`);
+
+                    await panel.simulate({ type: 'runTest' });
+                    const passed = await current('the passing run');
+                    assert.equal(passed.kind, 'passed');
+                    assert.equal(passed.comparedLines, 9);
+                    assert.deepEqual(passed.rows, Array(8).fill('match'));
+
+                    // Or where an And belongs: rows 0 0 1 and 1 0 0 come out 1.
+                    const original = editor.document.getText();
+                    await replaceAll(editor, original.replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
+                    await until('the result to go stale', () => testOf()?.status === 'stale');
+                    await panel.simulate({ type: 'runTest' });
+                    const failed = await current('the failing run');
+                    assert.equal(failed.kind, 'failed');
+                    assert.equal(failed.failureCount, 2);
+                    assert.equal(failed.comparedLines, 9);
+                    assert.deepEqual(failed.rows, ['match', 'differ', 'match', 'match', 'differ', 'match', 'match', 'match']);
+                    assert.deepEqual(Object.keys(failed.actual ?? {}), ['1', '4']);
+                    assert.deepEqual(failed.actual![1].map((cell) => cell.trim()), ['0', '0', '1', '1']);
+                    assert.deepEqual(failed.actual![4].map((cell) => cell.trim()), ['1', '0', '0', '1']);
+                    // The cells are kept with their spacing: the line as the chip wrote it.
+                    assert.equal(`|${failed.actual![1].join('|')}|`, '|   0   |   0   |   1   |   1   |');
+
+                    await replaceAll(editor, original);
+                    await until('the result to go stale again', () => testOf()?.status === 'stale');
+
+                    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(folder, 'Parity4.hdl'))), {
+                        preview: false,
+                    });
+                    await until('the panel to show Parity4', () => panel.snapshot().state?.chip === 'Parity4');
+                    await panel.settled();
+                    assert.deepEqual(testOf(), { script: 'Parity4.tst', status: 'none' });
+                    panel.panel.dispose();
+                } finally {
+                    await discardEdits();
                     await closeAll();
                     await removeFolder(folder);
                 }

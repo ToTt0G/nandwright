@@ -4,7 +4,7 @@
 // internal pins, which follow. The extension owns the simulation; this file
 // only draws the state it is sent and reports what the student does.
 
-import type { ChipState, Expected, Pin, TruthTable } from '../runtime/protocol';
+import type { ChipState, ChipTest, Expected, Pin, TruthTable } from '../runtime/protocol';
 import { Radix, cellValue, formatValue, toBigInt, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
@@ -14,12 +14,20 @@ declare function acquireVsCodeApi(): {
 };
 
 export type ToPanel =
-    | { type: 'state'; state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null }
+    | {
+          type: 'state';
+          state: ChipState | null;
+          table: TruthTable | null;
+          problem: string | null;
+          expected: Expected | null;
+          test: ChipTest | null;
+      }
     | { type: 'rejected'; pin: string; message: string };
 
 export type FromPanel =
     | { type: 'ready' }
     | { type: 'openExpected' }
+    | { type: 'runTest' }
     | { type: 'set'; pin: string; value: string | number }
     | { type: 'setAll'; values: Record<string, number> }
     | { type: 'action'; action: 'eval' | 'tick' | 'tock' | 'step' | 'reset' };
@@ -31,6 +39,7 @@ let radix: Radix = vscode.getState()?.radix ?? 'dec';
 let current: ChipState | null = null;
 let table: TruthTable | null = null;
 let expected: Expected | null = null;
+let test: ChipTest | null = null;
 let previous = new Map<string, string>();
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -175,6 +184,44 @@ function actionButton(label: string, action: 'eval' | 'tick' | 'tock' | 'step' |
  * inputs to a row, and an output that differs in the current row is pointed
  * out. Otherwise the table is only shown.
  */
+/** One line on the last run of the chip's test script. */
+function testSummary(run: ChipTest): { text: string; fails: boolean } {
+    const compared = Math.max(0, (run.comparedLines ?? 0) - 1);
+    switch (run.status) {
+        case 'none':
+            return { text: 'Not run yet.', fails: false };
+        case 'running':
+            return { text: `Running ${run.script}…`, fails: false };
+        case 'stale':
+            return { text: 'Edited since the last run. Save or press Run test to check again.', fails: false };
+    }
+    switch (run.kind) {
+        case 'passed':
+            return { text: `${run.script} passes: all ${compared} rows match.`, fails: false };
+        case 'failed':
+            return { text: `${run.script} fails: ${run.failureCount ?? 0} of ${compared} rows differ.`, fails: true };
+        case 'error':
+            return { text: `${run.script} stopped with an error: ${run.message ?? ''}`, fails: true };
+        default:
+            return { text: `${run.script} did not give a result: ${run.message ?? ''}`, fails: false };
+    }
+}
+
+function testBar(run: ChipTest): HTMLElement {
+    const bar = element('div', { class: 'test-run' });
+    const { text, fails } = testSummary(run);
+    bar.append(element('span', { class: `summary${fails ? ' fails' : ''}`, role: 'status' }, text));
+    const button = element('button', { type: 'button', class: 'secondary', title: `Run ${run.script}` }, 'Run test');
+    if (run.status === 'running') {
+        button.setAttribute('disabled', '');
+    }
+    button.addEventListener('click', () => send({ type: 'runTest' }));
+    bar.append(button);
+    return bar;
+}
+
+const MARKS = { match: '✓', differ: '✗', unreached: '–' } as const;
+
 function expectedTable(state: ChipState, file: Expected): HTMLElement {
     const block = element('section', {});
     block.append(element('h2', {}, 'Expected output'));
@@ -183,6 +230,12 @@ function expectedTable(state: ChipState, file: Expected): HTMLElement {
     const hint = element('p', { class: 'hint' }, 'From ');
     hint.append(open, ': what the test script compares your chip with.');
     block.append(hint);
+    if (test) {
+        block.append(testBar(test));
+    }
+    // Marks only for a result that still holds.
+    const marks = test?.status === 'current' && test.rows ? test.rows : null;
+    const actualRows = (marks && test?.actual) || {};
 
     const inputs = state.pins.filter((pin) => pin.role === 'input');
     const outputs = state.pins.filter((pin) => pin.role === 'output');
@@ -197,10 +250,13 @@ function expectedTable(state: ChipState, file: Expected): HTMLElement {
 
     const tableElement = element('table', { class: 'truth expected' });
     const head = element('tr', {});
+    if (marks) {
+        head.append(element('th', { scope: 'col', class: 'mark', 'aria-label': 'Last test run' }));
+    }
     file.header.forEach((cell) => head.append(element('th', { scope: 'col' }, cell)));
     tableElement.append(element('thead', {}, head));
     const body = element('tbody', {});
-    for (const row of file.rows) {
+    for (const [index, row] of file.rows.entries()) {
         const isCurrent = row === currentRow;
         const values: Record<string, number> = {};
         let settable = interactive;
@@ -222,12 +278,27 @@ function expectedTable(state: ChipState, file: Expected): HTMLElement {
             attributes['aria-selected'] = String(isCurrent);
         }
         const tr = element('tr', attributes);
+        const mark = marks?.[index];
+        const produced = mark === 'differ' ? actualRows[index] : undefined;
+        if (marks) {
+            const label =
+                mark === 'match'
+                    ? 'This row matches'
+                    : mark === 'differ'
+                      ? `This row differs. Your chip gave: ${produced ? `|${produced.join('|')}|` : ''}`
+                      : 'The test did not reach this row';
+            tr.append(element('td', { class: `mark ${mark ?? 'unreached'}`, title: label, 'aria-label': label }, MARKS[mark ?? 'unreached']));
+        }
         row.forEach((cell, i) => {
             const pin = isCurrent ? outputs.find((p) => column(p) === i) : undefined;
             const wanted = pin ? cellValue(cell, pin.width) : null;
+            const gave = produced?.[i]?.trim();
             if (pin && typeof wanted === 'bigint' && wanted !== toBigInt(pin.bits)) {
                 const actual = formatValue(pin.bits, pin.width, pin.width > 1 ? radix : 'dec');
                 const text = `Expected ${cell}, your chip gives ${actual}`;
+                tr.append(element('td', { class: 'differs', title: text, 'aria-label': text }, `${cell} ✗`));
+            } else if (gave !== undefined && !/^\*+$/.test(cell) && gave !== cell) {
+                const text = `Expected ${cell}, your chip gave ${gave}`;
                 tr.append(element('td', { class: 'differs', title: text, 'aria-label': text }, `${cell} ✗`));
             } else {
                 tr.append(element('td', {}, cell));
@@ -392,12 +463,14 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             current = message.state;
             table = message.table;
             expected = message.expected;
+            test = message.test;
         } else {
             // The panel moved to another chip that has not loaded: the old
             // chip's pins must not stay on screen under the new one's name.
             current = null;
             table = null;
             expected = null;
+            test = null;
             previous = new Map();
         }
         render(message.problem);
