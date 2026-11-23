@@ -13,6 +13,8 @@ pub fn parse(source: &str) -> ParsedJack;      // tokens (with comments) + tree 
 pub fn resolve(parsed: &ParsedJack) -> Symbols; // what every identifier refers to
 pub fn analyze(file_stem: &str, source: &str) -> FileAnalysis; // all three at once
 pub mod os;                                     // the Jack OS API table
+pub fn tokens_xml(source: &str) -> Result<String, Vec<Diagnostic>>; // project-10 *T.xml
+pub fn parse_xml(source: &str) -> Result<String, Vec<Diagnostic>>;  // project-10 *.xml
 ```
 
 `examples/jackc.rs` compiles a file or directory from the command line

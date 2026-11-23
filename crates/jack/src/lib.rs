@@ -31,6 +31,7 @@ pub use lexer::{Keyword, Token, TokenKind};
 pub use parser::MAX_DEPTH;
 pub use program::{FileOutput, ProgramOutput, compile_program, compile_program_with};
 pub use symbols::{Role, Symbol, Symbols, VarKind};
+pub use xml::{parse_xml, tokens_xml};
 
 use check::{Analysis, JavaLines};
 use diag::JDiag;

@@ -33,6 +33,7 @@ import cases  # noqa: E402
 
 VERBOSE = "-v" in sys.argv
 ALL_LINES = []
+XML_RESULTS = []
 KEEP = "--keep" in sys.argv
 
 
@@ -192,6 +193,22 @@ def main():
             before = len(results)
             compare_dir(label + ":" + rel, jd, od, stems, tool, jackc, results)
             groups.append((label, rel, results[before:]))
+        # Project-10 analyzer XML against the course's reference files.
+        xml_dirs = [d for d in collect_dirs(os.path.join(course, "projects", "10"))
+                    if any(f.endswith("T.xml") for f in os.listdir(d))]
+        for n, d in enumerate(xml_dirs):
+            xd = os.path.join(scratch, "x%d" % n)
+            os.makedirs(xd)
+            for f in os.listdir(d):
+                if f.endswith(".jack"):
+                    shutil.copy(os.path.join(d, f), xd)
+            subprocess.run([jackc, "--check", "--xml", "--out", xd, xd], capture_output=True)
+            for f in sorted(os.listdir(d)):
+                if not f.endswith(".xml"):
+                    continue
+                ref = read_vm(os.path.join(d, f))
+                ours = read_vm(os.path.join(xd, f))
+                XML_RESULTS.append((os.path.relpath(os.path.join(d, f), course), ref == ours))
         # Generated corpus: each snippet is its own class in one directory.
         jd = os.path.join(scratch, "jcases")
         od = os.path.join(scratch, "ocases")
@@ -250,7 +267,12 @@ def main():
     print(".vm files byte-compared: %d; files rejected by the official compiler: %d" % (vm_compared, invalid))
     print("files where every reported error line also matches (informational): %d of %d"
           % (sum(ALL_LINES), len(ALL_LINES)))
-    return 1 if differ else 0
+    xml_bad = [p for p, ok in XML_RESULTS if not ok]
+    print("project-10 XML files compared: %d, identical: %d, different: %d"
+          % (len(XML_RESULTS), len(XML_RESULTS) - len(xml_bad), len(xml_bad)))
+    for p in xml_bad:
+        print("XML DIFF", p)
+    return 1 if differ or xml_bad else 0
 
 
 if __name__ == "__main__":

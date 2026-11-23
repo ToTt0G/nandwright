@@ -7,6 +7,8 @@
 //!   --check         compile but do not write .vm files
 //!   --lenient       like the official compiler, still write the .vm file when
 //!                   the only errors are in call checks
+//!   --xml           also write the project-10 analyzer output, <Name>T.xml and
+//!                   <Name>.xml (into --out DIR, or next to the sources)
 //!   --report        machine-readable output for the conformance harness:
 //!                   one tab-separated line per diagnostic:
 //!                   DIAG <file> <severity> <official line> <line> <message>
@@ -26,6 +28,7 @@ struct Args {
     out: Option<PathBuf>,
     check: bool,
     report: bool,
+    xml: bool,
     options: Options,
     inputs: Vec<PathBuf>,
 }
@@ -35,6 +38,7 @@ fn parse_args() -> Result<Args, String> {
         out: None,
         check: false,
         report: false,
+        xml: false,
         options: Options::default(),
         inputs: Vec::new(),
     };
@@ -46,6 +50,7 @@ fn parse_args() -> Result<Args, String> {
             }
             Some("--check") => args.check = true,
             Some("--report") => args.report = true,
+            Some("--xml") => args.xml = true,
             Some("--lenient") => args.options.keep_vm_on_call_errors = true,
             Some("-h" | "--help") => {
                 return Err("usage: jackc [--out DIR] [--check] [--lenient] [--report] \
@@ -162,6 +167,24 @@ fn main() -> ExitCode {
                         "ok"
                     }
                 );
+            }
+            if args.xml {
+                let dir = match &args.out {
+                    Some(d) => d.clone(),
+                    None => path.parent().map(Path::to_path_buf).unwrap_or_default(),
+                };
+                for (suffix, out) in [
+                    ("T", n2t_jack::tokens_xml(src)),
+                    ("", n2t_jack::parse_xml(src)),
+                ] {
+                    if let Ok(text) = out
+                        && let Err(e) =
+                            std::fs::write(dir.join(format!("{stem}{suffix}.xml")), text)
+                    {
+                        eprintln!("{}: {e}", dir.display());
+                        failed = true;
+                    }
+                }
             }
             let Some(vm) = compiled.vm else { continue };
             if args.check {
