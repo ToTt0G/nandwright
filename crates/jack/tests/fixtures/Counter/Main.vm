@@ -1,0 +1,110 @@
+function Main.main 4
+push constant 10
+call Counter.new 1
+pop local 0
+push constant 3
+push constant 4
+call Math.multiply 2
+push constant 2
+sub
+push constant 2
+call Math.divide 2
+call Counter.new 1
+pop local 1
+push local 0
+push constant 25
+call Counter.add 2
+pop temp 0
+push local 1
+call Counter.increment 1
+pop temp 0
+push local 0
+call Counter.get 1
+push local 1
+call Counter.get 1
+add
+pop local 2
+push local 2
+neg
+pop local 3
+push local 0
+call Counter.hasWrapped 1
+push local 1
+call Counter.hasWrapped 1
+not
+and
+push local 3
+push constant 6
+neg
+eq
+or
+if-goto IF_TRUE0
+goto IF_FALSE0
+label IF_TRUE0
+push constant 8
+call String.new 1
+push constant 119
+call String.appendChar 2
+push constant 114
+call String.appendChar 2
+push constant 97
+call String.appendChar 2
+push constant 112
+call String.appendChar 2
+push constant 112
+call String.appendChar 2
+push constant 101
+call String.appendChar 2
+push constant 100
+call String.appendChar 2
+push constant 32
+call String.appendChar 2
+call Output.printString 1
+pop temp 0
+goto IF_END0
+label IF_FALSE0
+push constant 12
+call String.new 1
+push constant 110
+call String.appendChar 2
+push constant 111
+call String.appendChar 2
+push constant 116
+call String.appendChar 2
+push constant 32
+call String.appendChar 2
+push constant 119
+call String.appendChar 2
+push constant 114
+call String.appendChar 2
+push constant 97
+call String.appendChar 2
+push constant 112
+call String.appendChar 2
+push constant 112
+call String.appendChar 2
+push constant 101
+call String.appendChar 2
+push constant 100
+call String.appendChar 2
+push constant 32
+call String.appendChar 2
+call Output.printString 1
+pop temp 0
+label IF_END0
+push local 2
+call Output.printInt 1
+pop temp 0
+call Output.println 0
+pop temp 0
+call Counter.count 0
+call Output.printInt 1
+pop temp 0
+push local 0
+call Counter.dispose 1
+pop temp 0
+push local 1
+call Counter.dispose 1
+pop temp 0
+push constant 0
+return

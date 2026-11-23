@@ -1,0 +1,16 @@
+class Main {
+    function void main() {
+        var List l;
+        let l = List.new();
+        do l.insertSorted(5);
+        do l.insertSorted(1);
+        do l.insertSorted(9);
+        do l.push(0);
+        do l.print();
+        do l.reverse();
+        do l.print();
+        do Output.printInt(l.sum() / l.size());
+        do l.dispose();
+        return;
+    }
+}

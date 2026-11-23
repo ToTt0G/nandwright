@@ -1,0 +1,24 @@
+// Exercises Counter: constructors, methods on locals, statics, arithmetic.
+class Main {
+    function void main() {
+        var Counter c, d;
+        var int total, i;
+        let c = Counter.new(10);
+        let d = Counter.new(3 * 4 - 2 / 2);
+        do c.add(25);
+        do d.increment();
+        let total = c.get() + d.get();
+        let i = -total;
+        if ((c.hasWrapped() & ~d.hasWrapped()) | (i = -6)) {
+            do Output.printString("wrapped ");
+        } else {
+            do Output.printString("not wrapped ");
+        }
+        do Output.printInt(total);
+        do Output.println();
+        do Output.printInt(Counter.count());
+        do c.dispose();
+        do d.dispose();
+        return;
+    }
+}

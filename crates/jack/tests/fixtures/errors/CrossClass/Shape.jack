@@ -1,0 +1,6 @@
+class Shape {
+    field int w, h;
+    constructor Shape make(int aw, int ah) { let w = aw; let h = ah; return this; }
+    method int area() { return w * h; }
+    method void scale(int k) { let w = w * k; let h = h * k; return; }
+}

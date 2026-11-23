@@ -1,0 +1,16 @@
+class Main {
+    function void main() {
+        var String s, r;
+        let s = "Was it a car or a cat I saw?";
+        let r = Text.reverse(s);
+        do Output.printString(r);
+        do Output.println();
+        if (Text.isPalindrome("Level")) {
+            do Output.printString("palindrome: \"Level\"");
+        }
+        do Output.printChar(String.doubleQuote());
+        do r.dispose();
+        do s.dispose();
+        return;
+    }
+}

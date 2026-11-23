@@ -1,0 +1,42 @@
+/** A counter that wraps around at a limit. Original test program. */
+class Counter {
+    field int value, limit;
+    field boolean wrapped;
+    static int created;
+
+    /** Makes a counter that counts from 0 up to limit - 1. */
+    constructor Counter new(int aLimit) {
+        let value = 0;
+        let limit = aLimit;
+        let wrapped = false;
+        let created = created + 1;
+        return this;
+    }
+
+    method void increment() {
+        let value = value + 1;
+        if (~(value < limit)) {
+            let value = 0;
+            let wrapped = true;
+        }
+        return;
+    }
+
+    method void add(int n) {
+        while (n > 0) {
+            do increment();
+            let n = n - 1;
+        }
+        return;
+    }
+
+    method int get() { return value; }
+    method boolean hasWrapped() { return wrapped; }
+
+    function int count() { return created; }
+
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+}

@@ -328,6 +328,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "n2t-jack"
+version = "0.1.0"
+dependencies = [
+ "n2t-core",
+]
+
+[[package]]
 name = "n2t-lsp"
 version = "0.1.0"
 dependencies = [

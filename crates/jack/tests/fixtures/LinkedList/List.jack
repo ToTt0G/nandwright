@@ -1,0 +1,82 @@
+// A list with a head pointer, insertion at the front and in order, reversal.
+class List {
+    field Node head;
+    field int size;
+
+    constructor List new() {
+        let head = null;
+        let size = 0;
+        return this;
+    }
+
+    method void push(int x) {
+        let head = Node.new(x, head);
+        let size = size + 1;
+        return;
+    }
+
+    method void insertSorted(int x) {
+        var Node cur, prev;
+        let cur = head;
+        let prev = null;
+        while ((~(cur = null)) & (cur.data() < x)) {
+            let prev = cur;
+            let cur = cur.next();
+        }
+        if (prev = null) {
+            do push(x);
+            return;
+        }
+        do prev.setNext(Node.new(x, cur));
+        let size = size + 1;
+        return;
+    }
+
+    method void reverse() {
+        var Node prev, cur, nxt;
+        let prev = null;
+        let cur = head;
+        while (~(cur = null)) {
+            let nxt = cur.next();
+            do cur.setNext(prev);
+            let prev = cur;
+            let cur = nxt;
+        }
+        let head = prev;
+        return;
+    }
+
+    method int sum() {
+        var Node n;
+        var int s;
+        let n = head;
+        let s = 0;
+        while (~(n = null)) {
+            let s = s + n.data();
+            let n = n.next();
+        }
+        return s;
+    }
+
+    method int size() { return size; }
+
+    method void print() {
+        var Node n;
+        let n = head;
+        while (~(n = null)) {
+            do Output.printInt(n.data());
+            do Output.printChar(32);
+            let n = n.next();
+        }
+        do Output.println();
+        return;
+    }
+
+    method void dispose() {
+        if (~(head = null)) {
+            do head.dispose();
+        }
+        do Memory.deAlloc(this);
+        return;
+    }
+}

@@ -1,0 +1,10 @@
+[package]
+name = "n2t-jack"
+description = "Jack compiler (Jack to VM code) with the syntax and symbol information an editor needs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+n2t-core.workspace = true

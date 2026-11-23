@@ -1,0 +1,79 @@
+function Counter.new 0
+push constant 3
+call Memory.alloc 1
+pop pointer 0
+push constant 0
+pop this 0
+push argument 0
+pop this 1
+push constant 0
+pop this 2
+push static 0
+push constant 1
+add
+pop static 0
+push pointer 0
+return
+function Counter.increment 0
+push argument 0
+pop pointer 0
+push this 0
+push constant 1
+add
+pop this 0
+push this 0
+push this 1
+lt
+not
+if-goto IF_TRUE0
+goto IF_FALSE0
+label IF_TRUE0
+push constant 0
+pop this 0
+push constant 0
+not
+pop this 2
+label IF_FALSE0
+push constant 0
+return
+function Counter.add 0
+push argument 0
+pop pointer 0
+label WHILE_EXP0
+push argument 1
+push constant 0
+gt
+not
+if-goto WHILE_END0
+push pointer 0
+call Counter.increment 1
+pop temp 0
+push argument 1
+push constant 1
+sub
+pop argument 1
+goto WHILE_EXP0
+label WHILE_END0
+push constant 0
+return
+function Counter.get 0
+push argument 0
+pop pointer 0
+push this 0
+return
+function Counter.hasWrapped 0
+push argument 0
+pop pointer 0
+push this 2
+return
+function Counter.count 0
+push static 0
+return
+function Counter.dispose 0
+push argument 0
+pop pointer 0
+push pointer 0
+call Memory.deAlloc 1
+pop temp 0
+push constant 0
+return

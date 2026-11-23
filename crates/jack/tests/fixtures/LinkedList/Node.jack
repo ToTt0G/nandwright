@@ -1,0 +1,31 @@
+/* A singly linked list node holding an int. Original test program. */
+class Node {
+    field int data;
+    field Node next;
+
+    constructor Node new(int d, Node n) {
+        let data = d;
+        let next = n;
+        return this;
+    }
+
+    method int data() { return data; }
+    method Node next() { return next; }
+    method void setNext(Node n) { let next = n; return; }
+
+    /** Number of nodes from this one to the end. */
+    method int length() {
+        if (next = null) {
+            return 1;
+        }
+        return 1 + next.length();
+    }
+
+    method void dispose() {
+        if (~(next = null)) {
+            do next.dispose();
+        }
+        do Memory.deAlloc(this);
+        return;
+    }
+}
