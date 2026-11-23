@@ -245,17 +245,26 @@ const scenes = {
         await pause(1000);
     },
 
-    // The chip simulator beside the source, with the truth table.
+    // The chip simulator beside the source, with the truth table and the
+    // last test run: one mistake (b=b where b=c belongs) makes one row differ.
     async simulator() {
+        const file = join(chips, 'Majority.hdl');
+        const original = readFileSync(file, 'utf8');
+        writeFileSync(file, original.replace('And(a=b, b=c, out=bc);', 'And(a=b, b=b, out=bc);'));
+        await pause(1000);
         await openFile('chips/Majority.hdl');
         await command('openChip');
         await pause(3500);
         const frame = await chipFrame();
+        await frame.getByRole('button', { name: 'Run test' }).click();
+        await frame.locator('td.mark').first().waitFor({ timeout: 30_000 });
         await frame.locator('button.bit').nth(0).click();
         await pause(400);
         await frame.locator('button.bit').nth(2).click();
         await pause(1200);
         await shot('chip-simulator');
+        writeFileSync(file, original);
+        await pause(1000);
     },
 
     // A clocked chip: tick, tock and time.

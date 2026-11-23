@@ -4,7 +4,7 @@
 // internal pins, which follow. The extension owns the simulation; this file
 // only draws the state it is sent and reports what the student does.
 
-import type { ChipState, ChipTest, Expected, Pin, TruthTable } from '../runtime/protocol';
+import type { ChipState, ChipTest, ClockStep, Expected, Pin, TruthTable } from '../runtime/protocol';
 import { Radix, cellValue, formatValue, toBigInt, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
@@ -21,6 +21,8 @@ export type ToPanel =
           problem: string | null;
           expected: Expected | null;
           test: ChipTest | null;
+          history: ClockStep[];
+          historyCapped: boolean;
       }
     | { type: 'rejected'; pin: string; message: string };
 
@@ -28,6 +30,7 @@ export type FromPanel =
     | { type: 'ready' }
     | { type: 'openExpected' }
     | { type: 'runTest' }
+    | { type: 'clearHistory' }
     | { type: 'set'; pin: string; value: string | number }
     | { type: 'setAll'; values: Record<string, number> }
     | { type: 'action'; action: 'eval' | 'tick' | 'tock' | 'step' | 'reset' };
@@ -40,6 +43,8 @@ let current: ChipState | null = null;
 let table: TruthTable | null = null;
 let expected: Expected | null = null;
 let test: ChipTest | null = null;
+let history: ClockStep[] = [];
+let historyCapped = false;
 let previous = new Map<string, string>();
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -324,6 +329,47 @@ function expectedTable(state: ChipState, file: Expected): HTMLElement {
     return block;
 }
 
+/** The pins after each tick and tock, oldest first, in a box that scrolls. */
+function clockHistory(state: ChipState): HTMLElement {
+    const block = element('section', {});
+    block.append(element('h2', {}, 'Clock history'));
+    if (history.length === 0) {
+        block.append(element('p', { class: 'hint' }, 'Press Tick or Tock and each step is listed here.'));
+        return block;
+    }
+    const bar = element('div', { class: 'history-bar' });
+    if (historyCapped) {
+        bar.append(element('p', { class: 'hint' }, 'Showing the last 100 steps.'));
+    }
+    const clear = element('button', { type: 'button', class: 'link' }, 'Clear');
+    clear.addEventListener('click', () => send({ type: 'clearHistory' }));
+    bar.append(clear);
+    block.append(bar);
+    const columns = state.pins.filter((pin) => pin.role === 'input' || pin.role === 'output');
+    const tableElement = element('table', { class: 'truth history' });
+    const head = element('tr', {});
+    head.append(element('th', { scope: 'col' }, 'time'));
+    columns.forEach((pin) =>
+        head.append(element('th', { scope: 'col', class: pin === columns.find((p) => p.role === 'output') ? 'out first-out' : '' }, pin.name)),
+    );
+    tableElement.append(element('thead', {}, head));
+    const body = element('tbody', {});
+    for (const step of history) {
+        const tr = element('tr', {});
+        tr.append(element('td', {}, step.time));
+        for (const pin of columns) {
+            const value = step.pins.find((p) => p.name === pin.name);
+            const text = value ? formatValue(value.bits, value.width, value.width > 1 ? radix : 'dec') : '';
+            tr.append(element('td', pin === columns.find((p) => p.role === 'output') ? { class: 'first-out' } : {}, text));
+        }
+        body.append(tr);
+    }
+    tableElement.append(body);
+    const scroller = element('div', { class: 'history-scroll', tabindex: '0', role: 'region', 'aria-label': 'Clock history' }, tableElement);
+    block.append(scroller);
+    return block;
+}
+
 function truthTable(state: ChipState, truth: TruthTable): HTMLElement {
     const block = element('section', {});
     block.append(element('h2', {}, 'Truth table'));
@@ -441,11 +487,21 @@ function render(problem: string | null): void {
             root.append(block);
         }
     }
+    let scroller: HTMLElement | null = null;
+    if (state.clocked) {
+        const block = clockHistory(state);
+        scroller = block.querySelector('.history-scroll');
+        root.append(block);
+    }
     if (table && !state.clocked) {
         root.append(truthTable(state, table));
     }
     if (expected) {
         root.append(expectedTable(state, expected));
+    }
+    if (scroller) {
+        // The newest step is the one to see.
+        scroller.scrollTop = scroller.scrollHeight;
     }
     previous = new Map(state.pins.map((pin) => [pin.name, String(pin.bits)]));
     if (focused) {
@@ -464,6 +520,8 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             table = message.table;
             expected = message.expected;
             test = message.test;
+            history = message.history;
+            historyCapped = message.historyCapped;
         } else {
             // The panel moved to another chip that has not loaded: the old
             // chip's pins must not stay on screen under the new one's name.
@@ -471,6 +529,8 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             table = null;
             expected = null;
             test = null;
+            history = [];
+            historyCapped = false;
             previous = new Map();
         }
         render(message.problem);

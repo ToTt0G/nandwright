@@ -525,6 +525,47 @@ describe('Nandwright', function () {
             panel.panel.dispose();
         });
 
+        it('keeps a clock history of the steps taken in the panel', async () => {
+            const nandwright = await api();
+            const panel = await nandwright.chips.open(file('chips', 'Accumulator.hdl'));
+            const steps = () => panel.snapshot().history.map((step) => [step.time, step.pins.find((pin) => pin.name === 'out')?.bits]);
+            assert.deepEqual(steps(), []);
+            await panel.simulate({ type: 'set', pin: 'in', value: 5 });
+            await panel.simulate({ type: 'set', pin: 'add', value: 1 });
+            await panel.simulate({ type: 'action', action: 'tick' });
+            await panel.simulate({ type: 'action', action: 'tock' });
+            await panel.simulate({ type: 'action', action: 'step' });
+            assert.deepEqual(steps(), [
+                ['0+', 0],
+                ['1', 5],
+                ['2', 10],
+            ]);
+            // Inputs and outputs only, as the panel shows them.
+            assert.deepEqual(
+                panel.snapshot().history[0].pins.map((pin) => [pin.name, pin.role]),
+                [
+                    ['in', 'input'],
+                    ['add', 'input'],
+                    ['reset', 'input'],
+                    ['out', 'output'],
+                ],
+            );
+            assert.equal(panel.snapshot().history[0].pins.find((pin) => pin.name === 'in')?.bits, 5);
+            await panel.simulate({ type: 'action', action: 'reset' });
+            assert.deepEqual(steps(), []);
+            await panel.simulate({ type: 'action', action: 'step' });
+            assert.equal(steps().length, 1);
+            await panel.simulate({ type: 'clearHistory' });
+            assert.deepEqual(steps(), []);
+            // A chip without a clock has no history.
+            await open('chips', 'Majority.hdl');
+            await until('the panel to show Majority', () => panel.snapshot().state?.chip === 'Majority');
+            await panel.settled();
+            await panel.simulate({ type: 'set', pin: 'a', value: 1 });
+            assert.deepEqual(panel.snapshot().history, []);
+            panel.panel.dispose();
+        });
+
         it('follows the editor as the chip is typed', async () => {
             const nandwright = await api();
             const editor = await open('chips', 'Parity4.hdl');

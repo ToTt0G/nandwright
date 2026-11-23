@@ -136,6 +136,12 @@ export interface Expected {
     more: number;
 }
 
+/** The pins after one clock step in the chip simulator. */
+export interface ClockStep {
+    time: string;
+    pins: Pin[];
+}
+
 /** The last run of a chip's test script, as the simulator panel shows it. */
 export interface ChipTest {
     /** The script's file name. */

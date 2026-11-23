@@ -20,6 +20,7 @@ Key facts:
 - Tests run when you save a file, quietly, in the Testing view.
 - The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 - The status bar shows how many of the folder's tests pass; click it for the list of what is passing, failing, not run or not started.
+- For clocked chips the simulator keeps a clock history: the pins after each tick and tock.
 
 ## Docs
 

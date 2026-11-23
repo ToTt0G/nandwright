@@ -10,6 +10,7 @@
   runs the chip's test from the panel.
 - Project progress in the status bar: how many of the folder's tests pass, with a list of
   what is passing, failing, not run or not started.
+- Clock history in the chip simulator: the pins after each tick and tock.
 
 ## 0.2.0
 

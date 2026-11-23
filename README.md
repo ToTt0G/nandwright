@@ -73,6 +73,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   decimal, binary or hex, and watch outputs and internal pins. Small chips get a full
   truth table.
 - Clocked chips have **Tick**, **Tock** and the clock time, so you can watch a register load.
+- For clocked chips the simulator keeps a clock history: the pins after each tick and tock.
 - The panel follows the editor as you type. It follows you from chip to chip as you switch files. Below the pins it shows the expected output from the chip's `.cmp` file, and marks where your chip disagrees.
 - The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 

@@ -4,7 +4,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
-import { ChipState, ChipTest, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
+import { ChipState, ChipTest, ClockStep, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
 import { pathKey, samePath } from './paths';
 import { TestExplorer, textOf } from './testing';
@@ -13,6 +13,9 @@ import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
 const RELOAD_DELAY_MS = 250;
+
+/** Clock steps kept in the history; older ones are dropped. */
+const HISTORY_STEPS = 100;
 
 /** Rows of the compare file shown; the rest are counted, not listed. */
 const EXPECTED_ROWS = 256;
@@ -56,6 +59,10 @@ class ChipPanel {
     private expectedTimer: NodeJS.Timeout | undefined;
     private expected: Expected | null = null;
     private script: vscode.Uri | null = null;
+    /** The pins after each clock step taken in the panel, oldest first. */
+    private history: ClockStep[] = [];
+    /** Whether older steps were dropped from the history. */
+    private historyCapped = false;
     private watcher: vscode.FileSystemWatcher | undefined;
     private disposed = false;
     /** The chip shown. It changes when the panel follows the editor. */
@@ -205,6 +212,8 @@ class ChipPanel {
             problem: this.problem,
             expected: this.expected,
             test: this.testState(),
+            history: this.history,
+            historyCapped: this.historyCapped,
         };
         void this.panel.webview.postMessage(message);
     }
@@ -280,8 +289,14 @@ class ChipPanel {
         return this.queue;
     }
 
-    /** (Re)loads the chip from the editor's current text. */
+    private clearHistory(): void {
+        this.history = [];
+        this.historyCapped = false;
+    }
+
+    /** (Re)loads the chip from the editor's current text. A new start: the clock history goes. */
     private async reload(): Promise<void> {
+        this.clearHistory();
         await this.runtime.syncUnsaved();
         if (this.session === undefined) {
             const reply = await this.runtime.tryCall<ChipState>({ op: 'chip.open', path: this.chip.fsPath });
@@ -338,6 +353,11 @@ class ChipPanel {
         }
         if (message.type === 'openExpected') {
             await this.openExpected();
+            return;
+        }
+        if (message.type === 'clearHistory') {
+            this.clearHistory();
+            this.post();
             return;
         }
         if (message.type === 'runTest') {
@@ -398,6 +418,16 @@ class ChipPanel {
                 } else {
                     this.problem = null;
                     this.state = reply;
+                    if (reply.clocked && message.action !== 'eval') {
+                        this.history.push({
+                            time: reply.time,
+                            pins: reply.pins.filter((pin) => pin.role === 'input' || pin.role === 'output'),
+                        });
+                        if (this.history.length > HISTORY_STEPS) {
+                            this.history.splice(0, this.history.length - HISTORY_STEPS);
+                            this.historyCapped = true;
+                        }
+                    }
                 }
                 break;
             }
@@ -406,8 +436,22 @@ class ChipPanel {
     }
 
     /** The state last shown, for tests. */
-    snapshot(): { state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null; test: ChipTest | null } {
-        return { state: this.state, table: this.table, problem: this.problem, expected: this.expected, test: this.testState() };
+    snapshot(): {
+        state: ChipState | null;
+        table: TruthTable | null;
+        problem: string | null;
+        expected: Expected | null;
+        test: ChipTest | null;
+        history: ClockStep[];
+    } {
+        return {
+            state: this.state,
+            table: this.table,
+            problem: this.problem,
+            expected: this.expected,
+            test: this.testState(),
+            history: [...this.history],
+        };
     }
 
     /** Handles a message as if the panel had sent it, for tests. */
@@ -536,6 +580,10 @@ button.bit:hover { border-color: var(--vscode-focusBorder); }
 .expected td.mark.match { color: var(--vscode-testing-iconPassed, var(--vscode-foreground)); }
 .expected td.mark.differ { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground)); font-weight: 600; }
 .expected td.mark.unreached { color: var(--vscode-descriptionForeground); }
+.history-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.history-scroll { max-height: 240px; overflow: auto; border-top: 1px solid var(--line); }
+.history-scroll .truth { margin-top: 0; }
+.history-scroll thead th { position: sticky; top: 0; background: var(--vscode-editor-background); }
 .test-run { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 2px 0 8px; }
 .test-run .summary { flex: 1 1 16em; min-width: 0; overflow-wrap: anywhere; }
 .test-run .summary.fails { color: var(--vscode-errorForeground); }
