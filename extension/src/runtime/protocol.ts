@@ -126,6 +126,16 @@ export interface ChipState {
     pins: Pin[];
 }
 
+/** A chip's compare file, as the simulator panel shows it. */
+export interface Expected {
+    path: string;
+    name: string;
+    header: string[];
+    rows: string[][];
+    /** Rows left out because the file is long. */
+    more: number;
+}
+
 export interface TruthTable {
     inputs: { name: string; width: number }[];
     outputs: { name: string; width: number }[];

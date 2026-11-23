@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import { WasmEngine } from '../../engine/wasm';
 import { ignoresCase, pathKey, samePath } from '../../paths';
-import { formatValue, typedValue } from '../../values';
+import { cellValue, formatValue, parseCompare, typedValue } from '../../values';
 
 const root = path.resolve(__dirname, '..', '..');
 const wasm = path.join(root, 'dist', 'engine.wasm');
@@ -242,4 +242,30 @@ test('an unsaved buffer shadows only its own file unless the volume ignores case
     assert.equal(engine.call({ op: 'overlay.replace', files: [] }).error, undefined);
     assert.equal(outcome(), 'passed');
     fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('compare file cells are read as numbers the way the tools write them', () => {
+    assert.equal(cellValue('1', 1), 1n);
+    assert.equal(cellValue('0', 1), 0n);
+    assert.equal(cellValue('2', 1), null);
+    assert.equal(cellValue('*', 8), 'any');
+    assert.equal(cellValue('0000000011111111', 16), 255n);
+    assert.equal(cellValue('1010', 4), 10n);
+    assert.equal(cellValue('255', 16), 255n);
+    assert.equal(cellValue('-256', 16), 0xff00n);
+    assert.equal(cellValue('-1', 16), 0xffffn);
+    assert.equal(cellValue('ff00', 16), 0xff00n);
+    assert.equal(cellValue('00FF', 16), 255n);
+    assert.equal(cellValue('x', 16), null);
+    assert.equal(cellValue('', 16), null);
+    assert.equal(cellValue('12 3', 16), null);
+});
+
+test('a compare file is split into cells and long ones are cut', () => {
+    const parsed = parseCompare('|  a  |  out |\r\n|  0  |   1  |\n\n|  1  |  0  |\n', 256)!;
+    assert.deepEqual(parsed, { header: ['a', 'out'], rows: [['0', '1'], ['1', '0']], more: 0 });
+    const long = parseCompare(['| a |', ...Array.from({ length: 300 }, () => '| 0 |')].join('\n'), 256)!;
+    assert.equal(long.rows.length, 256);
+    assert.equal(long.more, 44);
+    assert.equal(parseCompare('  \n', 256), null);
 });

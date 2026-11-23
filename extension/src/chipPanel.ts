@@ -1,16 +1,57 @@
 // The chip simulator panel: an interactive view of one chip, next to its
 // source. It reloads as the student types, so the loop is edit, look, edit.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
-import { ChipState, EngineError, TruthTable, isError } from './runtime/protocol';
+import { ChipState, EngineError, Expected, TruthTable, isError } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
 import { pathKey, samePath } from './paths';
+import { parseCompare } from './values';
 import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
 const RELOAD_DELAY_MS = 250;
+
+/** Rows of the compare file shown; the rest are counted, not listed. */
+const EXPECTED_ROWS = 256;
+
+/** The text of a file as the student sees it: an open editor's, saved or not, else the disk's. */
+async function textOf(file: string): Promise<string | null> {
+    const open = vscode.workspace.textDocuments.find((document) => document.uri.scheme === 'file' && samePath(document.uri.fsPath, file));
+    if (open) {
+        return open.getText();
+    }
+    try {
+        return await fs.promises.readFile(file, 'utf8');
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The compare file of a chip: `<Chip>.cmp` beside it, or else the one named
+ * by the first `compare-to` of `<Chip>.tst`. Null when there is none.
+ */
+async function findExpected(chip: vscode.Uri): Promise<Expected | null> {
+    const dir = path.dirname(chip.fsPath);
+    const stem = path.basename(chip.fsPath, path.extname(chip.fsPath));
+    let file = path.join(dir, `${stem}.cmp`);
+    let text = await textOf(file);
+    if (text === null) {
+        const script = await textOf(path.join(dir, `${stem}.tst`));
+        // Comments may mention compare-to; only a command counts.
+        const named = script?.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').match(/compare-to\s+([^\s,;]+)/)?.[1];
+        if (!named) {
+            return null;
+        }
+        file = path.resolve(dir, named);
+        text = await textOf(file);
+    }
+    const parsed = text === null ? null : parseCompare(text, EXPECTED_ROWS);
+    return parsed ? { path: file, name: path.basename(file), ...parsed } : null;
+}
 
 class ChipPanel {
     private session: number | undefined;
@@ -18,6 +59,9 @@ class ChipPanel {
     private table: TruthTable | null = null;
     private problem: string | null = null;
     private reloadTimer: NodeJS.Timeout | undefined;
+    private expectedTimer: NodeJS.Timeout | undefined;
+    private expected: Expected | null = null;
+    private watcher: vscode.FileSystemWatcher | undefined;
     private disposed = false;
     /** The chip shown. It changes when the panel follows the editor. */
     private chip: vscode.Uri;
@@ -41,18 +85,28 @@ class ChipPanel {
             document.uri.scheme === 'file' &&
             document.fileName.toLowerCase().endsWith('.hdl') &&
             pathKey(path.dirname(document.uri.fsPath)) === pathKey(path.dirname(this.chip.fsPath));
+        // Compare files and scripts in the folder change what is expected, not the chip.
+        const expectedFile = (document: vscode.TextDocument) =>
+            document.uri.scheme === 'file' &&
+            /\.(cmp|tst)$/i.test(document.fileName) &&
+            pathKey(path.dirname(document.uri.fsPath)) === pathKey(path.dirname(this.chip.fsPath));
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument((event) => {
                 if (inFolder(event.document) && event.contentChanges.length > 0) {
                     this.scheduleReload();
+                } else if (expectedFile(event.document) && event.contentChanges.length > 0) {
+                    this.scheduleExpected();
                 }
             }),
             vscode.workspace.onDidSaveTextDocument((document) => {
                 if (inFolder(document)) {
                     this.scheduleReload();
+                } else if (expectedFile(document)) {
+                    this.scheduleExpected();
                 }
             }),
         );
+        this.watchFolder();
     }
 
     /** The chip file shown now. */
@@ -91,6 +145,8 @@ class ChipPanel {
         this.state = null;
         this.table = null;
         this.problem = null;
+        this.expected = null;
+        this.watchFolder();
         this.panel.title = `${path.basename(next.fsPath, path.extname(next.fsPath))} · simulator`;
         this.post();
         await this.reload();
@@ -103,6 +159,36 @@ class ChipPanel {
         });
     }
 
+    /** Watches the chip's folder for changes made outside the editor (a script saved by a tool, a file replaced). */
+    private watchFolder(): void {
+        this.watcher?.dispose();
+        const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(path.dirname(this.chip.fsPath)), '*.{cmp,tst,CMP,TST}'));
+        const changed = () => this.scheduleExpected();
+        watcher.onDidChange(changed);
+        watcher.onDidCreate(changed);
+        watcher.onDidDelete(changed);
+        this.watcher = watcher;
+    }
+
+    private scheduleExpected(): void {
+        clearTimeout(this.expectedTimer);
+        this.expectedTimer = setTimeout(
+            () =>
+                this.enqueue(async () => {
+                    await this.readExpected();
+                    this.post();
+                }),
+            RELOAD_DELAY_MS,
+        );
+    }
+
+    private async readExpected(): Promise<void> {
+        const found = await findExpected(this.chip);
+        if (!this.disposed) {
+            this.expected = found;
+        }
+    }
+
     private scheduleReload(): void {
         clearTimeout(this.reloadTimer);
         this.reloadTimer = setTimeout(() => this.enqueue(() => this.reload()), RELOAD_DELAY_MS);
@@ -112,7 +198,7 @@ class ChipPanel {
         if (this.disposed) {
             return;
         }
-        const message: ToPanel = { type: 'state', state: this.state, table: this.table, problem: this.problem };
+        const message: ToPanel = { type: 'state', state: this.state, table: this.table, problem: this.problem, expected: this.expected };
         void this.panel.webview.postMessage(message);
     }
 
@@ -178,7 +264,22 @@ class ChipPanel {
             }
             await this.accept(reply);
         }
+        await this.readExpected();
         this.post();
+    }
+
+    /** Shows the compare file beside the panel, leaving focus where it is. */
+    private async openExpected(): Promise<void> {
+        if (!this.expected) {
+            return;
+        }
+        const here = this.panel.viewColumn;
+        const other = vscode.window.tabGroups.all.find((group) => group.viewColumn !== here)?.viewColumn;
+        await vscode.window.showTextDocument(vscode.Uri.file(this.expected.path), {
+            viewColumn: other ?? vscode.ViewColumn.Beside,
+            preserveFocus: true,
+            preview: true,
+        });
     }
 
     private async handle(message: FromPanel): Promise<void> {
@@ -188,6 +289,10 @@ class ChipPanel {
             } else {
                 await this.reload();
             }
+            return;
+        }
+        if (message.type === 'openExpected') {
+            await this.openExpected();
             return;
         }
         if (this.session === undefined) {
@@ -248,8 +353,8 @@ class ChipPanel {
     }
 
     /** The state last shown, for tests. */
-    snapshot(): { state: ChipState | null; table: TruthTable | null; problem: string | null } {
-        return { state: this.state, table: this.table, problem: this.problem };
+    snapshot(): { state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null } {
+        return { state: this.state, table: this.table, problem: this.problem, expected: this.expected };
     }
 
     /** Handles a message as if the panel had sent it, for tests. */
@@ -269,6 +374,8 @@ class ChipPanel {
         this.disposed = true;
         this.wanted = undefined;
         clearTimeout(this.reloadTimer);
+        clearTimeout(this.expectedTimer);
+        this.watcher?.dispose();
         if (this.session !== undefined) {
             this.runtime.close(this.session);
             this.session = undefined;
@@ -369,6 +476,11 @@ button.bit:hover { border-color: var(--vscode-focusBorder); }
 .bit.readonly.on { border-style: solid; }
 .bus-cell { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .bus { width: 100%; max-width: 260px; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent)); border-radius: 2px; }
+.expected td, .expected th { font-family: var(--vscode-editor-font-family); }
+.expected td.differs { color: var(--vscode-errorForeground); font-weight: 600; }
+.link { padding: 0; border: 0; background: none; font: inherit; color: var(--vscode-textLink-foreground); text-decoration: underline; cursor: pointer; }
+.link:hover { color: var(--vscode-textLink-activeForeground); }
+.link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .truth { border-collapse: collapse; margin-top: 4px; }
 .truth th, .truth td { padding: 3px 14px; text-align: center; border-bottom: 1px solid var(--line); }
 .truth th { font-weight: 600; color: var(--vscode-descriptionForeground); }

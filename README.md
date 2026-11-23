@@ -71,7 +71,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   decimal, binary or hex, and watch outputs and internal pins. Small chips get a full
   truth table.
 - Clocked chips have **Tick**, **Tock** and the clock time, so you can watch a register load.
-- The panel follows the editor as you type. It follows you from chip to chip as you switch files.
+- The panel follows the editor as you type. It follows you from chip to chip as you switch files. Below the pins it shows the expected output from the chip's `.cmp` file, and marks where your chip disagrees.
 
 ![The chip simulator beside the HDL source, with inputs, outputs, internal pins and a truth table](docs/images/chip-simulator.png)
 

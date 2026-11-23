@@ -1,10 +1,13 @@
 # Changelog
 
-## 0.1.1
+## 0.2.0
 
 - The chip simulator follows the editor: switch to another `.hdl` file and the simulator
   shows that chip, without closing and reopening it. The setting
   `nandwright.simulator.followEditor` turns this off.
+- The chip simulator shows the expected output: the chip's compare file (`.cmp`) as a
+  table, with the row for the current inputs marked and any output that differs from
+  your chip pointed out. Click a row to set the inputs to it.
 
 ## 0.1.0
 

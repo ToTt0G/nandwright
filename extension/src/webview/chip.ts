@@ -4,8 +4,8 @@
 // internal pins, which follow. The extension owns the simulation; this file
 // only draws the state it is sent and reports what the student does.
 
-import type { ChipState, Pin, TruthTable } from '../runtime/protocol';
-import { Radix, formatValue, typedValue } from '../values';
+import type { ChipState, Expected, Pin, TruthTable } from '../runtime/protocol';
+import { Radix, cellValue, formatValue, toBigInt, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -14,11 +14,12 @@ declare function acquireVsCodeApi(): {
 };
 
 export type ToPanel =
-    | { type: 'state'; state: ChipState | null; table: TruthTable | null; problem: string | null }
+    | { type: 'state'; state: ChipState | null; table: TruthTable | null; problem: string | null; expected: Expected | null }
     | { type: 'rejected'; pin: string; message: string };
 
 export type FromPanel =
     | { type: 'ready' }
+    | { type: 'openExpected' }
     | { type: 'set'; pin: string; value: string | number }
     | { type: 'setAll'; values: Record<string, number> }
     | { type: 'action'; action: 'eval' | 'tick' | 'tock' | 'step' | 'reset' };
@@ -29,6 +30,7 @@ const send = (message: FromPanel) => vscode.postMessage(message);
 let radix: Radix = vscode.getState()?.radix ?? 'dec';
 let current: ChipState | null = null;
 let table: TruthTable | null = null;
+let expected: Expected | null = null;
 let previous = new Map<string, string>();
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -167,6 +169,90 @@ function actionButton(label: string, action: 'eval' | 'tick' | 'tock' | 'step' |
     return button;
 }
 
+/**
+ * The compare file as a table. For a chip without a clock whose inputs all
+ * have a column, the row for the current inputs is marked, a click sets the
+ * inputs to a row, and an output that differs in the current row is pointed
+ * out. Otherwise the table is only shown.
+ */
+function expectedTable(state: ChipState, file: Expected): HTMLElement {
+    const block = element('section', {});
+    block.append(element('h2', {}, 'Expected output'));
+    const open = element('button', { type: 'button', class: 'link' }, file.name);
+    open.addEventListener('click', () => send({ type: 'openExpected' }));
+    const hint = element('p', { class: 'hint' }, 'From ');
+    hint.append(open, ': what the test script compares your chip with.');
+    block.append(hint);
+
+    const inputs = state.pins.filter((pin) => pin.role === 'input');
+    const outputs = state.pins.filter((pin) => pin.role === 'output');
+    const column = (pin: Pin) => file.header.indexOf(pin.name);
+    const interactive = !state.clocked && inputs.every((pin) => column(pin) >= 0);
+    const matches = (row: string[]) =>
+        inputs.every((pin) => {
+            const value = cellValue(row[column(pin)] ?? '', pin.width);
+            return value === 'any' || (value !== null && value === toBigInt(pin.bits));
+        });
+    const currentRow = interactive ? file.rows.find(matches) : undefined;
+
+    const tableElement = element('table', { class: 'truth expected' });
+    const head = element('tr', {});
+    file.header.forEach((cell) => head.append(element('th', { scope: 'col' }, cell)));
+    tableElement.append(element('thead', {}, head));
+    const body = element('tbody', {});
+    for (const row of file.rows) {
+        const isCurrent = row === currentRow;
+        const values: Record<string, number> = {};
+        let settable = interactive;
+        for (const pin of inputs) {
+            const value = interactive ? cellValue(row[column(pin)] ?? '', pin.width) : null;
+            if (typeof value === 'bigint') {
+                values[pin.name] = Number(value);
+            } else {
+                settable = false;
+            }
+        }
+        const attributes: Record<string, string> = {};
+        if (isCurrent) {
+            attributes.class = 'current';
+        }
+        if (settable) {
+            attributes.tabindex = '0';
+            attributes.title = 'Set the inputs to this row';
+            attributes['aria-selected'] = String(isCurrent);
+        }
+        const tr = element('tr', attributes);
+        row.forEach((cell, i) => {
+            const pin = isCurrent ? outputs.find((p) => column(p) === i) : undefined;
+            const wanted = pin ? cellValue(cell, pin.width) : null;
+            if (pin && typeof wanted === 'bigint' && wanted !== toBigInt(pin.bits)) {
+                const actual = formatValue(pin.bits, pin.width, pin.width > 1 ? radix : 'dec');
+                const text = `Expected ${cell}, your chip gives ${actual}`;
+                tr.append(element('td', { class: 'differs', title: text, 'aria-label': text }, `${cell} ✗`));
+            } else {
+                tr.append(element('td', {}, cell));
+            }
+        });
+        if (settable) {
+            const apply = () => send({ type: 'setAll', values });
+            tr.addEventListener('click', apply);
+            tr.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    apply();
+                }
+            });
+        }
+        body.append(tr);
+    }
+    tableElement.append(body);
+    block.append(tableElement);
+    if (file.more > 0) {
+        block.append(element('p', { class: 'hint' }, `${file.more} more rows are in ${file.name}.`));
+    }
+    return block;
+}
+
 function truthTable(state: ChipState, truth: TruthTable): HTMLElement {
     const block = element('section', {});
     block.append(element('h2', {}, 'Truth table'));
@@ -287,6 +373,9 @@ function render(problem: string | null): void {
     if (table && !state.clocked) {
         root.append(truthTable(state, table));
     }
+    if (expected) {
+        root.append(expectedTable(state, expected));
+    }
     previous = new Map(state.pins.map((pin) => [pin.name, String(pin.bits)]));
     if (focused) {
         (root.querySelector(`[data-pin="${CSS.escape(focused)}"]`) as HTMLElement | null)?.focus();
@@ -302,11 +391,13 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             }
             current = message.state;
             table = message.table;
+            expected = message.expected;
         } else {
             // The panel moved to another chip that has not loaded: the old
             // chip's pins must not stay on screen under the new one's name.
             current = null;
             table = null;
+            expected = null;
             previous = new Map();
         }
         render(message.problem);

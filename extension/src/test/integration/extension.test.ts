@@ -386,6 +386,60 @@ describe('Nandwright', function () {
             panel.panel.dispose();
         });
 
+        describe('expected output', () => {
+            it('shows the compare file of the chip shown, and none for a chip without one', async () => {
+                const nandwright = await api();
+                const panel = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                const majority = panel.snapshot().expected!;
+                assert.equal(majority.name, 'Majority.cmp');
+                assert.deepEqual(majority.header, ['a', 'b', 'c', 'out']);
+                assert.equal(majority.rows.length, 8);
+                assert.equal(majority.more, 0);
+                await open('chips', 'Parity4.hdl');
+                await until('the panel to show Parity4', () => panel.snapshot().state?.chip === 'Parity4');
+                await panel.settled();
+                assert.equal(panel.snapshot().expected?.name, 'Parity4.cmp');
+                const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'nandwright-expected-'));
+                try {
+                    fs.copyFileSync(file('chips', 'Majority.hdl').fsPath, path.join(folder, 'Majority.hdl'));
+                    const alone = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(alone), { preview: false });
+                    await until('the panel to show the lone chip', () => nandwright.chips.get(alone) === panel);
+                    await panel.settled();
+                    assert.equal(panel.snapshot().expected, null);
+                } finally {
+                    panel.panel.dispose();
+                    await closeAll();
+                    fs.rmSync(folder, { recursive: true, force: true });
+                }
+            });
+
+            it('follows changes to the compare file and opens it on request', async () => {
+                const nandwright = await api();
+                const folder = fs.mkdtempSync(path.join(vscode.workspace.workspaceFolders![0].uri.fsPath, 'expected-'));
+                try {
+                    for (const extension of ['hdl', 'tst', 'cmp']) {
+                        fs.copyFileSync(file('chips', `Majority.${extension}`).fsPath, path.join(folder, `Majority.${extension}`));
+                    }
+                    const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                    const cmp = path.join(folder, 'Majority.cmp');
+                    const panel = await nandwright.chips.open(chip);
+                    assert.equal(panel.snapshot().expected?.rows.length, 8);
+                    const lines = fs.readFileSync(cmp, 'utf8').split('\n');
+                    fs.writeFileSync(cmp, lines.slice(0, 4).join('\n') + '\n');
+                    await until('the panel to show the shorter file', () => panel.snapshot().expected?.rows.length === 3);
+                    await panel.simulate({ type: 'openExpected' });
+                    await until('the compare file in an editor', () =>
+                        vscode.window.visibleTextEditors.some((editor) => editor.document.uri.fsPath === cmp),
+                    );
+                    panel.panel.dispose();
+                } finally {
+                    await closeAll();
+                    fs.rmSync(folder, { recursive: true, force: true });
+                }
+            });
+        });
+
         describe('following the editor', () => {
             const chipOf = (panel: { snapshot(): { state: { chip: string } | null } }) => panel.snapshot().state?.chip;
 

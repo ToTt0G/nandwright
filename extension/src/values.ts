@@ -115,3 +115,50 @@ export function hackKeyCode(event: { key: string }): number | undefined {
     }
     return undefined;
 }
+
+/**
+ * What a cell of a compare file says about a pin `width` bits wide: a number,
+ * `any` for `*` (which matches whatever the chip gives), or null when the
+ * cell cannot be read as a value. A cell of exactly `width` binary digits is
+ * binary; otherwise digits are decimal (negative values in two's complement
+ * of that width); otherwise hex digits are hexadecimal.
+ */
+export function cellValue(cell: string, width: number): bigint | 'any' | null {
+    const text = cell.trim();
+    if (text === '*') {
+        return 'any';
+    }
+    if (width === 1) {
+        return text === '0' ? 0n : text === '1' ? 1n : null;
+    }
+    if (text.length === width && /^[01]+$/.test(text)) {
+        return BigInt(`0b${text}`);
+    }
+    if (/^-?\d+$/.test(text)) {
+        return BigInt.asUintN(width, BigInt(text));
+    }
+    if (/^[0-9a-fA-F]+$/.test(text)) {
+        return BigInt(`0x${text}`);
+    }
+    return null;
+}
+
+/** The lines of a compare file as cells, at most `limit` rows after the header. */
+export function parseCompare(text: string, limit: number): { header: string[]; rows: string[][]; more: number } | null {
+    const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '');
+    if (lines.length === 0) {
+        return null;
+    }
+    const cells = (line: string): string[] => {
+        const pieces = line.split('|');
+        if (pieces[0].trim() === '') {
+            pieces.shift();
+        }
+        if (pieces.length > 0 && pieces[pieces.length - 1].trim() === '') {
+            pieces.pop();
+        }
+        return pieces.map((piece) => piece.trim());
+    };
+    const rows = lines.slice(1).map(cells);
+    return { header: cells(lines[0]), rows: rows.slice(0, limit), more: Math.max(0, rows.length - limit) };
+}
