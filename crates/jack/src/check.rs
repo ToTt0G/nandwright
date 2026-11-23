@@ -390,6 +390,7 @@ impl Checker<'_> {
             self.type_symbol(t);
         }
         if sub.kind == SubroutineKind::Constructor
+            && !self.class_name.is_empty()
             && let Some(rt) = &sub.return_type
             && rt.name() != self.class_name
         {
@@ -849,15 +850,7 @@ impl Checker<'_> {
         match term {
             Term::Int { value, span } => {
                 if *value > 32767 {
-                    self.diags.push(error(
-                        codes::INTEGER_TOO_BIG,
-                        format!(
-                            "The integer constant `{value}` is too big: Jack constants go up to \
-                             32767. (For -32768 write `-32767 - 1`.)"
-                        ),
-                        *span,
-                        self.line(span.start),
-                    ));
+                    self.too_big(*value, *span);
                 }
                 self.emit(span.start, format!("push constant {value}"));
                 TermType {
@@ -896,16 +889,7 @@ impl Checker<'_> {
                     }
                     KeywordConst::This => {
                         if self.sub_kind == SubroutineKind::Function {
-                            self.diags.push(error(
-                                codes::THIS_IN_FUNCTION,
-                                format!(
-                                    "`this` cannot be used in a function: `{}` is not called on \
-                                     an object. Make it a method if it needs one.",
-                                    self.sub_name
-                                ),
-                                *span,
-                                self.line(span.start),
-                            ));
+                            self.this_in_function(*span);
                         }
                         self.emit(span.start, "push pointer 0");
                         JType::This
@@ -996,21 +980,7 @@ impl Checker<'_> {
             None => {
                 let line = self.line(c.name.span.start);
                 if self.sub_kind == SubroutineKind::Function {
-                    self.diags.push(error(
-                        codes::METHOD_FROM_FUNCTION,
-                        format!(
-                            "`{}()` without an object calls a method on `this`, but `{}` is a \
-                             function and has no `this`. Write `{}.{}(…)` for a function, or \
-                             call the method on an object: `obj.{}(…)`.",
-                            c.name.name,
-                            self.sub_name,
-                            self.class_name,
-                            c.name.name,
-                            c.name.name
-                        ),
-                        c.name.span,
-                        line,
-                    ));
+                    self.method_from_function(c, line);
                 }
                 self.sub_symbol(&c.name, &self.class_name.clone());
                 self.emit(at, "push pointer 0");
@@ -1054,18 +1024,7 @@ impl Checker<'_> {
                     let field_in_function =
                         self.sub_kind == SubroutineKind::Function && self.field_named(&r.name);
                     if field_in_function {
-                        self.diags.push(warning(
-                            codes::UNDEFINED_VARIABLE,
-                            format!(
-                                "`{}` is a field, which a function cannot use; the official \
-                                 compiler therefore treats `{}` as a class name and calls the \
-                                 function `{}.{}`. Make `{}` a method to call the method on the \
-                                 field.",
-                                r.name, r.name, r.name, c.name.name, self.sub_name
-                            ),
-                            r.span,
-                            0,
-                        ));
+                        self.field_in_function(r, &c.name);
                     }
                     let decl = (r.name == self.class_name)
                         .then(|| self.symbols.first().map(|s| s.span))
@@ -1095,6 +1054,68 @@ impl Checker<'_> {
                 }
             }
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn too_big(&mut self, value: i32, span: Span) {
+        self.diags.push(error(
+            codes::INTEGER_TOO_BIG,
+            format!(
+                "The integer constant `{value}` is too big: Jack constants go up to 32767. (For \
+                 -32768 write `-32767 - 1`.)"
+            ),
+            span,
+            self.line(span.start),
+        ));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn this_in_function(&mut self, span: Span) {
+        self.diags.push(error(
+            codes::THIS_IN_FUNCTION,
+            format!(
+                "`this` cannot be used in a function: `{}` is not called on an object. Make it a \
+                 method if it needs one.",
+                self.sub_name
+            ),
+            span,
+            self.line(span.start),
+        ));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn method_from_function(&mut self, c: &Call, line: u32) {
+        let n = &c.name.name;
+        self.diags.push(error(
+            codes::METHOD_FROM_FUNCTION,
+            format!(
+                "`{n}()` without an object calls a method on `this`, but `{}` is a function and \
+                 has no `this`. Write `{}.{n}(…)` for a function, or call the method on an \
+                 object: `obj.{n}(…)`.",
+                self.sub_name, self.class_name
+            ),
+            c.name.span,
+            line,
+        ));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn field_in_function(&mut self, r: &Ident, name: &Ident) {
+        self.diags.push(warning(
+            codes::UNDEFINED_VARIABLE,
+            format!(
+                "`{0}` is a field, which a function cannot use; the official compiler therefore \
+                 treats `{0}` as a class name and calls the function `{0}.{1}`. Make `{2}` a \
+                 method to call the method on the field.",
+                r.name, name.name, self.sub_name
+            ),
+            r.span,
+            0,
+        ));
     }
 
     fn args(&mut self, c: &Call) {

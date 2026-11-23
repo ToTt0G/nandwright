@@ -13,10 +13,12 @@ use crate::ast::*;
 use crate::diag::{JDiag, codes, error, info, warning};
 use crate::lexer::{self, Keyword, LexNote, Lexed, Token, TokenKind};
 
-/// Maximum nesting of expressions, terms and blocks. Deeper input gets a
-/// diagnostic instead of exhausting the stack (the official compiler has no
-/// such limit, but no real program comes close).
-pub const MAX_DEPTH: u32 = 400;
+/// Maximum nesting of expressions, unary operators and blocks, counted
+/// together. Deeper input gets a diagnostic instead of exhausting the stack
+/// (the parser, checker and code generator are recursive). The official
+/// compiler accepts deeper unary chains and blocks, but already breaks above 100
+/// nested expressions; no real program comes close to either.
+pub const MAX_DEPTH: u32 = 128;
 
 pub(crate) struct ParseOutput {
     pub class: Option<Class>,
@@ -76,8 +78,9 @@ fn lex_note(source: &str, note: &LexNote) -> JDiag {
             0,
         ),
         LexNote::Escape(span) => {
-            let text = span.slice(source);
-            let units = lexer::string_units(&format!("\"{text}\""));
+            let raw = span.slice(source);
+            let units = lexer::string_units(&format!("\"{raw}\""));
+            let text = raw.escape_debug().to_string();
             let shown = units
                 .iter()
                 .map(|u| u.to_string())
@@ -182,7 +185,7 @@ impl<'a> Parser<'a> {
         match self.peek() {
             None => "the end of the file".to_string(),
             Some(t) => {
-                let text = self.text(t);
+                let text = shorten(self.text(t));
                 match t.kind {
                     TokenKind::Keyword(_) => format!("the keyword `{text}`"),
                     TokenKind::Symbol(_) => format!("`{text}`"),
@@ -225,7 +228,7 @@ impl<'a> Parser<'a> {
                          (for example 65 for 'A'). {msg}"
                     )
                 } else {
-                    format!("`{text}` is not a Jack symbol. {msg}")
+                    format!("`{}` is not a Jack symbol. {msg}", shorten(text))
                 };
                 self.diags
                     .push(error(codes::UNKNOWN_CHARACTER, msg, span, line));
@@ -233,6 +236,28 @@ impl<'a> Parser<'a> {
             }
         }
         self.diags.push(error(codes::EXPECTED, msg, span, line));
+    }
+
+    /// [`Self::expected`] kept out of line so recursive callers stay small.
+    #[cold]
+    #[inline(never)]
+    fn expected_cold(&mut self, what: &'static str) {
+        self.expected(what);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn term_expected(&mut self, keyword: bool) {
+        let found = self.describe_current();
+        let hint = if keyword {
+            " Keywords other than `true`, `false`, `null` and `this` cannot be values."
+        } else {
+            ""
+        };
+        self.error_here(format!(
+            "Expected an expression (a constant, variable, call, `(`, `-` or `~`), found \
+             {found}.{hint}"
+        ));
     }
 
     fn expected(&mut self, what: &str) {
@@ -274,7 +299,8 @@ impl<'a> Parser<'a> {
                 self.diags.push(error(
                     codes::TOO_DEEP,
                     format!(
-                        "This is nested more than {MAX_DEPTH} levels deep. Split the expression or \
+                        "This is nested more than {MAX_DEPTH} levels deep, which this compiler \
+                         does not support (the official one does). Split the expression or \
                          statement into smaller parts."
                     ),
                     span,
@@ -699,7 +725,7 @@ impl<'a> Parser<'a> {
                     if self.pos == before {
                         if t.is_symbol(b'{') {
                             // A stray block: parse it so its statements are checked.
-                            let b = self.parse_block("");
+                            let b = self.parse_block("nested");
                             out.extend(b.statements);
                             continue;
                         }
@@ -1080,10 +1106,7 @@ impl<'a> Parser<'a> {
                     if self.at_symbol(b']') {
                         self.pos += 1;
                     } else {
-                        let found = self.describe_current();
-                        self.error_here(format!(
-                            "Expected `]` to close the array index, found {found}."
-                        ));
+                        self.expected_cold("`]` to close the array index");
                     }
                     let span = Span::new(t.span.start, self.prev_end());
                     Term::Index {
@@ -1093,7 +1116,7 @@ impl<'a> Parser<'a> {
                     }
                 } else if self.at_symbol(b'(') || self.at_symbol(b'.') {
                     match self.parse_call(id.clone()) {
-                        Some(c) => Term::Call(c),
+                        Some(c) => Term::Call(Box::new(c)),
                         None => Term::Var(id),
                     }
                 } else {
@@ -1106,10 +1129,7 @@ impl<'a> Parser<'a> {
                 if self.at_symbol(b')') {
                     self.pos += 1;
                 } else {
-                    let found = self.describe_current();
-                    self.error_here(format!(
-                        "Expected `)` to close the parenthesis, found {found}."
-                    ));
+                    self.expected_cold("`)` to close the parenthesis");
                 }
                 Term::Paren {
                     expr: Box::new(e),
@@ -1135,15 +1155,7 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => {
-                let found = self.describe_current();
-                let hint = match t.kind {
-                    TokenKind::Keyword(_) => " Keywords other than `true`, `false`, `null` and `this` cannot be values.",
-                    _ => "",
-                };
-                self.error_here(format!(
-                    "Expected an expression (a constant, variable, call, `(`, `-` or `~`), found \
-                     {found}.{hint}"
-                ));
+                self.term_expected(matches!(t.kind, TokenKind::Keyword(_)));
                 Term::Missing(Span::empty(t.span.start))
             }
         }
@@ -1167,10 +1179,7 @@ impl<'a> Parser<'a> {
                     )
                 }
                 _ => {
-                    let found = self.describe_current();
-                    self.error_here(format!(
-                        "Expected a subroutine name after `.`, found {found}."
-                    ));
+                    self.expected_cold("a subroutine name after `.`");
                     // Keep a call with an empty name so editors can complete it.
                     return Some(Call {
                         receiver: Some(first),
@@ -1197,11 +1206,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start, self.prev_end()),
         };
         if !self.at_symbol(b'(') {
-            let found = self.describe_current();
-            self.error_here(format!(
-                "Expected `(` after the subroutine name `{}`, found {found}.",
-                call.name.name
-            ));
+            self.expected_cold("`(` after the subroutine name");
             return Some(call);
         }
         call.open = self.bump().map(|t| t.span);
@@ -1222,12 +1227,21 @@ impl<'a> Parser<'a> {
         if self.at_symbol(b')') {
             call.close = self.bump().map(|t| t.span);
         } else {
-            let found = self.describe_current();
-            self.error_here(format!(
-                "Expected `)` or `,` in the argument list, found {found}."
-            ));
+            self.expected_cold("`)` or `,` in the argument list");
         }
         call.span = Span::new(start, self.prev_end());
         Some(call)
+    }
+}
+
+/// Token text quoted in a message: whitespace collapsed and at most 24 characters.
+fn shorten(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 24 {
+        let mut s: String = collapsed.chars().take(23).collect();
+        s.push('…');
+        s
+    } else {
+        collapsed
     }
 }

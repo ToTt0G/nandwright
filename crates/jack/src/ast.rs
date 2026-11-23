@@ -258,7 +258,7 @@ pub enum Term {
         index: Box<Expr>,
         span: Span,
     },
-    Call(Call),
+    Call(Box<Call>),
     Paren { expr: Box<Expr>, span: Span },
     Unary {
         op: UnaryOp,

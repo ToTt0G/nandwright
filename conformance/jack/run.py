@@ -32,6 +32,7 @@ sys.path.insert(0, HERE)
 import cases  # noqa: E402
 
 VERBOSE = "-v" in sys.argv
+ALL_LINES = []
 KEEP = "--keep" in sys.argv
 
 
@@ -107,6 +108,10 @@ def compare_dir(label, java_dir, ours_dir, stems, tool, jackc, results):
             # Deliberate deviation: beyond 100 nested expressions the official
             # compiler prints nothing and writes a truncated .vm file.
             known = "java writes a truncated .vm without a message (expressions nested > 100)"
+        if (not known and not java_rejects and ours_rejects and jvm is not None
+                and any("which this compiler does not support" in d[3] for d in oerrors)):
+            # Deliberate deviation: a fixed nesting limit protects the stack.
+            known = "nested more than %d levels (this compiler's stack guard)" % 128
         if known:
             pass
         elif java_rejects != ours_rejects:
@@ -133,6 +138,11 @@ def compare_dir(label, java_dir, ours_dir, stems, tool, jackc, results):
                     "first error line differs: java %d (%s), ours %s (%s)"
                     % (jfirst, jerrors[0][1], ofirst, oerrors[0][3][:100])
                 )
+        all_lines = [l for l, _ in jerrors] == [d[1] for d in oerrors if d[1] > 0]
+        if not all_lines and VERBOSE and java_rejects:
+            print("  all-lines differ %s/%s: java %s ours %s" % (label, stem, [l for l, _ in jerrors],
+                  [d[1] for d in oerrors if d[1] > 0]))
+        ALL_LINES.append(all_lines)
         results.append((label, stem, java_rejects, jvm is not None, problems, jerrors, oerrors, known))
 
 
@@ -238,6 +248,8 @@ def main():
     print("files compared: %d, identical behaviour: %d (of which %d documented deviations), different: %d"
           % (total, same, known_n, differ))
     print(".vm files byte-compared: %d; files rejected by the official compiler: %d" % (vm_compared, invalid))
+    print("files where every reported error line also matches (informational): %d of %d"
+          % (sum(ALL_LINES), len(ALL_LINES)))
     return 1 if differ else 0
 
 

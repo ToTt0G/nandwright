@@ -160,8 +160,9 @@ for s in ["﻿class CLS { }\n", "class CLS { }\r\n", "class CLS {\r\n function v
 # --- deep nesting (accepted by the official compiler up to at least 10000) -----
 for d in (50, 99, 100, 390):
     add("class CLS { function int f() { var int x; let x = %s1%s; return x; } }\n" % ("(" * d, ")" * d))
+for d in (60, 126, 200):
     add("class CLS { function int f() { var int x; let x = %s1; return x; } }\n" % ("-" * d))
-    add("class CLS { function int f() { var int x; %s let x = 1; %s return x; } }\n" % ("if (x) {" * (d // 2), "}" * (d // 2)))
+    add("class CLS { function int f() { var int x; %s let x = 1; %s return x; } }\n" % ("if (x) {" * d, "}" * d))
 add("class CLS { function int f() { var int x; let x = 1%s; return x; } }\n" % ("+1" * 5000))
 add("class CLS { function int f(int y) { var int x; let x = %s1%s; return x; } }\n" % ("CLS.f(" * 99, ")" * 99))
 add("class CLS { function int f(int y) { var int x; let x = %s1%s; return x; } }\n" % ("CLS.f(" * 100, ")" * 100))
