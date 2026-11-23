@@ -29,6 +29,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
+sys.dont_write_bytecode = True
 import cases  # noqa: E402
 
 VERBOSE = "-v" in sys.argv
