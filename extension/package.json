@@ -238,9 +238,15 @@
       },
       {
         "command": "nandwright.runProgram",
-        "title": "Run on the Hack Computer",
+        "title": "Run Program (Screen, Keyboard, Memory)",
         "category": "Nand2Tetris",
         "icon": "$(vm-running)"
+      },
+      {
+        "command": "nandwright.compileJack",
+        "title": "Compile Jack to VM Files",
+        "category": "Nand2Tetris",
+        "icon": "$(file-code)"
       },
       {
         "command": "nandwright.compareOutput",
@@ -268,7 +274,7 @@
         },
         {
           "command": "nandwright.runProgram",
-          "when": "resourceLangId == hack-asm || resourceLangId == hack",
+          "when": "resourceLangId == hack-asm || resourceLangId == hack || resourceLangId == vm || resourceLangId == jack",
           "group": "navigation@1"
         }
       ],
@@ -282,6 +288,11 @@
           "command": "nandwright.compareOutput",
           "when": "resourceLangId == cmp || resourceLangId == tst",
           "group": "navigation@11"
+        },
+        {
+          "command": "nandwright.compileJack",
+          "when": "resourceLangId == jack",
+          "group": "navigation@12"
         }
       ],
       "explorer/context": [
@@ -297,8 +308,13 @@
         },
         {
           "command": "nandwright.runProgram",
-          "when": "resourceExtname == .asm || resourceExtname == .hack",
+          "when": "resourceExtname == .asm || resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .jack",
           "group": "nandwright@3"
+        },
+        {
+          "command": "nandwright.compileJack",
+          "when": "resourceExtname == .jack",
+          "group": "nandwright@4"
         }
       ],
       "commandPalette": [
@@ -320,7 +336,11 @@
         },
         {
           "command": "nandwright.runProgram",
-          "when": "editorLangId == hack-asm || editorLangId == hack"
+          "when": "editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
+        },
+        {
+          "command": "nandwright.compileJack",
+          "when": "editorLangId == jack"
         }
       ]
     },
@@ -335,7 +355,7 @@
         "command": "nandwright.runProgram",
         "key": "ctrl+alt+t",
         "mac": "cmd+alt+t",
-        "when": "editorLangId == hack-asm || editorLangId == hack"
+        "when": "editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
       }
     ],
     "breakpoints": [
@@ -347,6 +367,12 @@
       },
       {
         "language": "hack"
+      },
+      {
+        "language": "vm"
+      },
+      {
+        "language": "jack"
       }
     ],
     "debuggers": [

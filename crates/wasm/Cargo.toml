@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 n2t-core.workspace = true
 n2t-hack.workspace = true
+n2t-jack.workspace = true
+n2t-vm.workspace = true
 n2t-lsp.workspace = true
 n2t-simulator.workspace = true
 serde_json = "1"

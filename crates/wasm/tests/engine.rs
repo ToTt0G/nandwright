@@ -539,6 +539,143 @@ fn a_program_runs_on_the_hack_computer() {
     assert_eq!(state["key"], 75);
 }
 
+/// Copies the Jack fixture program (two classes) into the in-memory folder.
+fn with_jack_program(host: &MemoryHost) -> String {
+    let dir = format!("{DIR}/counter");
+    for file in ["Main.jack", "Counter.jack"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../jack/tests/fixtures/Counter")
+            .join(file);
+        host.insert(&format!("{dir}/{file}"), std::fs::read(path).unwrap());
+    }
+    dir
+}
+
+#[test]
+fn a_jack_program_runs_on_the_vm_without_writing_vm_files() {
+    let (mut engine, host) = engine();
+    let dir = with_jack_program(&host);
+    let opened = call(
+        &mut engine,
+        json!({"op": "vm.open", "path": format!("{dir}/Main.jack"), "screen": true}),
+    );
+    assert_eq!(opened["kind"], "vm", "{opened}");
+    assert_eq!(opened["fromJack"], true);
+    let session = &opened["session"];
+    // Run to the end in slices, as the panel does.
+    let mut state = opened.clone();
+    let mut drawn = None;
+    for _ in 0..10_000 {
+        state = call(
+            &mut engine,
+            json!({"op": "vm.run", "session": session, "budget": 500, "now": 0, "screen": true}),
+        );
+        if let Some(screen) = state["screen"].as_str() {
+            drawn = Some(screen.to_string());
+        }
+        if state["status"] != "running" {
+            break;
+        }
+    }
+    assert_eq!(state["status"], "halted", "{state}");
+    // The program printed text with the built-in Output: the screen is not blank.
+    let drawn = drawn.expect("the screen was never sent");
+    assert!(drawn.bytes().any(|b| b != b'0'));
+    // Nothing was written next to the sources.
+    assert!(host.get(&format!("{dir}/Main.vm")).is_none());
+    assert!(host.get(&format!("{dir}/Counter.vm")).is_none());
+}
+
+#[test]
+fn a_jack_program_stops_at_a_jack_breakpoint_and_steps_by_jack_line() {
+    let (mut engine, host) = engine();
+    let dir = with_jack_program(&host);
+    let main = format!("{dir}/Main.jack");
+    let source = String::from_utf8(host.get(&main).unwrap()).unwrap();
+    let line_of = |needle: &str| source.lines().position(|l| l.contains(needle)).unwrap();
+    let opened = call(&mut engine, json!({"op": "vm.open", "path": main}));
+    let session = &opened["session"];
+    let add = line_of("do c.add(25);");
+    let state = call(
+        &mut engine,
+        json!({"op": "vm.run", "session": session, "budget": 1_000_000, "now": 0,
+               "breakpoints": [{"path": main, "lines": [add]}]}),
+    );
+    assert_eq!(state["status"], "breakpoint", "{state}");
+    assert_eq!(state["line"].as_u64().unwrap() as usize, add);
+    assert!(state["file"].as_str().unwrap().ends_with("/Main.jack"));
+    assert_eq!(state["function"], "Main.main");
+    assert_eq!(state["callStack"][0]["function"], "Main.main");
+    // One step of a Jack line runs the whole call and lands on the next line.
+    let state = call(
+        &mut engine,
+        json!({"op": "vm.step", "session": session, "unit": "line", "now": 0}),
+    );
+    assert_eq!(state["status"], "paused", "{state}");
+    assert_eq!(
+        state["line"].as_u64().unwrap() as usize,
+        line_of("do d.increment();")
+    );
+    // A single VM command is a much smaller step.
+    let before = state["steps"].as_u64().unwrap();
+    let state = call(
+        &mut engine,
+        json!({"op": "vm.step", "session": session, "now": 0}),
+    );
+    assert_eq!(state["steps"].as_u64().unwrap(), before + 1);
+    assert!(!state["instruction"].as_str().unwrap().is_empty());
+}
+
+#[test]
+fn compiling_jack_writes_the_vm_files_the_official_compiler_writes() {
+    let (mut engine, host) = engine();
+    let dir = with_jack_program(&host);
+    let reply = call(&mut engine, json!({"op": "jack.compile", "path": dir}));
+    assert_eq!(reply["problems"].as_array().unwrap().len(), 0, "{reply}");
+    assert_eq!(reply["written"].as_array().unwrap().len(), 2);
+    for file in ["Main.vm", "Counter.vm"] {
+        // The goldens next to the fixture were produced by the Java compiler.
+        let golden = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../jack/tests/fixtures/Counter")
+                .join(file),
+        )
+        .unwrap();
+        assert_eq!(
+            host.get_text(&format!("{dir}/{file}")).unwrap(),
+            golden.replace("\r\n", "\n")
+        );
+    }
+    // The compiled files run as a VM program too.
+    let opened = call(
+        &mut engine,
+        json!({"op": "vm.open", "path": format!("{dir}/Main.vm")}),
+    );
+    assert_eq!(opened["fromJack"], false, "{opened}");
+    assert!(opened["file"].as_str().unwrap().ends_with(".vm"));
+
+    // A class with an error: nothing is written, and the problem is located.
+    host.insert(
+        &format!("{dir}/Broken.jack"),
+        "class Broken {\n    function void f() {\n        let x = 1;\n        return;\n    }\n}\n",
+    );
+    host.remove(&format!("{dir}/Main.vm"));
+    let reply = call(
+        &mut engine,
+        json!({"op": "jack.compile", "path": format!("{dir}/Main.jack")}),
+    );
+    let problems = reply["problems"].as_array().unwrap();
+    assert_eq!(problems.len(), 1, "{reply}");
+    assert!(
+        problems[0]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Broken.jack")
+    );
+    assert_eq!(problems[0]["range"]["startLine"], 2);
+    assert!(host.get(&format!("{dir}/Main.vm")).is_none());
+}
+
 #[test]
 fn a_program_that_goes_wrong_stops_with_an_explanation() {
     let (mut engine, host) = engine();

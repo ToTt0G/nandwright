@@ -12,6 +12,7 @@ import { ChipPanels } from './chipPanel';
 import { ComputerPanels } from './computerPanel';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
+import { isError } from './runtime/protocol';
 import { ScriptResult, TestExplorer } from './testing';
 
 const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
@@ -269,13 +270,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         }),
         vscode.commands.registerCommand('nandwright.runProgram', async (argument?: unknown) => {
             const uri = targetUri(argument);
-            if (!uri || !/\.(asm|hack)$/i.test(uri.fsPath)) {
+            if (!uri || !/\.(asm|hack|vm|jack)$/i.test(uri.fsPath)) {
                 void vscode.window.showInformationMessage(
-                    'Open a Hack assembly program (.asm) or machine code (.hack) to run it on the Hack computer.',
+                    'Open a program to run it: Hack assembly (.asm), machine code (.hack), VM code (.vm) or Jack (.jack).',
                 );
                 return undefined;
             }
             return computers.open(uri);
+        }),
+        vscode.commands.registerCommand('nandwright.compileJack', async (argument?: unknown) => {
+            const uri = targetUri(argument);
+            if (!uri || !/\.jack$/i.test(uri.fsPath)) {
+                void vscode.window.showInformationMessage('Open a Jack file to compile the classes of its folder.');
+                return undefined;
+            }
+            await runtime.syncUnsaved();
+            const reply = await runtime.tryCall<{
+                written: string[];
+                problems: { path: string; message: string; range: { startLine: number; startCharacter: number } | null }[];
+            }>({ op: 'jack.compile', path: uri.fsPath, crlf: process.platform === 'win32' });
+            if (isError(reply)) {
+                void vscode.window.showErrorMessage(`Nand2Tetris: ${reply.error.message}`);
+                return undefined;
+            }
+            if (reply.problems.length > 0) {
+                const first = reply.problems[0];
+                const choice = await vscode.window.showErrorMessage(
+                    `Nothing was written: ${path.basename(first.path)} does not compile. ${first.message}`,
+                    'Show',
+                );
+                if (choice) {
+                    const position = new vscode.Position(first.range?.startLine ?? 0, first.range?.startCharacter ?? 0);
+                    await vscode.window.showTextDocument(vscode.Uri.file(first.path), {
+                        selection: new vscode.Range(position, position),
+                    });
+                }
+                return reply;
+            }
+            const names = reply.written.map((file) => path.basename(file)).join(', ');
+            vscode.window.setStatusBarMessage(`$(check) Compiled to ${names}`, 8000);
+            return reply;
         }),
         vscode.commands.registerCommand('nandwright.compareOutput', async (argument?: unknown) => {
             const uri = targetUri(argument);

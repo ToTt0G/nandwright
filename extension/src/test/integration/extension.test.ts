@@ -438,6 +438,58 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('VM emulator and Jack', () => {
+        it('runs a Jack program without writing .vm files, and stops at a Jack breakpoint', async function () {
+            this.timeout(90_000);
+            const nandwright = await api();
+            const uri = file('jack', 'Main.jack');
+            // The fixture folder ships the official compiler's output; remove it
+            // to prove that running Jack compiles in memory and writes nothing.
+            for (const name of ['Main.vm', 'Counter.vm']) {
+                fs.rmSync(file('jack', name).fsPath, { force: true });
+            }
+            const document = await vscode.workspace.openTextDocument(uri);
+            const line = document.getText().split(/\r?\n/).findIndex((text) => text.includes('do c.add(25);'));
+            vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(line, 0)))]);
+            try {
+                const computer = await nandwright.computers.open(uri);
+                assert.equal(computer.snapshot().problem, null);
+                assert.equal(computer.snapshot().state?.kind, 'vm');
+                await computer.simulate({ type: 'run' });
+                await until('the Jack breakpoint', () => computer.snapshot().state?.status === 'breakpoint');
+                assert.equal(computer.snapshot().state?.line, line);
+                assert.equal(computer.snapshot().state?.callStack?.[0].function, 'Main.main');
+                await computer.simulate({ type: 'step', unit: 'line' });
+                assert.equal(computer.snapshot().state?.line, line + 1);
+                vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+                await computer.simulate({ type: 'run' });
+                await until('the program to end', () => computer.snapshot().state?.status === 'halted');
+                assert.match(computer.snapshot().state?.screen ?? '', /[1-9a-f]/, 'the program printed nothing');
+                assert.ok(!fs.existsSync(file('jack', 'Main.vm').fsPath), 'running Jack wrote a .vm file');
+                computer.panel.dispose();
+            } finally {
+                vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+            }
+        });
+
+        it('compiles Jack to the .vm files the official compiler writes, and runs them', async () => {
+            const nandwright = await api();
+            await open('jack', 'Main.jack');
+            const reply = await vscode.commands.executeCommand<{ written: string[]; problems: unknown[] }>('nandwright.compileJack');
+            assert.equal(reply.problems.length, 0);
+            assert.deepEqual(reply.written.map((f) => path.basename(f)).sort(), ['Counter.vm', 'Main.vm']);
+            const vm = fs.readFileSync(file('jack', 'Main.vm').fsPath, 'utf8');
+            assert.match(vm, /^function Main\.main 4\r?\n/);
+            assert.equal(vm.includes('\r\n'), os.EOL === '\r\n');
+            const computer = await nandwright.computers.open(file('jack', 'Main.vm'));
+            assert.equal(computer.snapshot().problem, null);
+            assert.equal(computer.snapshot().state?.fromJack, false);
+            await computer.simulate({ type: 'step' });
+            assert.equal(computer.snapshot().state?.steps, 1);
+            computer.panel.dispose();
+        });
+    });
+
     describe('stepping through a script', () => {
         it('stops on entry, steps, shows the pins and runs to the end', async function () {
             this.timeout(90_000);

@@ -125,8 +125,11 @@ export function isError(reply: unknown): reply is EngineError {
 export interface MachineState {
     session?: number;
     kind: 'cpu' | 'vm';
-    /** `running` only while a run is in progress. */
-    status: 'running' | 'paused' | 'breakpoint' | 'error';
+    /**
+     * `running` only while a run is in progress. A VM program can also be
+     * `halted` (it ended), `waiting` (for a key) or `sleeping` (in `Sys.wait`).
+     */
+    status: 'running' | 'paused' | 'breakpoint' | 'error' | 'halted' | 'waiting' | 'sleeping';
     error: string | null;
     registers: { name: string; value: number | null }[];
     /** The instruction about to execute, disassembled. */
@@ -140,6 +143,14 @@ export interface MachineState {
     ram: { start: number; values: number[] } | null;
     /** The 8192 screen words as hexadecimal, when the screen has changed. */
     screen: string | null;
+    /** VM only: the function being executed. */
+    function?: string;
+    /** VM only: whether the program was compiled from Jack sources. */
+    fromJack?: boolean;
+    /** VM only: the active calls, innermost first. */
+    callStack?: { function: string; file: string | null; line: number | null; locals: number[]; arguments: number[] }[];
+    /** VM only: the top of the stack, newest first. */
+    stack?: number[];
 }
 
 export interface MachineRunRequest {
@@ -147,6 +158,9 @@ export interface MachineRunRequest {
     session: number;
     /** Instructions per second; 0 runs as fast as possible. */
     speed: number;
+    /** CPU: zero-based lines of the program's file. */
     breakLines: number[];
+    /** VM: zero-based lines per source file. */
+    breakpoints: { path: string; lines: number[] }[];
     ram: [number, number];
 }

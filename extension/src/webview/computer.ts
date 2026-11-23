@@ -20,7 +20,7 @@ export type FromComputer =
     | { type: 'ready' }
     | { type: 'run' }
     | { type: 'pause' }
-    | { type: 'step' }
+    | { type: 'step'; unit?: 'command' | 'line' }
     | { type: 'reset' }
     | { type: 'speed'; speed: number }
     | { type: 'key'; code: number }
@@ -74,6 +74,11 @@ const banner = element('div', { class: 'problem', role: 'alert', hidden: '' });
 
 const runButton = element('button', { type: 'button', class: 'primary' }, 'Run');
 const stepButton = element('button', { type: 'button', class: 'secondary', title: 'Execute one instruction' }, 'Step');
+const stepLineButton = element(
+    'button',
+    { type: 'button', class: 'secondary', title: 'Run until the next line of the Jack program (calls are stepped over)', hidden: '' },
+    'Step line',
+);
 const resetButton = element(
     'button',
     { type: 'button', class: 'secondary', title: 'Load the program again and clear memory' },
@@ -105,6 +110,11 @@ const screen = element(
 const keyboardHint = element('p', { class: 'hint keyboard' });
 
 const registers = element('div', { class: 'registers', role: 'table', 'aria-label': 'Registers' });
+const badge = element('span', { class: 'badge' }, '');
+const framesTitle = element('h2', { hidden: '' }, 'Call stack');
+const frames = element('ol', { class: 'frames', hidden: '' });
+const stackTitle = element('h2', { hidden: '' }, 'Stack (top first)');
+const stack = element('ol', { class: 'stack', hidden: '' });
 const memoryBody = element('tbody', {});
 const addressInput = element('input', {
     class: 'address',
@@ -148,11 +158,12 @@ function showMemory(address: number): void {
 }
 
 function build(): void {
-    const header = element('header', {}, title, element('span', { class: 'badge' }, 'Hack computer'));
+    const header = element('header', {}, title, badge);
     const toolbar = element(
         'div',
         { class: 'toolbar', role: 'toolbar', 'aria-label': 'Program' },
         runButton,
+        stepLineButton,
         stepButton,
         resetButton,
         speedSelect,
@@ -186,8 +197,12 @@ function build(): void {
         status,
         screen,
         keyboardHint,
+        framesTitle,
+        frames,
         element('h2', {}, 'Registers'),
         registers,
+        stackTitle,
+        stack,
         element('h2', {}, 'Memory'),
         memoryTools,
         rejected,
@@ -256,7 +271,8 @@ function updateKeyboard(): void {
 // ---- Controls ----
 
 runButton.addEventListener('click', () => send({ type: running ? 'pause' : 'run' }));
-stepButton.addEventListener('click', () => send({ type: 'step' }));
+stepButton.addEventListener('click', () => send({ type: 'step', unit: 'command' }));
+stepLineButton.addEventListener('click', () => send({ type: 'step', unit: 'line' }));
 resetButton.addEventListener('click', () => send({ type: 'reset' }));
 speedSelect.addEventListener('change', () => {
     speed = Number(speedSelect.value);
@@ -301,7 +317,16 @@ const REGISTER_HINTS: Record<string, string> = {
     D: 'The data register',
     PC: 'The program counter: the address of the next instruction',
     M: 'RAM[A]: the memory cell A points at',
+    SP: 'The stack pointer, RAM[0]: the address just above the top of the stack',
+    LCL: 'RAM[1]: where the local variables of the current function start',
+    ARG: 'RAM[2]: where the arguments of the current function start',
+    THIS: 'RAM[3]: the base of the this segment (the current object)',
+    THAT: 'RAM[4]: the base of the that segment (the current array)',
 };
+
+function fileName(file: string | null): string {
+    return file ? file.split(/[\\/]/).pop()! : '';
+}
 
 function update(): void {
     banner.hidden = !problem;
@@ -318,15 +343,53 @@ function update(): void {
         status.textContent = problem ? '' : 'Loading the program…';
         return;
     }
+    const vm = state.kind === 'vm';
+    badge.textContent = vm ? 'VM emulator' : 'Hack computer';
+    stepLineButton.hidden = !state.fromJack;
+    stepButton.title = vm ? 'Execute one VM command' : 'Execute one instruction';
     const pc = state.registers.find((r) => r.name === 'PC')?.value ?? 0;
-    const where = state.line !== null ? `line ${state.line + 1}` : `ROM[${pc}]`;
+    const where =
+        state.line !== null
+            ? `${vm && state.file ? `${fileName(state.file)} ` : ''}line ${state.line + 1}`
+            : vm
+              ? (state.function ?? 'the program')
+              : `ROM[${pc}]`;
+    const steps = `${state.steps.toLocaleString('en-US')} steps`;
+    const finished = state.status === 'error' || state.status === 'halted';
     status.textContent = running
-        ? `Running · ${state.steps.toLocaleString('en-US')} steps`
+        ? state.status === 'waiting'
+            ? `Waiting for a key · click the screen and type · ${steps}`
+            : state.status === 'sleeping'
+              ? `Running (in Sys.wait) · ${steps}`
+              : `Running · ${steps}`
         : state.status === 'error'
           ? `Stopped at ${where}`
-          : `${state.status === 'breakpoint' ? 'Breakpoint' : 'Paused'} at ${where} · next: ${state.instruction} · ${state.steps.toLocaleString('en-US')} steps`;
-    runButton.disabled = state.status === 'error';
-    stepButton.disabled = running || state.status === 'error';
+          : state.status === 'halted'
+            ? `The program ended · ${steps}`
+            : `${state.status === 'breakpoint' ? 'Breakpoint' : 'Paused'} at ${where} · next: ${state.instruction} · ${steps}`;
+    runButton.disabled = finished;
+    stepButton.disabled = running || finished;
+    stepLineButton.disabled = running || finished;
+
+    const calls = state.callStack ?? [];
+    framesTitle.hidden = frames.hidden = !vm || calls.length === 0;
+    frames.replaceChildren(
+        ...calls.map((frame) =>
+            element(
+                'li',
+                {},
+                frame.function,
+                element('span', { class: 'where' }, frame.line !== null ? `${fileName(frame.file)}:${frame.line + 1}` : 'built-in'),
+            ),
+        ),
+    );
+    const values = state.stack ?? [];
+    stackTitle.hidden = stack.hidden = !vm;
+    stack.replaceChildren(
+        ...(values.length > 0
+            ? values.map((value) => element('li', {}, formatValue(value, 16, radix)))
+            : [element('li', { class: 'muted' }, 'empty')]),
+    );
 
     const focusedLabel = (document.activeElement as HTMLElement | null)?.getAttribute('aria-label');
     registers.replaceChildren();
@@ -412,7 +475,7 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
     }
     // While a cell is being edited, a frame must not take it away.
     const editing = !running && document.activeElement instanceof HTMLInputElement && document.activeElement.classList.contains('cell');
-    if (!editing || message.state?.status !== 'running') {
+    if (!editing || !running) {
         update();
     }
 });

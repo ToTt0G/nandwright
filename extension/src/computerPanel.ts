@@ -1,6 +1,7 @@
-// The Hack computer panel: runs an assembly or machine-code program with its
-// screen, keyboard, registers and memory, next to the source. The line about
-// to execute is highlighted in the editor, and breakpoints set in the gutter
+// The computer panel: runs a program with its screen, keyboard, registers and
+// memory, next to the source. Assembly and machine code run on the CPU
+// emulator; VM code and Jack run on the VM emulator. The line about to
+// execute is highlighted in the editor, and breakpoints set in the gutter
 // pause the program.
 
 import * as path from 'node:path';
@@ -26,9 +27,11 @@ class ComputerPanel {
     private readonly disposables: vscode.Disposable[] = [];
     private queue: Promise<void> = Promise.resolve();
     private readonly title: string;
+    private readonly shown = new Set<vscode.TextEditor>();
 
     constructor(
         readonly uri: vscode.Uri,
+        readonly kind: 'cpu' | 'vm',
         readonly panel: vscode.WebviewPanel,
         private readonly runtime: Runtime,
         private readonly highlight: vscode.TextEditorDecorationType,
@@ -68,31 +71,67 @@ class ComputerPanel {
         this.showLine();
     }
 
-    /** Marks the instruction about to execute in the editor, when paused. */
+    /** Marks the line about to execute in the editor, when paused. */
     private showLine(): void {
-        const line = this.running || this.disposed ? null : (this.state?.line ?? null);
+        const paused = !this.running && !this.disposed;
+        const line = paused ? (this.state?.line ?? null) : null;
+        const file = this.state?.file ? samePath(this.state.file) : undefined;
         for (const editor of vscode.window.visibleTextEditors) {
-            if (editor.document.uri.toString() !== this.uri.toString()) {
+            if (editor.document.uri.scheme !== 'file') {
                 continue;
             }
-            if (line === null || line >= editor.document.lineCount) {
-                editor.setDecorations(this.highlight, []);
+            const here = file !== undefined && samePath(editor.document.uri.fsPath) === file;
+            if (!here || line === null || line >= editor.document.lineCount) {
+                if (this.shown.delete(editor)) {
+                    editor.setDecorations(this.highlight, []);
+                }
             } else {
                 const range = editor.document.lineAt(line).range;
                 editor.setDecorations(this.highlight, [range]);
                 editor.revealRange(range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+                this.shown.add(editor);
             }
         }
     }
 
+    /** Opens the file the program stopped in, if it is not on screen. */
+    private async reveal(): Promise<void> {
+        const file = this.state?.file;
+        if (!file || this.running || this.disposed) {
+            return;
+        }
+        const visible = vscode.window.visibleTextEditors.some(
+            (editor) => editor.document.uri.scheme === 'file' && samePath(editor.document.uri.fsPath) === samePath(file),
+        );
+        if (!visible) {
+            const beside = vscode.window.visibleTextEditors.find((editor) => editor.viewColumn !== this.panel.viewColumn);
+            await vscode.window.showTextDocument(vscode.Uri.file(file), {
+                viewColumn: beside?.viewColumn ?? vscode.ViewColumn.One,
+                preserveFocus: true,
+                preview: true,
+            });
+            this.showLine();
+        }
+    }
+
+    /** The enabled breakpoints, by file, as zero-based lines. */
+    private breakpoints(): { path: string; lines: number[] }[] {
+        const byFile = new Map<string, number[]>();
+        for (const breakpoint of vscode.debug.breakpoints) {
+            if (breakpoint instanceof vscode.SourceBreakpoint && breakpoint.enabled && breakpoint.location.uri.scheme === 'file') {
+                const file = breakpoint.location.uri.fsPath;
+                byFile.set(file, [...(byFile.get(file) ?? []), breakpoint.location.range.start.line]);
+            }
+        }
+        return [...byFile].map(([file, lines]) => ({ path: file, lines }));
+    }
+
     /** Zero-based lines of the enabled breakpoints in the program's file. */
     private breakLines(): number[] {
-        return vscode.debug.breakpoints
-            .filter(
-                (b): b is vscode.SourceBreakpoint =>
-                    b instanceof vscode.SourceBreakpoint && b.enabled && b.location.uri.toString() === this.uri.toString(),
-            )
-            .map((b) => b.location.range.start.line);
+        const here = samePath(this.uri.fsPath);
+        return this.breakpoints()
+            .filter((entry) => samePath(entry.path) === here)
+            .flatMap((entry) => entry.lines);
     }
 
     private accept(reply: MachineState | EngineError): boolean {
@@ -121,7 +160,7 @@ class ComputerPanel {
             this.session = undefined;
         }
         const reply = await this.runtime.tryCall<MachineState>({
-            op: 'cpu.open',
+            op: `${this.kind}.open`,
             path: this.uri.fsPath,
             ram: this.window,
             screen: true,
@@ -143,11 +182,18 @@ class ComputerPanel {
     }
 
     private start(): void {
-        if (this.session === undefined || this.running || this.state?.status === 'error') {
+        if (this.session === undefined || this.running || this.state?.status === 'error' || this.state?.status === 'halted') {
             return;
         }
         const run = this.runtime.runMachine(
-            { kind: 'cpu', session: this.session, speed: this.speed, breakLines: this.breakLines(), ram: this.window },
+            {
+                kind: this.kind,
+                session: this.session,
+                speed: this.speed,
+                breakLines: this.breakLines(),
+                breakpoints: this.breakpoints(),
+                ram: this.window,
+            },
             (frame) => {
                 if (this.running === handle) {
                     this.take(frame);
@@ -163,6 +209,7 @@ class ComputerPanel {
                 }
                 this.accept(final);
                 this.post();
+                void this.reveal();
             }),
         };
         this.running = handle;
@@ -173,8 +220,15 @@ class ComputerPanel {
         if (this.session === undefined) {
             return;
         }
-        const reply = await this.runtime.tryCall<MachineState>({ screen: true, ...request, session: this.session, ram: this.window });
-        if (isError(reply) && request.op === 'cpu.set') {
+        const reply = await this.runtime.tryCall<MachineState>({
+            screen: true,
+            ...request,
+            op: `${this.kind}.${request.op}`,
+            session: this.session,
+            ram: this.window,
+            now: Math.floor(performance.now()),
+        });
+        if (isError(reply) && request.op === 'set') {
             if (!this.disposed) {
                 const rejected: ToComputer = { type: 'rejected', message: reply.error.message };
                 void this.panel.webview.postMessage(rejected);
@@ -190,7 +244,7 @@ class ComputerPanel {
             case 'ready':
                 if (this.state || this.problem) {
                     // A fresh page for a program already loaded: send it everything.
-                    await this.call({ op: 'cpu.state', screen: 'force' });
+                    await this.call({ op: 'state', screen: 'force' });
                 } else {
                     await this.load();
                 }
@@ -203,7 +257,8 @@ class ComputerPanel {
                 return;
             case 'step':
                 await this.stop();
-                await this.call({ op: 'cpu.step' });
+                await this.call({ op: 'step', unit: message.unit ?? 'command' });
+                await this.reveal();
                 return;
             case 'reset':
                 await this.load();
@@ -227,12 +282,12 @@ class ComputerPanel {
                     await this.stop();
                     this.start();
                 } else {
-                    await this.call({ op: 'cpu.state' });
+                    await this.call({ op: 'state' });
                 }
                 return;
             }
             case 'set':
-                await this.call({ op: 'cpu.set', target: message.target, address: message.address, value: message.value });
+                await this.call({ op: 'set', target: message.target, address: message.address, value: message.value });
                 return;
         }
     }
@@ -260,9 +315,10 @@ class ComputerPanel {
         this.running?.stop();
         this.running = undefined;
         this.disposed = true;
-        for (const editor of vscode.window.visibleTextEditors) {
+        for (const editor of this.shown) {
             editor.setDecorations(this.highlight, []);
         }
+        this.shown.clear();
         if (this.session !== undefined) {
             this.runtime.close(this.session);
             this.session = undefined;
@@ -270,6 +326,11 @@ class ComputerPanel {
         this.disposables.forEach((d) => d.dispose());
         this.onDispose();
     }
+}
+
+/** A path in a form that compares equal for the same file on Windows too. */
+function samePath(file: string): string {
+    return path.normalize(file).replace(/\\/g, '/').toLowerCase();
 }
 
 export class ComputerPanels implements vscode.Disposable {
@@ -286,8 +347,9 @@ export class ComputerPanels implements vscode.Disposable {
         private readonly runtime: Runtime,
     ) {}
 
-    /** Opens (or reveals) the Hack computer for a program file. */
+    /** Opens (or reveals) the computer for a program: `.asm`, `.hack`, `.vm` or `.jack`. */
     async open(uri: vscode.Uri): Promise<ComputerPanel> {
+        const kind = /\.(vm|jack)$/i.test(uri.fsPath) ? 'vm' : 'cpu';
         const key = uri.toString();
         const existing = this.panels.get(key);
         if (existing) {
@@ -298,7 +360,7 @@ export class ComputerPanels implements vscode.Disposable {
         const name = path.basename(uri.fsPath);
         const panel = vscode.window.createWebviewPanel(
             'nandwright.computer',
-            `${name} · Hack computer`,
+            `${name} · ${kind === 'vm' ? 'VM emulator' : 'Hack computer'}`,
             { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
             {
                 enableScripts: true,
@@ -308,8 +370,8 @@ export class ComputerPanels implements vscode.Disposable {
                 localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview')],
             },
         );
-        panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'computer.js', `${name} on the Hack computer`, COMPUTER_STYLE);
-        const computer = new ComputerPanel(uri, panel, this.runtime, this.highlight, () => this.panels.delete(key));
+        panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'computer.js', `${name} running`, COMPUTER_STYLE);
+        const computer = new ComputerPanel(uri, kind, panel, this.runtime, this.highlight, () => this.panels.delete(key));
         this.panels.set(key, computer);
         await computer.load();
         return computer;
@@ -346,6 +408,13 @@ const COMPUTER_STYLE = `
 .memory tbody th { width: 42%; white-space: nowrap; color: var(--vscode-descriptionForeground); }
 .memory .symbol { margin-left: 10px; color: var(--vscode-foreground); }
 .memory tr.pointed { background: var(--vscode-list-inactiveSelectionBackground); }
+.frames { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); font-family: var(--vscode-editor-font-family); }
+.frames li { display: flex; gap: 12px; padding: 3px 4px; border-bottom: 1px solid var(--line); }
+.frames li:first-child { font-weight: 600; }
+.frames .where { margin-left: auto; color: var(--vscode-descriptionForeground); font-weight: normal; }
+.stack { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; font-family: var(--vscode-editor-font-family); font-variant-numeric: tabular-nums; }
+.stack li { min-width: 44px; padding: 1px 8px; text-align: right; border: 1px solid var(--line); border-radius: 2px; }
+.stack li:first-child { border-color: var(--vscode-focusBorder); }
 .rejected { margin: 0 0 4px; color: var(--vscode-errorForeground); }
 .rejected:empty { display: none; }
 [hidden] { display: none !important; }

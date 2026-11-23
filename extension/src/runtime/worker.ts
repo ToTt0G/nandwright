@@ -88,7 +88,14 @@ const FRAME_MS = 33;
  * fails, posting a frame for the panel about thirty times a second.
  */
 async function runMachine(id: number, request: MachineRunRequest): Promise<any> {
-    const base = { session: request.session, breakLines: request.breakLines, ram: request.ram };
+    const base = {
+        session: request.session,
+        breakLines: request.breakLines,
+        breakpoints: request.breakpoints,
+        ram: request.ram,
+    };
+    // A program that is waiting for a key or sleeping is still running.
+    const going = new Set(['running', 'waiting', 'sleeping']);
     let budget = 50_000;
     let owed = 0;
     let last = performance.now();
@@ -108,11 +115,17 @@ async function runMachine(id: number, request: MachineRunRequest): Promise<any> 
         const frameDue = now - lastFrame >= FRAME_MS;
         if (budget > 0) {
             const started = performance.now();
-            const state = call({ ...base, op: `${request.kind}.run`, budget, screen: frameDue });
+            const state = call({
+                ...base,
+                op: `${request.kind}.run`,
+                budget,
+                screen: frameDue,
+                now: Math.floor(performance.now()),
+            });
             if (state.error?.message) {
                 return state;
             }
-            if (state.status !== 'running') {
+            if (!going.has(state.status)) {
                 // Stopped: send the final picture with it.
                 const final = call({ ...base, op: `${request.kind}.state`, screen: true });
                 return { ...final, status: state.status, screen: final.screen ?? state.screen };
@@ -121,7 +134,10 @@ async function runMachine(id: number, request: MachineRunRequest): Promise<any> 
                 lastFrame = now;
                 post({ type: 'frame', id, state });
             }
-            if (request.speed === 0) {
+            if (state.status !== 'running') {
+                // Nothing to compute until a key or the clock: do not spin.
+                await sleep(5);
+            } else if (request.speed === 0) {
                 const elapsed = Math.max(performance.now() - started, 0.05);
                 budget = Math.round(Math.min(Math.max((budget * 12) / elapsed, 1000), 50_000_000));
             }
