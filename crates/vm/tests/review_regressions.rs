@@ -164,3 +164,37 @@ fn keyboard_line_budget_is_bounded_and_reset_discards_input() {
     let ptr = vm.ram(5) as u16;
     assert_eq!(&vm.ram_slice()[ptr as usize..][..3], &[1, 1, 90]);
 }
+
+#[test]
+fn suspended_builtin_keeps_debugger_on_the_vm_frame_with_its_own_locals() {
+    let mut vm = make_vm(&[
+        (
+            "Main",
+            "function Main.main 0\npush constant 42\ncall Other.pause 1\nreturn\n",
+        ),
+        (
+            "Other",
+            "function Other.pause 1\npush constant 71\npop local 0\n\
+                   push constant 5\ncall Sys.wait 1\npop temp 0\npush constant 0\nreturn\n",
+        ),
+    ]);
+    let mut bp = Breakpoints::new();
+    bp.insert("Other", 4);
+    assert_eq!(
+        vm.run(100, 10, &bp),
+        RunStatus::Breakpoint {
+            file: "Other".to_string(),
+            line: 4
+        },
+    );
+    assert_eq!(vm.program().location(vm.pc()), Some(("Other", 4)));
+    let before = vm.call_stack();
+    let active = before.last().unwrap();
+    assert_eq!(active.file.as_deref(), Some("Other"));
+    assert_eq!(active.line, Some(4));
+    assert_eq!(active.locals, [71]);
+    assert_eq!(active.arguments, [42]);
+    assert_eq!(vm.step(10), StepStatus::Sleeping { until_ms: 15 });
+    assert_eq!(vm.call_stack(), before);
+    assert_eq!(vm.run(100, 15, &bp), RunStatus::Halted);
+}
