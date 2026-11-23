@@ -284,3 +284,55 @@ CHIP Nor {
         "top-level output cannot feed an input pin"
     );
 }
+
+/// An editor has no position between the `\r` and the `\n` of a line ending.
+/// Whatever the mix of line endings, no formatting edit may start or end
+/// there (regression test for the end-of-project review).
+#[test]
+fn formatting_edits_never_split_a_crlf() {
+    let bodies = [
+        "CHIP Nor {\r\n    IN a, b;\r\n    OUT out;\r\n\r\n\r\n    PARTS:\n    Or(a=a, b=b, out=w);\r\n    Not(in=w, out=out);\r\n}\r\n",
+        "CHIP Nor {\n    IN a, b;\r\n    OUT out;\r\n\r\n\r\n\r\n    PARTS:\r\n    Or(a=a, b=b, out=w);\n    Not(in=w, out=out);\r\n}\r\n",
+        "CHIP Nor {\r\n    IN a, b;  \r\n    OUT out;\r\n    PARTS:\r\n    Or(a=a, b=b, out=w);\r\n    Not(in=w, out=out);\r\n}",
+        "CHIP Nor {\r\nIN a, b;\r\n\r\n\r\nOUT out;\n\n\nPARTS:\r\nOr(a=a, b=b, out=w);\r\nNot(in=w, out=out);\r\n}\r\n\r\n\r\n",
+        // Mostly `\n`, with one `\r\n` after the last change.
+        "CHIP Nor {\n    IN a, b;\n    OUT out;\n\n\n\n    PARTS:\n    Or(a=a, b=b, out=w);\r\n    Not(in=w, out=out);\n}\n",
+        "CHIP Nor {\n    IN a, b;\n    OUT out;\n    PARTS:\n    Or(a=a,b=b, out=w);\r\n    Not(in=w, out=out);\n}\n",
+        // Mostly `\r\n`, with one bare `\n` before the first change.
+        "CHIP Nor {\r\n    IN a, b;\n\r\n\r\n\r\n    OUT out;\r\n    PARTS:\r\n    Or(a=a, b=b, out=w);\r\n    Not(in=w, out=out);\r\n}\r\n",
+    ];
+    for (i, body) in bodies.iter().enumerate() {
+        let mut server = test_server();
+        let uri = Url::parse("file:///tmp/Nor.hdl").unwrap();
+        open_doc(&mut server, &uri, "hdl", body);
+        let _ = server.take_outgoing();
+        let edits = send_request::<req::Formatting>(
+            &mut server,
+            1,
+            lsp::DocumentFormattingParams {
+                text_document: lsp::TextDocumentIdentifier { uri },
+                options: lsp::FormattingOptions {
+                    tab_size: 4,
+                    insert_spaces: true,
+                    ..Default::default()
+                },
+                work_done_progress_params: Default::default(),
+            },
+        )
+        .unwrap_or_default();
+        assert!(!edits.is_empty(), "case {i} should need formatting");
+        // The length of each line without its line ending.
+        let widths: Vec<u32> = body
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line).chars().count() as u32)
+            .collect();
+        for edit in &edits {
+            for position in [edit.range.start, edit.range.end] {
+                assert!(
+                    position.character <= widths[position.line as usize],
+                    "case {i}: an edit touches the middle of a line ending: {edit:?}"
+                );
+            }
+        }
+    }
+}

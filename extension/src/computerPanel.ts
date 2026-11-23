@@ -7,6 +7,7 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { panelHtml } from './panelHtml';
+import { pathKey } from './paths';
 import { Runtime } from './runtime/client';
 import { EngineError, MachineState, isError } from './runtime/protocol';
 import type { FromComputer, ToComputer } from './webview/computer';
@@ -75,12 +76,12 @@ class ComputerPanel {
     private showLine(): void {
         const paused = !this.running && !this.disposed;
         const line = paused ? (this.state?.line ?? null) : null;
-        const file = this.state?.file ? samePath(this.state.file) : undefined;
+        const file = this.state?.file ? pathKey(this.state.file) : undefined;
         for (const editor of vscode.window.visibleTextEditors) {
             if (editor.document.uri.scheme !== 'file') {
                 continue;
             }
-            const here = file !== undefined && samePath(editor.document.uri.fsPath) === file;
+            const here = file !== undefined && pathKey(editor.document.uri.fsPath) === file;
             if (!here || line === null || line >= editor.document.lineCount) {
                 if (this.shown.delete(editor)) {
                     editor.setDecorations(this.highlight, []);
@@ -101,7 +102,7 @@ class ComputerPanel {
             return;
         }
         const visible = vscode.window.visibleTextEditors.some(
-            (editor) => editor.document.uri.scheme === 'file' && samePath(editor.document.uri.fsPath) === samePath(file),
+            (editor) => editor.document.uri.scheme === 'file' && pathKey(editor.document.uri.fsPath) === pathKey(file),
         );
         if (!visible) {
             const beside = vscode.window.visibleTextEditors.find((editor) => editor.viewColumn !== this.panel.viewColumn);
@@ -128,9 +129,9 @@ class ComputerPanel {
 
     /** Zero-based lines of the enabled breakpoints in the program's file. */
     private breakLines(): number[] {
-        const here = samePath(this.uri.fsPath);
+        const here = pathKey(this.uri.fsPath);
         return this.breakpoints()
-            .filter((entry) => samePath(entry.path) === here)
+            .filter((entry) => pathKey(entry.path) === here)
             .flatMap((entry) => entry.lines);
     }
 
@@ -151,8 +152,18 @@ class ComputerPanel {
         }
     }
 
+    /**
+     * Loads the program, after anything already asked of the panel. Loading
+     * goes through the queue: two loads at once would open two sessions and
+     * lose track of one.
+     */
+    load(): Promise<void> {
+        this.enqueue(() => this.reload());
+        return this.queue;
+    }
+
     /** Loads the program, or loads it again from the editor's current text. */
-    async load(): Promise<void> {
+    private async reload(): Promise<void> {
         await this.stop();
         await this.runtime.syncUnsaved();
         if (this.session !== undefined) {
@@ -165,6 +176,14 @@ class ComputerPanel {
             ram: this.window,
             screen: true,
         });
+        if (this.disposed) {
+            // The panel was closed while the program was loading: the
+            // session that has just been made has no owner.
+            if (!isError(reply) && reply.session !== undefined) {
+                this.runtime.close(reply.session);
+            }
+            return;
+        }
         if (this.accept(reply) && !isError(reply)) {
             this.session = reply.session;
         } else {
@@ -246,7 +265,7 @@ class ComputerPanel {
                     // A fresh page for a program already loaded: send it everything.
                     await this.call({ op: 'state', screen: 'force' });
                 } else {
-                    await this.load();
+                    await this.reload();
                 }
                 return;
             case 'run':
@@ -261,7 +280,7 @@ class ComputerPanel {
                 await this.reveal();
                 return;
             case 'reset':
-                await this.load();
+                await this.reload();
                 return;
             case 'speed': {
                 this.speed = message.speed;
@@ -326,11 +345,6 @@ class ComputerPanel {
         this.disposables.forEach((d) => d.dispose());
         this.onDispose();
     }
-}
-
-/** A path in a form that compares equal for the same file on Windows too. */
-function samePath(file: string): string {
-    return path.normalize(file).replace(/\\/g, '/').toLowerCase();
 }
 
 export class ComputerPanels implements vscode.Disposable {

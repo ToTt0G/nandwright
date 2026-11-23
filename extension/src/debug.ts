@@ -7,6 +7,7 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { pathKey, samePath } from './paths';
 import { Runtime, RuntimeError } from './runtime/client';
 import { Pin, Range, TestEvent, TestInspection, TestOpened, TestOutcome, TestStatus } from './runtime/protocol';
 import { formatValue, keyName } from './values';
@@ -35,7 +36,11 @@ class ScriptDebugSession implements vscode.DebugAdapter {
     private seq = 1;
     private session: number | undefined;
     private script = '';
-    private breakLines: number[] = [];
+    /**
+     * Breakpoints as the editor sends them, by file. They arrive before
+     * `launch` says which script this is, and for every file that has any.
+     */
+    private readonly breakpointsByFile = new Map<string, number[]>();
     private next: Range | null = null;
     private pins: Pin[] = [];
     private finished = false;
@@ -43,18 +48,39 @@ class ScriptDebugSession implements vscode.DebugAdapter {
     private launched = false;
     private configured = false;
     private stopOnEntry = true;
+    /** The script is executing: one `continue` or step at a time. */
+    private busy = false;
+    /** The debug session has been ended by the editor. */
+    private ended = false;
+    private disposed = false;
+    /** Requests that have had their one response. */
+    private readonly answered = new WeakSet<Request>();
 
     constructor(private readonly runtime: Runtime) {}
 
     private send(message: Record<string, unknown>): void {
+        if (this.disposed) {
+            return;
+        }
         this.emitter.fire({ seq: this.seq++, ...message } as vscode.DebugProtocolMessage);
     }
 
     private respond(request: Request, body: unknown = {}): void {
+        if (this.answered.has(request)) {
+            return;
+        }
+        this.answered.add(request);
         this.send({ type: 'response', request_seq: request.seq, command: request.command, success: true, body });
     }
 
     private fail(request: Request, message: string): void {
+        if (this.answered.has(request)) {
+            // The request was acknowledged before it went wrong: a second
+            // response would break the protocol. Say it instead.
+            this.say(message, 'stderr');
+            return;
+        }
+        this.answered.add(request);
         this.send({
             type: 'response',
             request_seq: request.seq,
@@ -99,11 +125,11 @@ class ScriptDebugSession implements vscode.DebugAdapter {
                 await this.launch(request, args);
                 return;
             case 'setBreakpoints': {
-                const sameFile = !this.script || samePath(args.source?.path ?? '', this.script);
+                const file: string = args.source?.path ?? '';
                 const lines: number[] = (args.breakpoints ?? []).map((b: { line: number }) => b.line - 1);
-                if (sameFile) {
-                    this.breakLines = lines;
-                }
+                this.breakpointsByFile.set(pathKey(file), lines);
+                // Only the script itself is stepped through.
+                const sameFile = !this.script || samePath(file, this.script);
                 this.respond(request, {
                     breakpoints: lines.map((line) => ({ verified: sameFile, line: line + 1 })),
                 });
@@ -183,6 +209,7 @@ class ScriptDebugSession implements vscode.DebugAdapter {
                 return;
             case 'terminate':
             case 'disconnect':
+                this.ended = true;
                 this.running?.cancel();
                 this.close();
                 this.respond(request);
@@ -213,6 +240,12 @@ class ScriptDebugSession implements vscode.DebugAdapter {
                 collectAll: false,
                 autoKeyboard: vscode.workspace.getConfiguration('nandwright').get('test.pressKeys', true),
             });
+            if (this.ended) {
+                // The editor ended the session while the script was being
+                // opened: nobody is left to close it later.
+                this.runtime.close(opened.session);
+                return;
+            }
             this.session = opened.session;
             this.next = opened.next;
         } catch (error) {
@@ -268,38 +301,83 @@ class ScriptDebugSession implements vscode.DebugAdapter {
         }
     }
 
+    /** Zero-based lines of the script's own breakpoints. */
+    private breakLines(): number[] {
+        return this.breakpointsByFile.get(pathKey(this.script)) ?? [];
+    }
+
     private async advance(how: 'continue' | 'statement' | 'command'): Promise<void> {
-        if (this.session === undefined || this.finished) {
+        const session = this.session;
+        if (session === undefined || this.finished || this.busy) {
             return;
         }
-        let status: TestStatus;
-        if (how === 'continue') {
-            this.running = new vscode.CancellationTokenSource();
-            status = await this.runtime.runTest(
-                this.session,
-                { breakLines: this.breakLines },
-                (events) => this.report(events),
-                this.running.token,
-            );
-            this.running = undefined;
-        } else {
-            status = await this.runtime.call<TestStatus>({ op: 'test.step', session: this.session, unit: how });
-            this.report(status.events);
-        }
-        if (status.state === 'finished') {
-            const outcome = status.outcome!;
-            if (outcome.kind === 'cancelled') {
-                // Paused by the user.
-                await this.refresh();
-                this.event('stopped', { reason: 'pause', threadId: THREAD, allThreadsStopped: true });
+        // The session can end while the script runs (Stop, or the editor
+        // closing): whatever comes back after that is nobody's business.
+        const gone = () => this.session !== session || this.ended;
+        this.busy = true;
+        try {
+            let status: TestStatus;
+            if (how === 'command') {
+                status = await this.runtime.call<TestStatus>({ op: 'test.step', session, unit: 'command' });
+                if (gone()) {
+                    return;
+                }
+                this.report(status.events);
+            } else {
+                // Both can take forever (a step can be `while … { eval, }`),
+                // so both run in slices that Pause and Stop can interrupt.
+                const running = new vscode.CancellationTokenSource();
+                this.running = running;
+                try {
+                    status = await this.runtime.runTest(
+                        session,
+                        how === 'statement' ? { step: true } : { breakLines: this.breakLines() },
+                        (events) => {
+                            if (!gone()) {
+                                this.report(events);
+                            }
+                        },
+                        running.token,
+                    );
+                } finally {
+                    if (this.running === running) {
+                        this.running = undefined;
+                    }
+                    running.dispose();
+                }
+                if (gone()) {
+                    return;
+                }
+            }
+            if (status.state === 'finished') {
+                const outcome = status.outcome!;
+                if (outcome.kind === 'cancelled') {
+                    // Paused by the user.
+                    await this.refresh();
+                    if (!gone()) {
+                        this.event('stopped', { reason: 'pause', threadId: THREAD, allThreadsStopped: true });
+                    }
+                    return;
+                }
+                this.finish(outcome);
                 return;
             }
-            this.finish(outcome);
-            return;
+            await this.refresh();
+            if (gone()) {
+                return;
+            }
+            const reason = status.reason === 'breakpoint' ? 'breakpoint' : status.reason === 'pause' ? 'pause' : 'step';
+            this.event('stopped', { reason, threadId: THREAD, allThreadsStopped: true });
+        } catch (error) {
+            if (gone()) {
+                return;
+            }
+            // The request that started this was acknowledged long ago; the
+            // failure ends the session with an explanation.
+            this.finish({ kind: 'error', message: error instanceof Error ? error.message : String(error), range: null });
+        } finally {
+            this.busy = false;
         }
-        await this.refresh();
-        const reason = status.reason === 'breakpoint' ? 'breakpoint' : status.reason === 'pause' ? 'pause' : 'step';
-        this.event('stopped', { reason, threadId: THREAD, allThreadsStopped: true });
     }
 
     private finish(outcome: TestOutcome): void {
@@ -339,15 +417,12 @@ class ScriptDebugSession implements vscode.DebugAdapter {
     }
 
     dispose(): void {
+        this.ended = true;
+        this.disposed = true;
         this.running?.cancel();
         this.close();
         this.emitter.dispose();
     }
-}
-
-function samePath(a: string, b: string): boolean {
-    const normalize = (p: string) => path.normalize(p).replace(/\\/g, '/').toLowerCase();
-    return normalize(a) === normalize(b);
 }
 
 /** A value with its other spellings, as the Variables view shows it. */

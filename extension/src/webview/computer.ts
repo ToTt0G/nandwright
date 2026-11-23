@@ -4,7 +4,7 @@
 // student does.
 
 import type { MachineState } from '../runtime/protocol';
-import { Radix, formatValue, hackKeyCode, keyName } from '../values';
+import { Radix, formatValue, hackKeyCode, keyName, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -298,7 +298,7 @@ function cellInput(label: string, value: number, onCommit: (text: string) => voi
     const commit = () => {
         const text = input.value.trim();
         if (text !== shown) {
-            onCommit(radix === 'bin' && /^[01 ]+$/.test(text) ? `0b${text}` : text);
+            onCommit(typedValue(text, radix));
         }
     };
     input.addEventListener('keydown', (event) => {

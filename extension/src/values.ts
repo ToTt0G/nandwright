@@ -35,6 +35,17 @@ export function formatValue(bits: number | string, width: number, radix: Radix):
     }
 }
 
+/**
+ * What a student typed into a value field, as the engine reads numbers. In
+ * binary view the field shows `0000 0000 0000 0101`, so that is also what
+ * comes back after changing one digit: the spaces are dropped and the digits
+ * marked as binary. Anything else (`5`, `-1`, `0x1F`, `%B101`) goes as typed.
+ */
+export function typedValue(text: string, radix: Radix): string {
+    const typed = text.trim();
+    return radix === 'bin' && /^[01][01 ]*$/.test(typed) ? `0b${typed.replace(/ /g, '')}` : typed;
+}
+
 /** `name=value` for a pin, in decimal. */
 export function describePin(pin: Pin): string {
     return `${pin.name}=${formatValue(pin.bits, pin.width, 'dec')}`;

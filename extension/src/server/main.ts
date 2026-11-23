@@ -7,7 +7,8 @@
 // it traps, this process makes a fresh engine, replays the handshake and the
 // open documents, and carries on. The document being handled when it trapped
 // is left out of the replay until the student edits it again, so one bad file
-// cannot cause a crash loop.
+// cannot cause a crash loop. The edit opens it in the engine anew, with the
+// text as it then is.
 
 import * as path from 'node:path';
 import { IPCMessageReader, IPCMessageWriter, Message } from 'vscode-jsonrpc/node';
@@ -77,6 +78,19 @@ function documentOf(message: any): string | undefined {
     return message?.params?.textDocument?.uri;
 }
 
+/** A document the engine no longer knows keeps no problems on show. */
+function clearDiagnostics(uri: string): void {
+    void writer.write({
+        jsonrpc: '2.0',
+        method: 'textDocument/publishDiagnostics',
+        params: { uri, diagnostics: [] },
+    } as unknown as Message);
+}
+
+function didOpen(uri: string, document: OpenDocument): unknown {
+    return { jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, ...document } } };
+}
+
 /** Builds a fresh engine and brings it to the state the client expects. */
 function recover(culprit: string | undefined): void {
     if (culprit) {
@@ -90,18 +104,11 @@ function recover(culprit: string | undefined): void {
                 feed({ jsonrpc: '2.0', method: 'initialized', params: {} });
             }
             for (const [uri, document] of documents) {
-                if (quarantined.has(uri)) {
-                    continue;
+                if (!quarantined.has(uri)) {
+                    send(feed(didOpen(uri, document)));
                 }
-                send(
-                    feed({
-                        jsonrpc: '2.0',
-                        method: 'textDocument/didOpen',
-                        params: { textDocument: { uri, ...document } },
-                    }),
-                );
             }
-            return;
+            break;
         } catch (error) {
             if (!(error instanceof EngineCrash)) {
                 throw error;
@@ -112,16 +119,29 @@ function recover(culprit: string | undefined): void {
             }
         }
     }
+    for (const uri of quarantined) {
+        clearDiagnostics(uri);
+    }
 }
 
 reader.listen((message: any) => {
+    const uri = documentOf(message);
+    // Asked before `track`, which lifts the quarantine on an edit.
+    const unknownToEngine = uri !== undefined && quarantined.has(uri);
     track(message);
     if (message.method === 'exit') {
         process.exit(0);
     }
-    const uri = documentOf(message);
-    if (uri && quarantined.has(uri) && message.method !== 'textDocument/didOpen') {
-        // The engine does not know this document until it changes.
+    if (unknownToEngine && message.method === 'textDocument/didChange') {
+        // The student has edited the file the engine stopped on. The engine
+        // has never been told about it since, so a change means nothing to
+        // it: open the document there, with the text as it is now.
+        const document = documents.get(uri);
+        if (!document) {
+            return;
+        }
+        message = didOpen(uri, document);
+    } else if (unknownToEngine && message.method !== 'textDocument/didOpen') {
         if (message.id !== undefined && message.method) {
             void writer.write({ jsonrpc: '2.0', id: message.id, result: null } as Message);
         }

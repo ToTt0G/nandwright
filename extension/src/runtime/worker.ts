@@ -3,21 +3,36 @@
 // It runs in a worker so that a chip with thousands of gates, or a program
 // in a tight loop, never freezes the editor. Long work is done in slices; the
 // worker returns to its event loop between slices, which is when a `cancel`
-// message gets through.
+// message gets through. No single engine request is unbounded.
 
 import * as path from 'node:path';
 import { parentPort } from 'node:worker_threads';
 import { EngineCrash, WasmEngine } from '../engine/wasm';
-import type { FromWorker, MachineRunRequest, ToWorker } from './protocol';
+import { FromWorker, MAX_REPORTED_FAILURES, MachineRunRequest, TestRunRequest, ToWorker } from './protocol';
 
 const wasmPath = path.join(__dirname, 'engine.wasm');
 const port = parentPort!;
 
+/**
+ * Each engine numbers its sessions from its own range, so a request for a
+ * session of an engine that crashed can never reach a session of the engine
+ * that replaced it.
+ */
+const SESSIONS_PER_ENGINE = 2 ** 32;
+let engines = 0;
 let engine = newEngine();
+
+/** Runs in progress, and those of them that have been asked to stop. */
+const active = new Set<number>();
 const cancelled = new Set<number>();
 
 function newEngine(): WasmEngine {
-    return new WasmEngine(wasmPath, (line) => post({ type: 'log', line }));
+    const fresh = new WasmEngine(wasmPath, (line) => post({ type: 'log', line }));
+    if (engines > 0) {
+        fresh.call({ op: 'start', firstSession: engines * SESSIONS_PER_ENGINE + 1 });
+    }
+    engines += 1;
+    return fresh;
 }
 
 function post(message: FromWorker): void {
@@ -49,28 +64,38 @@ const SLICE_MS = 25;
 
 /**
  * Runs a test session until it finishes or pauses for a reason other than
- * the slice budget, sizing slices so each takes about `SLICE_MS`.
+ * the slice budget, sizing slices so each takes about `SLICE_MS`. With
+ * `step` it runs to the end of the current `;` step instead, which can
+ * equally be a loop that never ends.
+ *
+ * Events are posted as they happen and not kept: a script that echoes in an
+ * endless loop must not grow this thread's memory until it is stopped.
  */
-async function runTest(id: number, request: Record<string, unknown>): Promise<any> {
+async function runTest(id: number, request: TestRunRequest): Promise<any> {
+    const op = request.step ? 'test.step' : 'test.run';
     let budget = 2000;
-    const events: unknown[] = [];
     const failures: unknown[] = [];
+    let last: any = { commands: 0, echo: null };
     for (;;) {
-        if (cancelled.delete(id)) {
-            return { state: 'finished', outcome: { kind: 'cancelled' }, events, failures };
+        if (cancelled.has(id)) {
+            return { state: 'finished', outcome: { kind: 'cancelled' }, events: [], failures, commands: last.commands, echo: last.echo };
         }
         const started = performance.now();
-        const status = call({ ...request, op: 'test.run', budget });
+        const status = call({ op, session: request.session, breakLines: request.breakLines, budget });
         if (status.error) {
             return status;
         }
-        events.push(...(status.events ?? []));
-        failures.push(...(status.failures ?? []));
+        last = status;
         if (status.events?.length) {
             post({ type: 'progress', id, events: status.events });
         }
+        for (const failure of status.failures ?? []) {
+            if (failures.length < MAX_REPORTED_FAILURES) {
+                failures.push(failure);
+            }
+        }
         if (status.state !== 'suspended' || status.reason !== 'budget') {
-            return { ...status, events, failures };
+            return { ...status, events: [], failures };
         }
         const elapsed = Math.max(performance.now() - started, 0.05);
         budget = Math.round(Math.min(Math.max((budget * SLICE_MS) / elapsed, 200), 20_000_000));
@@ -82,6 +107,13 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /** The panel is redrawn at most this often while a program runs. */
 const FRAME_MS = 33;
+
+/**
+ * At a chosen speed, the most time one slice makes up for. After the laptop
+ * slept, or the thread was held up, the program does not race through the
+ * time it missed (and Pause does not wait for it to).
+ */
+const MAX_CATCH_UP_MS = 100;
 
 /**
  * Runs a program until it is paused (cancelled), reaches a breakpoint or
@@ -100,14 +132,17 @@ async function runMachine(id: number, request: MachineRunRequest): Promise<any> 
     let owed = 0;
     let last = performance.now();
     let lastFrame = 0;
+    // The instruction the program is paused on is executed even if it has a
+    // breakpoint: only the first slice says so.
+    let resume = true;
     for (;;) {
-        if (cancelled.delete(id)) {
+        if (cancelled.has(id)) {
             return call({ ...base, op: `${request.kind}.state`, screen: true });
         }
         const now = performance.now();
         if (request.speed > 0) {
             // Paced: run the instructions that are due since the last slice.
-            owed += (request.speed * (now - last)) / 1000;
+            owed += (request.speed * Math.min(now - last, MAX_CATCH_UP_MS)) / 1000;
             budget = Math.floor(owed);
             owed -= budget;
         }
@@ -119,15 +154,20 @@ async function runMachine(id: number, request: MachineRunRequest): Promise<any> 
                 ...base,
                 op: `${request.kind}.run`,
                 budget,
+                resume,
                 screen: frameDue,
                 now: Math.floor(performance.now()),
             });
+            resume = false;
             if (state.error?.message) {
                 return state;
             }
             if (!going.has(state.status)) {
                 // Stopped: send the final picture with it.
                 const final = call({ ...base, op: `${request.kind}.state`, screen: true });
+                if (final.error?.message) {
+                    return final;
+                }
                 return { ...final, status: state.status, screen: final.screen ?? state.screen };
             }
             if (frameDue) {
@@ -150,35 +190,39 @@ async function runMachine(id: number, request: MachineRunRequest): Promise<any> 
     }
 }
 
+/** Runs one of the long operations and replies when it ends, however it ends. */
+function run(id: number, work: Promise<any>): void {
+    active.add(id);
+    work.catch((error) => ({ error: { message: String(error?.message ?? error) } })).then((reply) => {
+        active.delete(id);
+        cancelled.delete(id);
+        post({ type: 'reply', id, reply });
+    });
+}
+
 port.on('message', (message: ToWorker) => {
     switch (message.type) {
         case 'cancel':
-            cancelled.add(message.id);
+            // A cancel for a run that has already ended is not remembered.
+            if (active.has(message.id)) {
+                cancelled.add(message.id);
+            }
             break;
-        case 'call':
-            post({ type: 'reply', id: message.id, reply: call(message.request) });
+        case 'call': {
+            let reply: any;
+            try {
+                reply = call(message.request);
+            } catch (error) {
+                reply = { error: { message: String((error as Error)?.message ?? error) } };
+            }
+            post({ type: 'reply', id: message.id, reply });
             break;
+        }
         case 'runMachine':
-            runMachine(message.id, message.request).then(
-                (reply) => post({ type: 'reply', id: message.id, reply }),
-                (error) =>
-                    post({
-                        type: 'reply',
-                        id: message.id,
-                        reply: { error: { message: String(error?.message ?? error) } },
-                    }),
-            );
+            run(message.id, runMachine(message.id, message.request));
             break;
         case 'runTest':
-            runTest(message.id, message.request).then(
-                (reply) => post({ type: 'reply', id: message.id, reply }),
-                (error) =>
-                    post({
-                        type: 'reply',
-                        id: message.id,
-                        reply: { error: { message: String(error?.message ?? error) } },
-                    }),
-            );
+            run(message.id, runTest(message.id, message.request));
             break;
     }
 });

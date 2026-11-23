@@ -1,7 +1,9 @@
 name: Publish
 
 # Publishes the VSIX of an existing GitHub release to the Visual Studio
-# Marketplace and to Open VSX. Run it by hand, once the release exists.
+# Marketplace and to Open VSX. Run it by hand, once the release exists. The
+# release workflow only creates a release after the tests have passed on
+# Linux, Windows and macOS, so what is published is what was tested.
 #
 # Needs two repository secrets:
 #   VSCE_PAT  a Marketplace personal access token for the publisher in
@@ -21,20 +23,31 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
     steps:
+      # The publishing tools come from the tagged commit's lockfile, not from
+      # whatever is newest on the day.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+        working-directory: extension
       - name: Download the VSIX from the release
-        run: gh release download "${{ inputs.tag }}" --repo "$GITHUB_REPOSITORY" --pattern '*.vsix'
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "nandwright-${TAG#v}.vsix" --dir release
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Publish to the Visual Studio Marketplace
-        run: npx --yes @vscode/vsce publish --packagePath *.vsix
+        run: extension/node_modules/.bin/vsce publish --packagePath "release/nandwright-${TAG#v}.vsix"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
       - name: Publish to Open VSX
         if: env.OVSX_PAT != ''
-        run: npx --yes ovsx publish *.vsix
+        run: npx --yes ovsx@1.4.0 publish "release/nandwright-${TAG#v}.vsix"
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}

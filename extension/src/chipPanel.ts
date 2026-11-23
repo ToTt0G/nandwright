@@ -92,17 +92,38 @@ class ChipPanel {
         }
     }
 
+    /**
+     * Loads the chip, after anything already asked of the panel. Everything
+     * that opens or reloads goes through the queue: two loads at once would
+     * open two sessions and lose track of one.
+     */
+    load(): Promise<void> {
+        this.enqueue(() => this.reload());
+        return this.queue;
+    }
+
     /** (Re)loads the chip from the editor's current text. */
-    async reload(): Promise<void> {
+    private async reload(): Promise<void> {
         await this.runtime.syncUnsaved();
         if (this.session === undefined) {
             const reply = await this.runtime.tryCall<ChipState>({ op: 'chip.open', path: this.uri.fsPath });
+            if (this.disposed) {
+                // The panel was closed while the chip was loading: the
+                // session that has just been made has no owner.
+                if (!isError(reply) && reply.session !== undefined) {
+                    this.runtime.close(reply.session);
+                }
+                return;
+            }
             if (!isError(reply)) {
                 this.session = reply.session;
             }
             await this.accept(reply);
         } else {
             const reply = await this.runtime.tryCall<ChipState>({ op: 'chip.reset', session: this.session });
+            if (this.disposed) {
+                return;
+            }
             if (isError(reply) && /session has ended/.test(reply.error.message)) {
                 // The simulator restarted: open the chip again.
                 this.session = undefined;
@@ -239,7 +260,7 @@ export class ChipPanels implements vscode.Disposable {
         panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'chip.js', `${name} simulator`, CHIP_STYLE);
         const chip = new ChipPanel(uri, panel, this.runtime, () => this.panels.delete(key));
         this.panels.set(key, chip);
-        await chip.reload();
+        await chip.load();
         return chip;
     }
 

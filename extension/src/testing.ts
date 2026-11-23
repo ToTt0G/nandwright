@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime, RuntimeError } from './runtime/client';
 import {
+    MAX_REPORTED_FAILURES,
     Pin,
     Range,
     TestEvent,
@@ -278,18 +279,19 @@ export class TestExplorer implements vscode.Disposable {
                     } else if (event.type === 'key') {
                         keysPressed.push(event.code);
                         say(`  Pressed ${keyName(event.code)} for the script, which was waiting for it.`);
+                    } else if (event.type === 'output') {
+                        lines.push(event.line);
                     }
                 }
             };
             let status: TestStatus;
             for (;;) {
                 status = await this.runtime.runTest(session, {}, onEvents, token);
-                for (const event of status.events) {
-                    if (event.type === 'output') {
-                        lines.push(event.line);
+                for (const failure of status.failures) {
+                    if (failures.length < MAX_REPORTED_FAILURES) {
+                        failures.push(failure);
                     }
                 }
-                failures.push(...status.failures);
                 // A `!` pause or a script breakpoint: carry on, as "run" means run.
                 if (status.state === 'finished') {
                     break;
@@ -318,8 +320,8 @@ export class TestExplorer implements vscode.Disposable {
                     say(`✗ ${name}: comparison failure at line ${outcome.line}`);
                     say(`    expected: ${outcome.expected ?? '(the compare file ended here)'}`);
                     say(`    actual:   ${outcome.actual ?? '(the script produced no more lines)'}`);
-                    if (failures.length > 1) {
-                        say(`    ${failures.length} lines differ in all.`);
+                    if (outcome.failureCount > 1) {
+                        say(`    ${outcome.failureCount} lines differ in all.`);
                     }
                     say(comparisonTable(inspection.expected ?? [], lines));
                     break;

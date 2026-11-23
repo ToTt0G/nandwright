@@ -84,5 +84,6 @@ deliberately meaningless.
   VM Files" writes them when you ask, and asks before replacing a file whose
   content differs.
 - **The formatter** has no counterpart in the official tools. It changes only
-  whitespace, never moves a token or comment to another line, and checks that
-  the formatted text has the same tokens before it touches the file.
+  whitespace (indentation, spacing, runs of blank lines), never joins two
+  lines or splits one, and checks that the formatted text has the same tokens
+  before it touches the file.

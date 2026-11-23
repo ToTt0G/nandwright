@@ -17,13 +17,19 @@ const REFERENCE_SCHEME = 'n2t-reference';
 interface Output {
     path: string;
     text: string;
+    /** The file on disk now, compared with `text`. */
     existing: 'missing' | 'same' | 'different';
+    /** Identifies what is on disk now; handed back to allow replacing it. */
+    state: string;
+    written: boolean;
 }
 
 interface Produced {
     outputs: Output[];
     problems: { path: string; message: string; range: Range | null }[];
     written: boolean;
+    /** Files that were not what the write was allowed to replace. */
+    conflicts: string[];
 }
 
 export class Outputs implements vscode.TextDocumentContentProvider, vscode.Disposable {
@@ -89,6 +95,9 @@ export class Outputs implements vscode.TextDocumentContentProvider, vscode.Dispo
             return planned;
         }
         const different = planned.outputs.filter((output) => output.existing === 'different');
+        // The engine replaces a file only if it is still the one asked about
+        // here: these are the files the student has agreed to replace.
+        const expect: Record<string, string> = {};
         if (different.length > 0) {
             const names = different.map((output) => path.basename(output.path)).join(', ');
             const tool = op === 'asm.assemble' ? 'assembler' : 'compiler';
@@ -108,14 +117,31 @@ export class Outputs implements vscode.TextDocumentContentProvider, vscode.Dispo
             if (choice !== 'Replace') {
                 return planned;
             }
+            for (const output of different) {
+                expect[output.path] = output.state;
+            }
         }
-        const written = await this.runtime.tryCall<Produced>({ ...request, write: true });
+        const written = await this.runtime.tryCall<Produced>({ ...request, write: true, expect });
         if (isError(written)) {
             void vscode.window.showErrorMessage(`Nand2Tetris: ${written.error.message}`);
             return undefined;
         }
-        const names = written.outputs.map((output) => path.basename(output.path)).join(', ');
-        vscode.window.setStatusBarMessage(`$(check) Wrote ${names}`, 8000);
+        if (written.conflicts.length > 0) {
+            // A file appeared or changed between the question and the answer
+            // (the student's own tool ran, or a sync client wrote it).
+            const names = written.conflicts.map((file) => path.basename(file)).join(', ');
+            void vscode.window.showWarningMessage(
+                `Nothing was written: ${names} changed on disk in the meantime. Run the command again to see what is there now.`,
+            );
+            return written;
+        }
+        const wrote = written.outputs.filter((output) => output.written).map((output) => path.basename(output.path));
+        const kept = written.outputs.filter((output) => !output.written).map((output) => path.basename(output.path));
+        if (wrote.length > 0) {
+            vscode.window.setStatusBarMessage(`$(check) Wrote ${wrote.join(', ')}`, 8000);
+        } else {
+            vscode.window.setStatusBarMessage(`$(check) ${kept.join(', ')} already up to date`, 8000);
+        }
         return written;
     }
 

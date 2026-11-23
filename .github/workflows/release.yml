@@ -1,6 +1,8 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the VSIX and attaches it to a GitHub
+# Pushing a tag like v0.1.0 runs the whole CI workflow for that commit (the
+# engine and the extension on Linux, Windows and macOS) and, only if all of
+# it passes, attaches the VSIX those jobs built and tested to a GitHub
 # release. Publishing to the Marketplace is a separate, manual workflow.
 
 on:
@@ -8,32 +10,26 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: extension/package-lock.json
-      - run: npm ci
-        working-directory: extension
       - name: The tag matches the extension version
         run: test "v$(node -p "require('./extension/package.json').version")" = "$GITHUB_REF_NAME"
-      - run: npm run package
-        working-directory: extension
-      - name: Test the VSIX
-        run: xvfb-run -a npm run test:integration -- --vsix ../dist/nandwright-*.vsix
-        working-directory: extension
+      # The same bytes the three platforms have just tested.
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
       - name: Create the release
-        run: gh release create "$GITHUB_REF_NAME" dist/*.vsix --title "Nandwright ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" "dist/nandwright-${GITHUB_REF_NAME#v}.vsix" --title "Nandwright ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md --verify-tag
         env:
           GH_TOKEN: ${{ github.token }}

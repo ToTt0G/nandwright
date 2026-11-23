@@ -3,6 +3,7 @@
 import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import * as vscode from 'vscode';
+import { ignoresCase } from '../paths';
 import {
     EngineError,
     FromWorker,
@@ -18,6 +19,8 @@ import {
 export class RuntimeError extends Error {}
 
 interface Pending {
+    /** The worker that was asked: only it can answer, or fail, this request. */
+    worker: Worker;
     resolve(reply: any): void;
     onEvents?: (events: TestEvent[]) => void;
     onFrame?: (state: MachineState) => void;
@@ -30,6 +33,7 @@ export class Runtime implements vscode.Disposable {
     private worker: Worker | undefined;
     private nextId = 1;
     private readonly pending = new Map<number, Pending>();
+    private disposed = false;
 
     constructor(
         private readonly extensionPath: string,
@@ -54,22 +58,30 @@ export class Runtime implements vscode.Disposable {
                 pending?.resolve(message.reply);
             }
         });
-        const failed = (reason: string) => {
+        // A worker fails once (`error` is followed by `exit`), and takes only
+        // its own requests with it: by the time `exit` arrives, a new worker
+        // may already be answering new ones.
+        let failed = false;
+        const fail = (reason: string) => {
+            if (failed) {
+                return;
+            }
+            failed = true;
             if (this.worker === worker) {
                 this.worker = undefined;
             }
-            this.output.appendLine(`Nandwright: the simulator stopped (${reason}) and will restart on next use.`);
-            for (const [, pending] of this.pending) {
-                pending.resolve({ error: { message: `The simulator stopped unexpectedly (${reason}). Run it again.` } });
+            if (!this.disposed) {
+                this.output.appendLine(`Nandwright: the simulator stopped (${reason}) and will restart on next use.`);
             }
-            this.pending.clear();
+            for (const [id, pending] of [...this.pending]) {
+                if (pending.worker === worker) {
+                    this.pending.delete(id);
+                    pending.resolve({ error: { message: `The simulator stopped unexpectedly (${reason}). Run it again.` } });
+                }
+            }
         };
-        worker.on('error', (error) => failed(error.message));
-        worker.on('exit', (code) => {
-            if (code !== 0) {
-                failed(`exit code ${code}`);
-            }
-        });
+        worker.on('error', (error) => fail(error.message));
+        worker.on('exit', (code) => fail(`exit code ${code}`));
         this.worker = worker;
         return worker;
     }
@@ -80,9 +92,15 @@ export class Runtime implements vscode.Disposable {
         onFrame?: (state: MachineState) => void,
     ): Promise<any> {
         return new Promise((resolve) => {
-            this.pending.set(message.id, { resolve, onEvents, onFrame });
-            this.ensure().postMessage(message);
+            const worker = this.ensure();
+            this.pending.set(message.id, { worker, resolve, onEvents, onFrame });
+            worker.postMessage(message);
         });
+    }
+
+    /** Asks the worker that is running `id` to stop it. */
+    private cancel(id: number): void {
+        this.pending.get(id)?.worker.postMessage({ type: 'cancel', id } satisfies ToWorker);
     }
 
     /** One engine request. Rejects with `RuntimeError` on an engine error. */
@@ -100,24 +118,28 @@ export class Runtime implements vscode.Disposable {
     }
 
     /**
-     * Runs a test session until it finishes or pauses. `token` cancels it.
-     * `breakLines` are zero-based lines of the script to stop at.
+     * Runs a test session until it finishes or pauses, or with `step` to the
+     * end of the current `;` step. `token` stops it, whatever the script is
+     * doing. `breakLines` are zero-based lines of the script to stop at.
+     * Events arrive through `onEvents` as they happen.
      */
     async runTest(
         session: number,
-        options: { breakLines?: number[] },
+        options: { breakLines?: number[]; step?: boolean },
         onEvents: (events: TestEvent[]) => void,
         token?: vscode.CancellationToken,
     ): Promise<TestStatus> {
         const id = this.nextId++;
-        const subscription = token?.onCancellationRequested(() => {
-            this.worker?.postMessage({ type: 'cancel', id } satisfies ToWorker);
-        });
+        const subscription = token?.onCancellationRequested(() => this.cancel(id));
         try {
-            const reply = await this.send(
-                { type: 'runTest', id, request: { session, breakLines: options.breakLines ?? [] } },
+            const done = this.send(
+                { type: 'runTest', id, request: { session, breakLines: options.breakLines ?? [], step: options.step } },
                 onEvents,
             );
+            if (token?.isCancellationRequested) {
+                this.cancel(id);
+            }
+            const reply = await done;
             if (isError(reply)) {
                 throw new RuntimeError(reply.error.message);
             }
@@ -137,23 +159,24 @@ export class Runtime implements vscode.Disposable {
     ): { done: Promise<MachineState | EngineError>; stop(): void } {
         const id = this.nextId++;
         const done = this.send({ type: 'runMachine', id, request }, undefined, onFrame);
-        return {
-            done,
-            stop: () => this.worker?.postMessage({ type: 'cancel', id } satisfies ToWorker),
-        };
+        return { done, stop: () => this.cancel(id) };
     }
 
     /**
      * Gives the engine the text of every unsaved document, so a run uses what
-     * the student sees in the editor and not what was last saved.
+     * the student sees in the editor and not what was last saved. The buffers
+     * are replaced in one request: nothing can read between "the old ones
+     * are gone" and "the new ones are there".
      */
     async syncUnsaved(): Promise<void> {
-        await this.call({ op: 'overlay.clear' });
-        for (const document of vscode.workspace.textDocuments) {
-            if (document.isDirty && document.uri.scheme === 'file' && ENGINE_FILE.test(document.fileName)) {
-                await this.call({ op: 'overlay.set', path: document.uri.fsPath, text: document.getText() });
-            }
-        }
+        const files = vscode.workspace.textDocuments
+            .filter((document) => document.isDirty && document.uri.scheme === 'file' && ENGINE_FILE.test(document.fileName))
+            .map((document) => ({
+                path: document.uri.fsPath,
+                text: document.getText(),
+                ignoreCase: ignoresCase(document.uri.fsPath),
+            }));
+        await this.call({ op: 'overlay.replace', files });
     }
 
     close(session: number): void {
@@ -163,6 +186,7 @@ export class Runtime implements vscode.Disposable {
     }
 
     dispose(): void {
+        this.disposed = true;
         void this.worker?.terminate();
         this.worker = undefined;
     }

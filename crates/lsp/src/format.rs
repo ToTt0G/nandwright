@@ -131,6 +131,20 @@ fn minimal_edit(
         fmt_end += 1;
     }
 
+    // An editor has no position between the `\r` and the `\n` of a line
+    // ending: an edit must not start or end there.
+    let splits_crlf = |at: usize| {
+        at > 0 && at < orig_bytes.len() && orig_bytes[at - 1] == b'\r' && orig_bytes[at] == b'\n'
+    };
+    if splits_crlf(prefix) {
+        prefix -= 1;
+    }
+    if splits_crlf(orig_end) {
+        // The `\n` is part of the common suffix, so the new text has it too.
+        orig_end += 1;
+        fmt_end += 1;
+    }
+
     let text = crate::convert::Text::new(original, lines);
     let span = n2t_core::Span::new(prefix, orig_end);
     vec![lsp::TextEdit::new(

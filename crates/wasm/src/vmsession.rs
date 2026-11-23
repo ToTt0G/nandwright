@@ -250,10 +250,17 @@ impl VmSession {
                 continue;
             };
             let wanted = path::normalize(file_path);
+            // The exact file if there is one; otherwise the same name in
+            // another case, as an editor on Windows may spell it.
             let Some(file) = self
                 .files
                 .iter()
-                .find(|f| f.source_path.eq_ignore_ascii_case(&wanted))
+                .find(|f| f.source_path == wanted)
+                .or_else(|| {
+                    self.files
+                        .iter()
+                        .find(|f| f.source_path.eq_ignore_ascii_case(&wanted))
+                })
             else {
                 continue;
             };

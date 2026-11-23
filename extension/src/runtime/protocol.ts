@@ -3,7 +3,7 @@
 
 export type ToWorker =
     | { type: 'call'; id: number; request: Record<string, unknown> }
-    | { type: 'runTest'; id: number; request: Record<string, unknown> }
+    | { type: 'runTest'; id: number; request: TestRunRequest }
     | { type: 'runMachine'; id: number; request: MachineRunRequest }
     | { type: 'cancel'; id: number };
 
@@ -12,6 +12,14 @@ export type FromWorker =
     | { type: 'progress'; id: number; events: TestEvent[] }
     | { type: 'frame'; id: number; state: MachineState }
     | { type: 'log'; line: string };
+
+export interface TestRunRequest {
+    session: number;
+    /** Zero-based lines of the script to stop at. */
+    breakLines: number[];
+    /** Run only to the end of the current `;` step, instead of to the end. */
+    step?: boolean;
+}
 
 export interface EngineError {
     error: { message: string; crashed?: boolean };
@@ -69,6 +77,12 @@ export type TestOutcome =
     | { kind: 'skipped'; reason: string }
     | { kind: 'cancelled' };
 
+/**
+ * The status of a test session. From one engine request it carries the
+ * events and failures of that request. From a whole run it carries no
+ * events (they arrive as they happen, through the progress callback) and
+ * at most `MAX_REPORTED_FAILURES` failures.
+ */
 export interface TestStatus {
     state: 'suspended' | 'finished';
     reason?: 'budget' | 'pause' | 'breakpoint' | 'step';
@@ -80,6 +94,9 @@ export interface TestStatus {
     commands: number;
     echo: string | null;
 }
+
+/** A run keeps the details of this many failing rows; the count is kept in full. */
+export const MAX_REPORTED_FAILURES = 500;
 
 export interface TestOpened {
     session: number;

@@ -114,8 +114,9 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
   folder), hover with types and VM segments, completion including the OS API, rename.
 - Test scripts and VM files: highlighting and diagnostics; `.out` files show which cells
   differ from the `.cmp` file.
-- **Format Document** for HDL and test scripts changes whitespace only. It never moves code
-  or a comment to another line, and it checks its own output before touching your file.
+- **Format Document** for HDL and test scripts changes whitespace only: indentation, spacing
+  and runs of blank lines. It never joins two lines or splits one, and it checks its own
+  output before touching your file.
 - A chip or subroutine that is not written yet is not an error.
 
 ![Diagnostics and hover while editing HDL](docs/images/editing.png)

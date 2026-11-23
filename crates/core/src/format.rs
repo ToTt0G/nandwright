@@ -1,8 +1,11 @@
 //! The formatting engine shared by every language.
 //!
-//! The formatter is **line-preserving**: a token never moves to another line.
-//! It only changes whitespace: indentation, the spacing between tokens on a
-//! line, trailing whitespace, runs of blank lines and line endings. That makes
+//! The formatter is **line-preserving**: two lines are never joined and a
+//! line is never split, so tokens and comments that share a line before
+//! share it after, and no others do. It only changes whitespace: indentation,
+//! the spacing between tokens on a line, trailing whitespace, runs of blank
+//! lines (reduced to one, which changes line *numbers* but not lines) and
+//! line endings. That makes
 //! the classic formatter bug impossible by construction: a `,` or `;` can
 //! never be carried onto the end of a `//` comment, because nothing is ever
 //! carried anywhere.

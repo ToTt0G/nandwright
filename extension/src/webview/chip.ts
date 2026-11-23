@@ -5,7 +5,7 @@
 // only draws the state it is sent and reports what the student does.
 
 import type { ChipState, Pin, TruthTable } from '../runtime/protocol';
-import { Radix, formatValue } from '../values';
+import { Radix, formatValue, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -96,7 +96,7 @@ function pinRow(pin: Pin, editable: boolean): HTMLElement {
         const commit = () => {
             const text = input.value.trim();
             if (text !== shown) {
-                send({ type: 'set', pin: pin.name, value: radix === 'bin' && /^[01 ]+$/.test(text) ? `0b${text}` : text });
+                send({ type: 'set', pin: pin.name, value: typedValue(text, radix) });
             }
         };
         input.addEventListener('keydown', (event) => {
