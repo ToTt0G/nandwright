@@ -15,7 +15,9 @@
 //! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.reset`, `chip.state` | an interactive chip |
 //! | `cpu.open`, `cpu.run`, `cpu.step`, `cpu.reset`, `cpu.restart`, `cpu.set`, `cpu.state` | a Hack computer running a program |
 //! | `vm.open`, `vm.run`, `vm.step`, `vm.reset`, `vm.set`, `vm.state` | a VM program (or a Jack folder, compiled in memory) on the VM emulator |
+//! | `asm.assemble` | assembles a `.asm` file to a `.hack` file |
 //! | `jack.compile` | compiles the Jack classes of a folder to `.vm` files |
+//! | `reference` | what the official tool would produce for a `.hack`, `.vm` or `.xml` file a student's own tool wrote |
 //! | `key` | presses a key on a session's keyboard |
 //! | `close` | ends a session |
 
@@ -23,6 +25,7 @@
 pub mod abi;
 mod chip;
 mod computer;
+mod outputs;
 mod overlay;
 mod test;
 mod vmsession;
@@ -129,7 +132,9 @@ impl Engine {
                 reply["session"] = json!(self.add(Session::Vm(Box::new(session))));
                 Ok(reply)
             }
-            "jack.compile" => jack_compile(&self.host, request),
+            "jack.compile" => outputs::jack_compile(&self.host, request),
+            "asm.assemble" => outputs::assemble(&self.host, request),
+            "reference" => outputs::reference(&self.host, request),
             "close" => {
                 self.sessions
                     .remove(&request["session"].as_u64().unwrap_or(0));
@@ -200,72 +205,4 @@ pub(crate) fn observed(values: &[n2t_simulator::Observed]) -> Value {
             })
             .collect(),
     )
-}
-
-/// `{"op":"jack.compile","path": folder or .jack file}`: compiles the Jack
-/// classes of a folder and writes a `.vm` file next to each, as the official
-/// JackCompiler does. Nothing is written unless every class compiles.
-fn jack_compile(host: &SharedHost, request: &Value) -> Reply {
-    use n2t_core::host::{path, read_text};
-    let target = path::normalize(text(request, "path")?);
-    let dir = if path::has_extension(&target, "jack") {
-        path::dir(&target).to_string()
-    } else {
-        target
-    };
-    let mut files: Vec<String> = host
-        .list(&dir)
-        .map_err(|e| format!("cannot read the folder `{}`: {e}", path::file_name(&dir)))?
-        .into_iter()
-        .filter(|e| !e.is_dir && path::has_extension(&e.name, "jack"))
-        .map(|e| path::join(&dir, &e.name))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!(
-            "there are no `.jack` files in `{}`",
-            path::file_name(&dir)
-        ));
-    }
-    let mut texts = Vec::new();
-    for file in &files {
-        let text = read_text(host.as_ref(), file)
-            .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(file)))?
-            .text;
-        texts.push((path::stem(file).to_string(), text));
-    }
-    let inputs: Vec<(&str, &str)> = texts
-        .iter()
-        .map(|(s, t)| (s.as_str(), t.as_str()))
-        .collect();
-    let program = n2t_jack::compile_program(&inputs);
-    let mut problems = Vec::new();
-    for ((output, file), (_, source)) in program.files.iter().zip(&files).zip(&texts) {
-        let lines = LineIndex::new(source);
-        for d in output.compiled.diagnostics.iter().filter(|d| d.is_error()) {
-            problems.push(json!({
-                "path": file,
-                "message": d.message,
-                "range": d.span.map(|span| range(source, &lines, span)),
-            }));
-        }
-    }
-    let mut written = Vec::new();
-    if problems.is_empty() {
-        for (output, file) in program.files.iter().zip(&files) {
-            let Some(vm) = &output.compiled.vm else {
-                continue;
-            };
-            let out = format!("{}.vm", file.strip_suffix(".jack").unwrap_or(file));
-            let data = if request["crlf"].as_bool().unwrap_or(false) {
-                vm.replace('\n', "\r\n")
-            } else {
-                vm.clone()
-            };
-            host.write(&out, data.as_bytes())
-                .map_err(|e| format!("cannot write `{}`: {e}", path::file_name(&out)))?;
-            written.push(out);
-        }
-    }
-    Ok(json!({ "written": written, "problems": problems }))
 }

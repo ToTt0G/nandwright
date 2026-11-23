@@ -175,6 +175,7 @@ impl TestSession {
                 Event::ClearEcho => json!({ "type": "clearEcho" }),
                 Event::OutputLine(line) => json!({ "type": "output", "line": line }),
                 Event::KeyPressed(code) => json!({ "type": "key", "code": code }),
+                Event::Note(text) => json!({ "type": "note", "text": text }),
             })
             .collect();
         let failures: Vec<Value> = self.runner.failures()[self.reported_failures..]

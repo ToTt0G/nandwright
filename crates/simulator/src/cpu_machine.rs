@@ -19,6 +19,7 @@ pub struct CpuMachine {
     cpu: Box<Cpu>,
     /// The program's source, when it was loaded from a `.asm` file.
     program: Option<LoadedProgram>,
+    notes: Vec<String>,
 }
 
 /// A loaded program and where each instruction came from.
@@ -41,6 +42,7 @@ impl CpuMachine {
         Self {
             cpu: Box::new(Cpu::new()),
             program: None,
+            notes: Vec::new(),
         }
     }
 
@@ -59,8 +61,23 @@ impl CpuMachine {
     /// Loads a `.asm` or `.hack` file. The error is a message for the user.
     pub fn load_file(&mut self, files: &Files<'_>, file: &str) -> Result<(), String> {
         let name = path::file_name(file);
+        let is_hack = path::has_extension(file, "hack");
+        // The assembly a `.hack` file was (presumably) made from.
+        let sibling = path::join(path::dir(file), &format!("{}.asm", path::stem(file)));
+        let assembly_source = if is_hack {
+            n2t_core::host::read_text(files.host.as_ref(), &sibling).ok()
+        } else {
+            None
+        };
         let text = n2t_core::host::read_text(files.host.as_ref(), file)
-            .map_err(|e| format!("cannot read `{name}`: {e}"))?
+            .map_err(|e| match (&e, &assembly_source) {
+                // The official emulator needs the `.hack` file too.
+                (n2t_core::host::HostError::NotFound, Some(_)) => format!(
+                    "`{name}` does not exist yet. Assemble `{}` first (\"Assemble to .hack File\"), as you would with the official Assembler.",
+                    path::file_name(&sibling)
+                ),
+                _ => format!("cannot read `{name}`: {e}"),
+            })?
             .text;
         let (words, lines) = if path::has_extension(file, "asm") {
             let assembly = n2t_hack::assemble(&text);
@@ -96,6 +113,15 @@ impl CpuMachine {
                 .filter(|(_, line)| !line.trim().is_empty())
                 .map(|(number, _)| number as u32)
                 .collect();
+            if let Some(source) = &assembly_source {
+                let assembly = n2t_hack::assemble(&source.text);
+                if !assembly.diagnostics.iter().any(|d| d.is_error()) && assembly.words != words {
+                    self.notes.push(format!(
+                        "`{name}` is not what `{}` assembles to. If you changed the assembly, assemble it again: the test runs the `.hack` file.",
+                        path::file_name(&sibling)
+                    ));
+                }
+            }
             (words, lines)
         };
         self.cpu.load_rom(&words);
@@ -261,6 +287,10 @@ impl Machine for CpuMachine {
             });
         }
         values
+    }
+
+    fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
     }
 
     fn set_key(&mut self, code: u16) -> bool {

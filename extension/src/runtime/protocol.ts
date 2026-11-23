@@ -38,7 +38,8 @@ export type TestEvent =
     | { type: 'echo'; text: string }
     | { type: 'clearEcho' }
     | { type: 'output'; line: string }
-    | { type: 'key'; code: number };
+    | { type: 'key'; code: number }
+    | { type: 'note'; text: string };
 
 export interface TestFailure {
     /** The 1-based line of the compare file. */

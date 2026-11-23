@@ -630,9 +630,19 @@ fn a_jack_program_stops_at_a_jack_breakpoint_and_steps_by_jack_line() {
 fn compiling_jack_writes_the_vm_files_the_official_compiler_writes() {
     let (mut engine, host) = engine();
     let dir = with_jack_program(&host);
+    // Without `write` nothing is written: the reply says what would be.
     let reply = call(&mut engine, json!({"op": "jack.compile", "path": dir}));
+    assert_eq!(reply["written"], false);
+    assert_eq!(reply["outputs"][0]["existing"], "missing");
+    assert!(host.get(&format!("{dir}/Main.vm")).is_none());
+    let reply = call(
+        &mut engine,
+        json!({"op": "jack.compile", "path": dir, "write": true}),
+    );
     assert_eq!(reply["problems"].as_array().unwrap().len(), 0, "{reply}");
-    assert_eq!(reply["written"].as_array().unwrap().len(), 2);
+    assert_eq!(reply["outputs"].as_array().unwrap().len(), 2);
+    let reply = call(&mut engine, json!({"op": "jack.compile", "path": dir}));
+    assert_eq!(reply["outputs"][0]["existing"], "same");
     for file in ["Main.vm", "Counter.vm"] {
         // The goldens next to the fixture were produced by the Java compiler.
         let golden = std::fs::read_to_string(
@@ -674,6 +684,96 @@ fn compiling_jack_writes_the_vm_files_the_official_compiler_writes() {
     );
     assert_eq!(problems[0]["range"]["startLine"], 2);
     assert!(host.get(&format!("{dir}/Main.vm")).is_none());
+}
+
+#[test]
+fn a_students_own_tool_output_is_compared_with_the_reference_not_overwritten() {
+    let (mut engine, host) = engine();
+    let dir = with_jack_program(&host);
+    let countdown = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../hack/tests/fixtures");
+    host.insert(
+        &format!("{dir}/Countdown.asm"),
+        std::fs::read(countdown.join("Countdown.asm")).unwrap(),
+    );
+    let golden_hack = std::fs::read_to_string(countdown.join("Countdown.hack")).unwrap();
+
+    // Project 6: the student's assembler wrote a .hack with one wrong word.
+    let mut theirs: Vec<&str> = golden_hack.lines().collect();
+    theirs[3] = "1111111111111111";
+    host.insert(&format!("{dir}/Countdown.hack"), theirs.join("\r\n"));
+    let reply = call(
+        &mut engine,
+        json!({"op": "reference", "path": format!("{dir}/Countdown.hack")}),
+    );
+    assert_eq!(
+        reply["text"].as_str().unwrap(),
+        golden_hack.replace("\r\n", "\n"),
+        "{reply}"
+    );
+    assert!(reply["from"].as_str().unwrap().ends_with("Countdown.asm"));
+    // Assembling says the file exists and differs, and leaves it alone.
+    let reply = call(
+        &mut engine,
+        json!({"op": "asm.assemble", "path": format!("{dir}/Countdown.asm")}),
+    );
+    assert_eq!(reply["outputs"][0]["existing"], "different", "{reply}");
+    assert_eq!(
+        host.get_text(&format!("{dir}/Countdown.hack"))
+            .unwrap()
+            .lines()
+            .nth(3),
+        Some("1111111111111111")
+    );
+    // Only an explicit write replaces it.
+    call(
+        &mut engine,
+        json!({"op": "asm.assemble", "path": format!("{dir}/Countdown.asm"), "write": true}),
+    );
+    assert_eq!(
+        host.get_text(&format!("{dir}/Countdown.hack")).unwrap(),
+        golden_hack.replace("\r\n", "\n")
+    );
+
+    // Project 11: the reference .vm for one class of a folder.
+    let reply = call(
+        &mut engine,
+        json!({"op": "reference", "path": format!("{dir}/Counter.vm")}),
+    );
+    assert!(
+        reply["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("function Counter.new 0\n"),
+        "{reply}"
+    );
+    // Project 10: tokens and parse tree.
+    let tokens = call(
+        &mut engine,
+        json!({"op": "reference", "path": format!("{dir}/MainT.xml")}),
+    );
+    assert!(
+        tokens["text"].as_str().unwrap().starts_with("<tokens>"),
+        "{tokens}"
+    );
+    let tree = call(
+        &mut engine,
+        json!({"op": "reference", "path": format!("{dir}/Main.xml")}),
+    );
+    assert!(
+        tree["text"].as_str().unwrap().starts_with("<class>"),
+        "{tree}"
+    );
+    // Anything else explains itself.
+    let reply = call(
+        &mut engine,
+        json!({"op": "reference", "path": format!("{dir}/Nothing.hack")}),
+    );
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("there is no `Nothing.asm`")
+    );
 }
 
 #[test]

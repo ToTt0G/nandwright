@@ -406,11 +406,14 @@ fn test(paths: &[PathBuf], options: &TestOptions) -> Result<bool, String> {
 
         let mut pauses = 0;
         let mut keys = Vec::new();
+        let mut notes = Vec::new();
         let outcome = loop {
             let outcome = runner.run();
             for event in runner.take_events() {
-                if let Event::KeyPressed(code) = event {
-                    keys.push(code);
+                match event {
+                    Event::KeyPressed(code) => keys.push(code),
+                    Event::Note(text) => notes.push(text),
+                    _ => {}
                 }
             }
             match outcome {
@@ -442,11 +445,19 @@ fn test(paths: &[PathBuf], options: &TestOptions) -> Result<bool, String> {
             failed += 1;
         }
 
+        if !options.json {
+            for note in &notes {
+                eprintln!("note: {shown}: {note}");
+            }
+        }
         if options.json {
             let mut record = json!({
                 "script": script,
                 "dialect": runner.dialect().as_str(),
             });
+            if !notes.is_empty() {
+                record["notes"] = json!(notes);
+            }
             if let Some(out) = runner.output_path() {
                 record["out_file"] = json!(out);
             }

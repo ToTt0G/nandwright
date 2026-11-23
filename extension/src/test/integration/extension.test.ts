@@ -474,10 +474,16 @@ describe('Nandwright', function () {
 
         it('compiles Jack to the .vm files the official compiler writes, and runs them', async () => {
             const nandwright = await api();
+            for (const name of ['Main.vm', 'Counter.vm']) {
+                fs.rmSync(file('jack', name).fsPath, { force: true });
+            }
             await open('jack', 'Main.jack');
-            const reply = await vscode.commands.executeCommand<{ written: string[]; problems: unknown[] }>('nandwright.compileJack');
+            const reply = await vscode.commands.executeCommand<{ outputs: { path: string }[]; problems: unknown[]; written: boolean }>(
+                'nandwright.compileJack',
+            );
             assert.equal(reply.problems.length, 0);
-            assert.deepEqual(reply.written.map((f) => path.basename(f)).sort(), ['Counter.vm', 'Main.vm']);
+            assert.equal(reply.written, true);
+            assert.deepEqual(reply.outputs.map((o) => path.basename(o.path)).sort(), ['Counter.vm', 'Main.vm']);
             const vm = fs.readFileSync(file('jack', 'Main.vm').fsPath, 'utf8');
             assert.match(vm, /^function Main\.main 4\r?\n/);
             assert.equal(vm.includes('\r\n'), os.EOL === '\r\n');
@@ -487,6 +493,28 @@ describe('Nandwright', function () {
             await computer.simulate({ type: 'step' });
             assert.equal(computer.snapshot().state?.steps, 1);
             computer.panel.dispose();
+        });
+
+        it("compares a student's own tool output with the reference", async () => {
+            const nandwright = await api();
+            // As if the student's assembler had written Countdown.hack with one wrong word.
+            await open('programs', 'Countdown.asm');
+            const produced = await vscode.commands.executeCommand<{ outputs: { path: string; text: string }[] }>('nandwright.assemble');
+            const hack = file('programs', 'Countdown.hack');
+            assert.equal(produced.outputs[0].path.replace(/\\/g, '/').toLowerCase(), hack.fsPath.replace(/\\/g, '/').toLowerCase());
+            assert.equal(await nandwright.outputs.compareWithReference(hack, { quiet: true }), true);
+            const lines = fs.readFileSync(hack.fsPath, 'utf8').split(/\r?\n/);
+            lines[2] = '1111111111111111';
+            fs.writeFileSync(hack.fsPath, lines.join(os.EOL));
+            assert.equal(await nandwright.outputs.compareWithReference(hack, { quiet: true }), false);
+            // The analyzer's XML, for project 10.
+            const xml = file('jack', 'MainT.xml');
+            fs.writeFileSync(xml.fsPath, '<tokens>\n</tokens>\n');
+            assert.equal(await nandwright.outputs.compareWithReference(xml, { quiet: true }), false);
+            // A file with no source next to it has no reference.
+            const orphan = file('programs', 'Orphan.hack');
+            fs.writeFileSync(orphan.fsPath, '0000000000000000\n');
+            assert.equal(await nandwright.outputs.compareWithReference(orphan, { quiet: true }), undefined);
         });
     });
 

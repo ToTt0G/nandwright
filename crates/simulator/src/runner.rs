@@ -134,6 +134,8 @@ pub enum Event {
     /// The runner pressed a key because the script was waiting for it
     /// (see [`RunnerOptions::auto_keyboard`]).
     KeyPressed(u16),
+    /// Something the student should know that is not an error.
+    Note(String),
 }
 
 /// One compared line that did not match, with the machine's state when it
@@ -727,7 +729,11 @@ impl ScriptRunner {
                     host: &self.host,
                     dir: &self.dir,
                 };
-                self.machine.load(&files, file)?;
+                let loaded = self.machine.load(&files, file);
+                for note in self.machine.take_notes() {
+                    self.events.push(Event::Note(note));
+                }
+                loaded?;
                 self.breakpoints.clear();
             }
             Command::OutputFile(file) => self.output_file(file)?,

@@ -267,10 +267,14 @@ export class TestExplorer implements vscode.Disposable {
             const lines: string[] = [];
             const failures: TestFailure[] = [];
             const keysPressed: number[] = [];
+            const notes: string[] = [];
             const onEvents = (events: TestEvent[]) => {
                 for (const event of events) {
                     if (event.type === 'echo') {
                         say(`  ${name} says: ${event.text}`);
+                    } else if (event.type === 'note') {
+                        notes.push(event.text);
+                        say(`  Note: ${event.text}`);
                     } else if (event.type === 'key') {
                         keysPressed.push(event.code);
                         say(`  Pressed ${keyName(event.code)} for the script, which was waiting for it.`);
@@ -310,7 +314,7 @@ export class TestExplorer implements vscode.Disposable {
                     break;
                 case 'failed': {
                     const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
-                    run.failed(item, failureMessages(uri, outcome, failures, inspection, lines), duration);
+                    run.failed(item, failureMessages(uri, outcome, failures, inspection, lines, notes), duration);
                     say(`✗ ${name}: comparison failure at line ${outcome.line}`);
                     say(`    expected: ${outcome.expected ?? '(the compare file ended here)'}`);
                     say(`    actual:   ${outcome.actual ?? '(the script produced no more lines)'}`);
@@ -395,6 +399,7 @@ function failureMessages(
     failures: TestFailure[],
     inspection: TestInspection,
     produced: string[],
+    notes: string[],
 ): vscode.TestMessage[] {
     const compareName = inspection.comparePath ? path.basename(inspection.comparePath) : 'the compare file';
     const header = inspection.expected?.[0];
@@ -403,6 +408,7 @@ function failureMessages(
         const columns = differingColumns(header, failure.expected, failure.actual);
         const where = columns.length > 0 ? `: ${columns.join(', ')} ${columns.length === 1 ? 'differs' : 'differ'}` : ' differs';
         const text = [
+            ...notes.map((note) => `Note: ${note}\n`),
             `Line ${failure.line} of ${compareName}${where}`,
             '',
             `expected  ${failure.expected ?? '(the compare file ended here)'}`,

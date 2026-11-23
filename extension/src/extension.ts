@@ -10,9 +10,9 @@ import {
 } from 'vscode-languageclient/node';
 import { ChipPanels } from './chipPanel';
 import { ComputerPanels } from './computerPanel';
+import { Outputs } from './outputs';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
-import { isError } from './runtime/protocol';
 import { ScriptResult, TestExplorer } from './testing';
 
 const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
@@ -23,6 +23,7 @@ export interface NandwrightApi {
     tests: TestExplorer;
     chips: ChipPanels;
     computers: ComputerPanels;
+    outputs: Outputs;
     runtime: Runtime;
     client: LanguageClient;
 }
@@ -238,8 +239,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const tests = new TestExplorer(runtime, debugScript);
     const chips = new ChipPanels(context.extensionUri, runtime);
     const computers = new ComputerPanels(context.extensionUri, runtime);
+    const outputs = new Outputs(runtime);
     registerDebugger(context, runtime);
-    context.subscriptions.push(runtime, tests, chips, computers);
+    context.subscriptions.push(runtime, tests, chips, computers, outputs);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('nandwright.runTest', async (argument?: unknown) => {
@@ -284,32 +286,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                 void vscode.window.showInformationMessage('Open a Jack file to compile the classes of its folder.');
                 return undefined;
             }
-            await runtime.syncUnsaved();
-            const reply = await runtime.tryCall<{
-                written: string[];
-                problems: { path: string; message: string; range: { startLine: number; startCharacter: number } | null }[];
-            }>({ op: 'jack.compile', path: uri.fsPath, crlf: process.platform === 'win32' });
-            if (isError(reply)) {
-                void vscode.window.showErrorMessage(`Nand2Tetris: ${reply.error.message}`);
+            return outputs.produce('jack.compile', uri);
+        }),
+        vscode.commands.registerCommand('nandwright.assemble', async (argument?: unknown) => {
+            const uri = targetUri(argument);
+            if (!uri || !/\.asm$/i.test(uri.fsPath)) {
+                void vscode.window.showInformationMessage('Open a Hack assembly file (.asm) to assemble it.');
                 return undefined;
             }
-            if (reply.problems.length > 0) {
-                const first = reply.problems[0];
-                const choice = await vscode.window.showErrorMessage(
-                    `Nothing was written: ${path.basename(first.path)} does not compile. ${first.message}`,
-                    'Show',
+            return outputs.produce('asm.assemble', uri);
+        }),
+        vscode.commands.registerCommand('nandwright.compareWithReference', async (argument?: unknown) => {
+            const uri = targetUri(argument);
+            if (!uri || !/\.(hack|vm|xml)$/i.test(uri.fsPath)) {
+                void vscode.window.showInformationMessage(
+                    'Open a .hack, .vm or .xml file that your own assembler, compiler or analyzer wrote to compare it with the reference.',
                 );
-                if (choice) {
-                    const position = new vscode.Position(first.range?.startLine ?? 0, first.range?.startCharacter ?? 0);
-                    await vscode.window.showTextDocument(vscode.Uri.file(first.path), {
-                        selection: new vscode.Range(position, position),
-                    });
-                }
-                return reply;
+                return undefined;
             }
-            const names = reply.written.map((file) => path.basename(file)).join(', ');
-            vscode.window.setStatusBarMessage(`$(check) Compiled to ${names}`, 8000);
-            return reply;
+            return outputs.compareWithReference(uri);
         }),
         vscode.commands.registerCommand('nandwright.compareOutput', async (argument?: unknown) => {
             const uri = targetUri(argument);
@@ -394,7 +389,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         void vscode.commands.executeCommand('nandwright.getStarted');
     }
 
-    return { tests, chips, computers, runtime, client };
+    return { tests, chips, computers, outputs, runtime, client };
 }
 
 export function deactivate(): void {}

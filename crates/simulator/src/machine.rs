@@ -76,6 +76,13 @@ pub trait Machine {
     /// chip, every pin including the internal ones.
     fn observe(&self) -> Vec<Observed>;
 
+    /// Things worth telling the student that are not errors, collected since
+    /// the last call (for example: the `.hack` file a script loaded is not
+    /// what the `.asm` next to it assembles to).
+    fn take_notes(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Presses (or with `0` releases) a key on the machine's keyboard.
     /// Returns `false` if the machine has no keyboard.
     fn set_key(&mut self, code: u16) -> bool;

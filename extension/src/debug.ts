@@ -267,6 +267,9 @@ class ScriptDebugSession implements vscode.DebugAdapter {
                 case 'key':
                     this.say(`Pressed ${keyName(event.code)} for the script, which was waiting for it.`);
                     break;
+                case 'note':
+                    this.say(`Note: ${event.text}`, 'important');
+                    break;
             }
         }
     }

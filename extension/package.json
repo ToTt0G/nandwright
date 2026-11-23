@@ -249,6 +249,18 @@
         "icon": "$(file-code)"
       },
       {
+        "command": "nandwright.assemble",
+        "title": "Assemble to .hack File",
+        "category": "Nand2Tetris",
+        "icon": "$(file-binary)"
+      },
+      {
+        "command": "nandwright.compareWithReference",
+        "title": "Compare with Reference Output (for Your Own Assembler, Analyzer or Compiler)",
+        "category": "Nand2Tetris",
+        "icon": "$(diff)"
+      },
+      {
         "command": "nandwright.compareOutput",
         "title": "Compare Output with Expected (.out \u2194 .cmp)",
         "category": "Nand2Tetris",
@@ -293,6 +305,16 @@
           "command": "nandwright.compileJack",
           "when": "resourceLangId == jack",
           "group": "navigation@12"
+        },
+        {
+          "command": "nandwright.assemble",
+          "when": "resourceLangId == hack-asm",
+          "group": "navigation@12"
+        },
+        {
+          "command": "nandwright.compareWithReference",
+          "when": "resourceLangId == hack || resourceLangId == vm",
+          "group": "navigation@13"
         }
       ],
       "explorer/context": [
@@ -315,6 +337,16 @@
           "command": "nandwright.compileJack",
           "when": "resourceExtname == .jack",
           "group": "nandwright@4"
+        },
+        {
+          "command": "nandwright.assemble",
+          "when": "resourceExtname == .asm",
+          "group": "nandwright@4"
+        },
+        {
+          "command": "nandwright.compareWithReference",
+          "when": "resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .xml",
+          "group": "nandwright@5"
         }
       ],
       "commandPalette": [
@@ -341,6 +373,14 @@
         {
           "command": "nandwright.compileJack",
           "when": "editorLangId == jack"
+        },
+        {
+          "command": "nandwright.assemble",
+          "when": "editorLangId == hack-asm"
+        },
+        {
+          "command": "nandwright.compareWithReference",
+          "when": "resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .xml"
         }
       ]
     },
