@@ -349,16 +349,20 @@ impl Workspace {
                 diagnostics.extend(crate::hdl::extra_diagnostics(self, uri));
                 diagnostics
             }
-            DocKind::Tst => self
-                .tst_state(uri)
-                .map(|(p, a)| {
-                    p.diagnostics
-                        .iter()
-                        .chain(&a.diagnostics)
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default(),
+            DocKind::Tst => {
+                let mut diagnostics: Vec<n2t_core::Diagnostic> = self
+                    .tst_state(uri)
+                    .map(|(p, a)| {
+                        p.diagnostics
+                            .iter()
+                            .chain(&a.diagnostics)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                diagnostics.extend(crate::tst::extra_diagnostics(self, uri));
+                diagnostics
+            }
             DocKind::Asm => self
                 .asm_state(uri)
                 .map(|s| s.assembly.diagnostics.clone())

@@ -599,3 +599,52 @@ pub fn completion(
         _ => Vec::new(),
     }
 }
+
+/// Diagnostics the editor adds to a script's own: a `compare-to` file, or a
+/// program to `load` in the CPU or VM Emulator, that is not in the folder.
+/// (Chips are checked by the script analysis itself.)
+pub fn extra_diagnostics(ws: &mut Workspace, uri: &Url) -> Vec<n2t_core::Diagnostic> {
+    use n2t_core::{Diagnostic, DiagnosticCode, Severity};
+    let Some(doc) = ws.docs.get(uri) else {
+        return Vec::new();
+    };
+    if doc.path.is_none() {
+        return Vec::new();
+    }
+    let dir = doc.dir.clone();
+    let Some((parsed, _)) = ws.tst_state(uri) else {
+        return Vec::new();
+    };
+    let mut wanted = Vec::new();
+    for statement in parsed.script.simple_statements() {
+        match &statement.command {
+            Command::CompareTo(f) if !f.name.is_empty() => {
+                wanted.push((f.name.clone(), f.span, Severity::Warning, "compare file"));
+            }
+            Command::Load(f)
+                if ["asm", "hack", "vm"]
+                    .iter()
+                    .any(|e| path::has_extension(&f.name, e)) =>
+            {
+                wanted.push((f.name.clone(), f.span, Severity::Error, "program"));
+            }
+            _ => {}
+        }
+    }
+    wanted
+        .into_iter()
+        .filter(|(name, ..)| {
+            let file = path::join(&dir, name);
+            !ws.docs.values().any(|d| d.path.as_deref() == Some(&file))
+                && ws.host.read(&file).is_err()
+        })
+        .map(|(name, span, severity, what)| {
+            Diagnostic::new(
+                severity,
+                DiagnosticCode::Other("tst-missing-file"),
+                format!("the {what} `{name}` is not in this script's folder"),
+                Some(span),
+            )
+        })
+        .collect()
+}

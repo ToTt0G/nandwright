@@ -274,3 +274,35 @@ fn out_files_are_compared_with_their_cmp_file() {
     let lone = doc_url("Lone.out");
     assert!(h.open(&lone, "| x |\n").is_empty());
 }
+
+#[test]
+fn missing_compare_files_and_programs_are_reported() {
+    let mut h = cpu_folder();
+    let uri = doc_url("Countdown.tst");
+    let text = CPU_SCRIPT
+        .replace("Countdown.cmp", "Nope.cmp")
+        .replace("load Countdown.asm", "load Gone.asm");
+    let diagnostics = h.open(&uri, &text);
+    let missing: Vec<(&str, Option<lsp::DiagnosticSeverity>)> = diagnostics
+        .iter()
+        .filter(|d| d.code == Some(lsp::NumberOrString::String("tst-missing-file".into())))
+        .map(|d| (slice(&text, d.range), d.severity))
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            ("Gone.asm", Some(lsp::DiagnosticSeverity::ERROR)),
+            ("Nope.cmp", Some(lsp::DiagnosticSeverity::WARNING)),
+        ]
+    );
+    // Opening the compare file (an unsaved buffer) is enough.
+    h.open(&doc_url("Nope.cmp"), "|x|\n");
+    let diagnostics = h.change(&uri, &text);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|d| d.message.contains("not in this script's folder"))
+            .count(),
+        1
+    );
+}
