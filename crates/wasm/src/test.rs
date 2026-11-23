@@ -21,7 +21,7 @@ pub struct TestSession {
 
 impl TestSession {
     /// `{"op":"test.open","path":…}` with optional `autoKeyboard` (default
-    /// true), `crlf`, `collectAll` (default true) and `maxCommands`.
+    /// true), `stopEndlessWaits` (default false), `crlf`, `collectAll` (default true) and `maxCommands`.
     pub fn open(host: &SharedHost, request: &Value) -> Result<Self, Failure> {
         let script_path = path::normalize(text(request, "path")?);
         let source = read_text(host.as_ref(), &script_path)
@@ -37,6 +37,7 @@ impl TestSession {
             },
             collect_all_mismatches: request["collectAll"].as_bool().unwrap_or(true),
             auto_keyboard: request["autoKeyboard"].as_bool().unwrap_or(true),
+            stop_endless_waits: request["stopEndlessWaits"].as_bool().unwrap_or(false),
         };
         let lines = LineIndex::new(&source);
         let mut runner = ScriptRunner::new(

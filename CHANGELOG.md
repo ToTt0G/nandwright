@@ -8,6 +8,9 @@
 - The chip simulator shows the expected output: the chip's compare file (`.cmp`) as a
   table, with the row for the current inputs marked and any output that differs from
   your chip pointed out. Click a row to set the inputs to it.
+- A test that waits for a key press on a chip that can never see one (the project 5
+  keyboard test on a chip you have not written yet) now stops at once with an
+  explanation, instead of running to the command limit.
 
 ## 0.1.0
 

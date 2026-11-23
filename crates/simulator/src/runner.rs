@@ -61,6 +61,14 @@ pub struct RunnerOptions {
     /// option the runner presses it, holds it until the next `output`, and
     /// reports an [`Event::KeyPressed`].
     pub auto_keyboard: bool,
+    /// End a `while` loop that nothing in the script can end: a hardware
+    /// chip, a body of `eval`s only, and a condition that is still true after
+    /// a pass with no key pressed for it. Only a person pressing a key in the
+    /// official simulator could end such a loop, so a run nobody is watching
+    /// (the Testing view, `n2t test`) stops there, with the outcome of
+    /// the command limit. A script being debugged does not: the student may
+    /// be changing the chip while it waits.
+    pub stop_endless_waits: bool,
 }
 
 /// An error that stops a run.
@@ -576,7 +584,15 @@ impl ScriptRunner {
                             Ok(true) => {
                                 self.cursor.condition_checked = true;
                                 if self.cursor.iteration >= 1 {
+                                    let events = self.events.len();
                                     self.press_awaited_key(&w.condition);
+                                    if self.options.stop_endless_waits
+                                        && self.events.len() == events
+                                        && self.held_key.is_none()
+                                        && self.waits_forever(w)
+                                    {
+                                        return self.ended_early(Outcome::LimitExceeded);
+                                    }
                                 }
                             }
                             Ok(false) => {
@@ -707,6 +723,34 @@ impl ScriptRunner {
             self.held_key = Some(code);
             self.events.push(Event::KeyPressed(code));
         }
+    }
+
+    /// Whether this loop, at the start of a pass after the first, can never
+    /// end. `eval` on unchanged inputs changes nothing, so a body of `eval`s
+    /// (and output) cannot change a condition that was true before the first
+    /// pass and is true again now. Says why on the event list when it can.
+    fn waits_forever(&mut self, w: &WhileBlock) -> bool {
+        if self.dialect != Dialect::Hardware || w.condition.relation != Relation::NotEqual {
+            return false;
+        }
+        let pure = w.body.iter().all(|s| {
+            matches!(
+                s.command,
+                Command::Eval | Command::Output | Command::Echo(_) | Command::ClearEcho
+            )
+        });
+        let (variable, value) = match (&w.condition.left, &w.condition.right) {
+            (Operand::Variable(v), Operand::Scalar(Scalar::Integer(i)))
+            | (Operand::Scalar(Scalar::Integer(i)), Operand::Variable(v)) => (v, i),
+            _ => return false,
+        };
+        if !pure {
+            return false;
+        }
+        self.events.push(Event::Note(format!(
+            "The script waits for {variable} to become {value}, and nothing in the script can change it: it is waiting for a key press. This chip never produces that value, so the test was stopped."
+        )));
+        true
     }
 
     /// The outcome when a run stops before the end of the script: if a

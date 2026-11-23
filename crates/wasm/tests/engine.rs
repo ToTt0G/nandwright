@@ -925,3 +925,119 @@ fn runs_from_the_real_file_system_too() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status["outcome"]["kind"], "passed", "{status}");
 }
+
+// ---------------------------------------------------------------------
+// Waits that nothing can end
+// ---------------------------------------------------------------------
+
+/// Runs a script from `chips` to the end; returns the final status and every
+/// note shown on the way.
+fn run_waiting(
+    engine: &mut Engine,
+    host: &MemoryHost,
+    script: &str,
+    extra: Value,
+) -> (Value, Vec<String>) {
+    host.insert(&format!("{DIR}/Waiting.tst"), script);
+    let mut request =
+        json!({"op": "test.open", "path": format!("{DIR}/Waiting.tst"), "maxCommands": 400});
+    for (key, value) in extra.as_object().unwrap() {
+        request[key] = value.clone();
+    }
+    let opened = call(engine, request);
+    assert!(opened["session"].is_number(), "{opened}");
+    let mut notes = Vec::new();
+    for _ in 0..10_000 {
+        let status = call(
+            engine,
+            json!({"op": "test.run", "session": opened["session"], "budget": 50}),
+        );
+        for event in status["events"].as_array().unwrap() {
+            if event["type"] == "note" {
+                notes.push(event["text"].as_str().unwrap().to_string());
+            }
+        }
+        if status["state"] == "finished" {
+            return (status, notes);
+        }
+    }
+    panic!("the script did not finish");
+}
+
+const NOTE: &str = "The script waits for out to become 1, and nothing in the script can change it: it is waiting for a key press. This chip never produces that value, so the test was stopped.";
+
+fn waiting_on_majority(body: &str) -> String {
+    format!(
+        "load Majority.hdl,\nset a 0, set b 0, set c 0, eval;\nwhile out <> 1 {{\n    {body}\n}}\n"
+    )
+}
+
+#[test]
+fn a_wait_that_nothing_can_end_stops_at_once_when_asked() {
+    let (mut engine, host) = engine();
+    let (status, notes) = run_waiting(
+        &mut engine,
+        &host,
+        &waiting_on_majority("eval,"),
+        json!({"stopEndlessWaits": true}),
+    );
+    assert_eq!(status["outcome"]["kind"], "limit", "{status}");
+    assert!(status["commands"].as_u64().unwrap() < 20, "{status}");
+    assert_eq!(notes, [NOTE]);
+}
+
+#[test]
+fn without_the_flag_the_wait_runs_to_the_limit() {
+    // What the script debugger asks for: a student may change the chip meanwhile.
+    let (mut engine, host) = engine();
+    let (status, notes) = run_waiting(&mut engine, &host, &waiting_on_majority("eval,"), json!({}));
+    assert_eq!(status["outcome"]["kind"], "limit", "{status}");
+    assert_eq!(status["commands"], 400);
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn a_loop_that_can_change_the_chip_is_not_stopped_early() {
+    let (mut engine, host) = engine();
+    for body in ["tick, tock,", "set a 0, eval,"] {
+        let (status, notes) = run_waiting(
+            &mut engine,
+            &host,
+            &waiting_on_majority(body),
+            json!({"stopEndlessWaits": true}),
+        );
+        assert_eq!(status["outcome"]["kind"], "limit", "{body}: {status}");
+        assert_eq!(status["commands"], 400, "{body}: {status}");
+        assert!(notes.is_empty(), "{body}");
+    }
+    // A loop that does end by itself ends.
+    let (status, notes) = run_waiting(
+        &mut engine,
+        &host,
+        "load Majority.hdl,\nset a 0, set b 0, set c 0, eval;\nwhile out <> 1 {\n    set a 1, set b 1, eval,\n}\n",
+        json!({"stopEndlessWaits": true}),
+    );
+    assert_eq!(status["outcome"]["kind"], "unchecked", "{status}");
+    assert!(notes.is_empty());
+}
+
+#[test]
+fn a_chip_with_a_keyboard_waits_for_its_key_unless_keys_are_off() {
+    let (mut engine, _) = engine();
+    // Keys on: the awaited key is pressed and the test passes, as before.
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": format!("{DIR}/KeyLatch.tst"), "stopEndlessWaits": true, "maxCommands": 500}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+
+    // Keys off: nothing can press it, so the run stops at once.
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": format!("{DIR}/KeyLatch.tst"), "autoKeyboard": false, "stopEndlessWaits": true, "maxCommands": 500}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "limit", "{status}");
+    assert!(status["commands"].as_u64().unwrap() < 20, "{status}");
+}

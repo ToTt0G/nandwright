@@ -370,6 +370,7 @@ fn test(paths: &[PathBuf], options: &TestOptions) -> Result<bool, String> {
                 Newline::Lf
             },
             auto_keyboard: options.auto_keyboard,
+            stop_endless_waits: true,
             ..Default::default()
         };
         let mut runner = match ScriptRunner::open(host(), script, runner_options) {

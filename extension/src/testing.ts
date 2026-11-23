@@ -255,6 +255,8 @@ export class TestExplorer implements vscode.Disposable {
                 crlf: process.platform === 'win32',
                 collectAll: true,
                 autoKeyboard: vscode.workspace.getConfiguration('nandwright').get('test.pressKeys', true),
+                // Nobody can press a key in the Testing view: a wait that nothing can end is not worth 200 million commands.
+                stopEndlessWaits: true,
                 maxCommands: MAX_COMMANDS,
             });
             session = opened.session;
