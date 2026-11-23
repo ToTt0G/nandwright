@@ -12,6 +12,7 @@ repository = "https://github.com/ToTt0G/nandwright"
 n2t-core = { path = "crates/core" }
 n2t-lsp = { path = "crates/lsp" }
 n2t-simulator = { path = "crates/simulator" }
+n2t-vm = { path = "crates/vm" }
 
 [profile.release]
 opt-level = 3
