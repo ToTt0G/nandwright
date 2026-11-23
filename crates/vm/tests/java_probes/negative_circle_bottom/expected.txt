@@ -1,0 +1,3 @@
+java A built-in function tried to access memory outside the Heap or Screen range
+ram 24479 0
+ram 24576 0

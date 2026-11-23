@@ -10,6 +10,9 @@
 use crate::error::VmError;
 use crate::os::memory;
 
+/// Largest string that could fit in an otherwise empty heap.
+pub(super) const MAX_CAPACITY: usize = (memory::HEAP_LIMIT - memory::HEAP_START - 4) as usize;
+
 fn read_word(ram: &[i16], addr: i32, function: &'static str) -> Result<i16, VmError> {
     if !(memory::HEAP_START as i32..=memory::HEAP_END as i32).contains(&addr) {
         return Err(VmError::MemoryOutOfRange {
@@ -43,6 +46,18 @@ pub fn new(ram: &mut [i16], max_length: i16) -> Result<i16, VmError> {
     let base = i32::from(ptr);
     write_word(ram, base, max_length, "String.new")?;
     write_word(ram, base + 1, 0, "String.new")?;
+    Ok(ptr)
+}
+
+pub(super) fn from_chars(ram: &mut [i16], chars: &[i16]) -> Result<i16, VmError> {
+    let length = i16::try_from(chars.len()).map_err(|_| VmError::BuiltinError {
+        function: "String.new",
+        message: "heap overflow".to_string(),
+    })?;
+    let ptr = new(ram, length)?;
+    let base = ptr as usize;
+    ram[base + 1] = length;
+    ram[base + 2..][..chars.len()].copy_from_slice(chars);
     Ok(ptr)
 }
 
@@ -111,21 +126,22 @@ pub fn erase_last_char(ram: &mut [i16], this: i16) -> Result<i16, VmError> {
 pub fn int_value(ram: &[i16], this: i16) -> Result<i16, VmError> {
     let base = i32::from(this);
     let len = read_word(ram, base + 1, "String.intValue")?;
-    if len <= 0 {
-        return Ok(0);
-    }
-    let first = read_word(ram, base + 2, "String.intValue")?;
-    let neg = first == i16::from(b'-');
-    let mut i = if neg { 1i32 } else { 0i32 };
+    parse_int((0..i32::from(len)).map(|i| read_word(ram, base + 2 + i, "String.intValue")))
+}
+
+pub(super) fn parse_int(
+    mut chars: impl Iterator<Item = Result<i16, VmError>>,
+) -> Result<i16, VmError> {
+    let first = chars.next().transpose()?;
+    let neg = first == Some(i16::from(b'-'));
     let mut val: i16 = 0;
-    while i < i32::from(len) {
-        let ch = read_word(ram, base + 2 + i, "String.intValue")?;
+    for ch in first.filter(|_| !neg).map(Ok).into_iter().chain(chars) {
+        let ch = ch?;
         if !(i16::from(b'0')..=i16::from(b'9')).contains(&ch) {
             break;
         }
         let digit = ch - i16::from(b'0');
         val = val.wrapping_mul(10).wrapping_add(digit);
-        i += 1;
     }
     Ok(if neg { val.wrapping_neg() } else { val })
 }

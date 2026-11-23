@@ -1,0 +1,9 @@
+function Main.main 0
+push constant 8000
+push constant 0
+call String.new 1
+call Keyboard.readInt 1
+call Memory.poke 2
+pop temp 0
+push constant 0
+return

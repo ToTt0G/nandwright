@@ -1,0 +1,21 @@
+java End of script
+java-dialog OK DIALOG:Program Halted: Main.main finished execution
+ram 2048 0
+ram 2049 2052
+ram 2050 0
+ram 2051 0
+ram 2052 14330
+ram 2053 16384
+ram 2054 0
+ram 2055 0
+ram 2056 0
+ram 2057 0
+ram 2058 0
+ram 2059 0
+ram 2060 0
+ram 2061 0
+ram 2062 0
+ram 2063 0
+ram 2064 0
+ram 2065 0
+ram 8000 -12

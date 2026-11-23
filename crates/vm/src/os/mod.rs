@@ -65,8 +65,9 @@ pub enum PendingBuiltin {
     /// Waiting inside `Keyboard.readLine` or `Keyboard.readInt`.
     ReadLine {
         phase: KeyPhase,
-        /// Heap pointer to the `String` accumulating the line.
-        str_ptr: i16,
+        chars: Vec<i16>,
+        /// Extra characters that could never fit in a returned Jack String.
+        excess: usize,
         /// `true` for `Keyboard.readInt`, `false` for `Keyboard.readLine`.
         as_int: bool,
         return_pc: u32,
@@ -82,6 +83,22 @@ pub enum KeyPhase {
     WaitPress,
     /// Key `code` was pressed; waiting for `RAM[24576]` to return to `0`.
     WaitRelease { code: i16 },
+}
+
+impl KeyPhase {
+    fn released_key(&mut self, key: i16) -> Option<i16> {
+        match *self {
+            Self::WaitPress if key != 0 => {
+                *self = Self::WaitRelease { code: key };
+                None
+            }
+            Self::WaitRelease { code } if key == 0 => {
+                *self = Self::WaitPress;
+                Some(code)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Result of dispatching or resuming a built-in OS call.
@@ -476,6 +493,10 @@ impl OsState {
                     value: 0,
                     screen_touched: true,
                 },
+                Err(error @ VmError::MemoryOutOfRange { .. }) => BuiltinOutcome::Error {
+                    error,
+                    screen_touched: true,
+                },
                 Err(error) => {
                     let code = if !(0..screen::SCREEN_WIDTH).contains(&a0)
                         || !(0..screen::SCREEN_HEIGHT).contains(&a1)
@@ -588,20 +609,11 @@ impl OsState {
                         screen_touched: true,
                     };
                 }
-                let str_ptr = match string::new(ram, 80) {
-                    Ok(p) => p,
-                    Err(error) => {
-                        self.print_sys_error(ram, err_code::MEMORY_HEAP_OVERFLOW);
-                        return BuiltinOutcome::Error {
-                            error,
-                            screen_touched: true,
-                        };
-                    }
-                };
                 self.output.draw_cursor_box(ram);
                 self.pending = Some(PendingBuiltin::ReadLine {
                     phase: KeyPhase::WaitPress,
-                    str_ptr,
+                    chars: Vec::new(),
+                    excess: 0,
                     as_int: matches!(builtin, KeyboardReadInt),
                     return_pc,
                     frame_lcl,
@@ -669,7 +681,7 @@ impl OsState {
     ///
     /// Returns `BuiltinOutcome::Return` once the wait completes (and clears `self.pending`).
     pub fn poll_pending(&mut self, ram: &mut [i16], now_ms: u64) -> BuiltinOutcome {
-        let Some(pending) = self.pending.clone() else {
+        let Some(mut pending) = self.pending.take() else {
             return BuiltinOutcome::Return {
                 value: 0,
                 screen_touched: false,
@@ -677,149 +689,111 @@ impl OsState {
         };
 
         let key = ram[memory::KEYBOARD_ADDR as usize];
-        match pending {
-            PendingBuiltin::Sleep { until_ms, .. } => {
-                if now_ms >= until_ms {
-                    self.pending = None;
+        let outcome = match &mut pending {
+            PendingBuiltin::Sleep { until_ms, .. } if now_ms < *until_ms => BuiltinOutcome::Sleep {
+                until_ms: *until_ms,
+            },
+            PendingBuiltin::Sleep { .. } => BuiltinOutcome::Return {
+                value: 0,
+                screen_touched: false,
+            },
+            PendingBuiltin::ReadChar { phase, .. } => {
+                if let Some(code) = phase.released_key(key) {
+                    self.output.draw_char_at_cursor(ram, 32);
+                    self.output.print_char(ram, code);
                     BuiltinOutcome::Return {
-                        value: 0,
-                        screen_touched: false,
+                        value: code,
+                        screen_touched: true,
                     }
                 } else {
-                    BuiltinOutcome::Sleep { until_ms }
+                    BuiltinOutcome::WaitKey {
+                        screen_touched: false,
+                    }
                 }
             }
-            PendingBuiltin::ReadChar {
-                phase,
-                return_pc,
-                frame_lcl,
-                frame_arg,
-            } => match phase {
-                KeyPhase::WaitPress => {
-                    if key != 0 {
-                        self.pending = Some(PendingBuiltin::ReadChar {
-                            phase: KeyPhase::WaitRelease { code: key },
-                            return_pc,
-                            frame_lcl,
-                            frame_arg,
-                        });
-                    }
-                    BuiltinOutcome::WaitKey {
-                        screen_touched: false,
-                    }
-                }
-                KeyPhase::WaitRelease { code } => {
-                    if key == 0 {
-                        self.pending = None;
-                        // Clear cursor box before echoing (matters for 128/129).
-                        self.output.draw_char_at_cursor(ram, 32);
-                        self.output.print_char(ram, code);
-                        BuiltinOutcome::Return {
-                            value: code,
-                            screen_touched: true,
-                        }
-                    } else {
-                        BuiltinOutcome::WaitKey {
-                            screen_touched: false,
-                        }
-                    }
-                }
-            },
             PendingBuiltin::ReadLine {
                 phase,
-                str_ptr,
+                chars,
+                excess,
                 as_int,
-                return_pc,
-                frame_lcl,
-                frame_arg,
-            } => match phase {
-                KeyPhase::WaitPress => {
-                    if key != 0 {
-                        self.pending = Some(PendingBuiltin::ReadLine {
-                            phase: KeyPhase::WaitRelease { code: key },
-                            str_ptr,
-                            as_int,
-                            return_pc,
-                            frame_lcl,
-                            frame_arg,
-                        });
-                    }
-                    BuiltinOutcome::WaitKey {
-                        screen_touched: false,
-                    }
-                }
-                KeyPhase::WaitRelease { code } => {
-                    if key != 0 {
-                        return BuiltinOutcome::WaitKey {
-                            screen_touched: false,
-                        };
-                    }
-                    if code == 128 {
-                        // Enter / newline: erase cursor box, advance to next line, finish.
-                        self.pending = None;
-                        self.output.draw_char_at_cursor(ram, 32);
-                        self.output.println();
-                        if as_int {
-                            match string::int_value(ram, str_ptr) {
-                                Ok(val) => {
-                                    let _ = string::dispose(ram, str_ptr);
-                                    BuiltinOutcome::Return {
-                                        value: val,
-                                        screen_touched: true,
-                                    }
-                                }
-                                Err(error) => BuiltinOutcome::Error {
-                                    error,
-                                    screen_touched: true,
-                                },
-                            }
-                        } else {
-                            BuiltinOutcome::Return {
-                                value: str_ptr,
-                                screen_touched: true,
-                            }
-                        }
-                    } else if code == 129 {
-                        // Backspace: erase last char if any.
-                        let mut screen_touched = false;
-                        if let Ok(len) = string::length(ram, str_ptr)
-                            && len > 0
-                        {
-                            let _ = string::erase_last_char(ram, str_ptr);
-                            self.output.draw_char_at_cursor(ram, 32);
-                            self.output.back_space(ram);
-                            self.output.draw_cursor_box(ram);
-                            screen_touched = true;
-                        }
-                        self.pending = Some(PendingBuiltin::ReadLine {
-                            phase: KeyPhase::WaitPress,
-                            str_ptr,
-                            as_int,
-                            return_pc,
-                            frame_lcl,
-                            frame_arg,
-                        });
-                        BuiltinOutcome::WaitKey { screen_touched }
+                ..
+            } => match phase.released_key(key) {
+                Some(128) => self.finish_read_line(ram, chars, *excess, *as_int),
+                Some(129) if *excess != 0 || !chars.is_empty() => {
+                    if *excess != 0 {
+                        *excess -= 1;
                     } else {
-                        // Normal character: append if capacity allows, echo, redraw cursor.
-                        let mut screen_touched = false;
-                        if string::append_char(ram, str_ptr, code).is_ok() {
-                            self.output.print_char(ram, code);
-                            self.output.draw_cursor_box(ram);
-                            screen_touched = true;
-                        }
-                        self.pending = Some(PendingBuiltin::ReadLine {
-                            phase: KeyPhase::WaitPress,
-                            str_ptr,
-                            as_int,
-                            return_pc,
-                            frame_lcl,
-                            frame_arg,
-                        });
-                        BuiltinOutcome::WaitKey { screen_touched }
+                        chars.pop();
+                    }
+                    self.output.back_space(ram);
+                    self.output.draw_cursor_box(ram);
+                    BuiltinOutcome::WaitKey {
+                        screen_touched: true,
                     }
                 }
+                Some(code) if code != 129 => {
+                    if chars.len() < string::MAX_CAPACITY {
+                        chars.push(code);
+                    } else {
+                        *excess = excess.saturating_add(1);
+                    }
+                    self.output.print_char(ram, code);
+                    self.output.draw_cursor_box(ram);
+                    BuiltinOutcome::WaitKey {
+                        screen_touched: true,
+                    }
+                }
+                _ => BuiltinOutcome::WaitKey {
+                    screen_touched: false,
+                },
             },
+        };
+        if matches!(
+            outcome,
+            BuiltinOutcome::Sleep { .. } | BuiltinOutcome::WaitKey { .. }
+        ) {
+            self.pending = Some(pending);
+        }
+        outcome
+    }
+
+    fn finish_read_line(
+        &mut self,
+        ram: &mut [i16],
+        chars: &[i16],
+        excess: usize,
+        as_int: bool,
+    ) -> BuiltinOutcome {
+        self.output.draw_char_at_cursor(ram, 32);
+        self.output.println();
+        // Java buffers input outside Hack RAM. Only readLine allocates a Jack
+        // String, sized to the final line after editing.
+        let result = if excess != 0 {
+            Err(VmError::BuiltinError {
+                function: if as_int {
+                    "Keyboard.readInt"
+                } else {
+                    "Keyboard.readLine"
+                },
+                message: "input exceeds the maximum Jack string size".to_string(),
+            })
+        } else if as_int {
+            string::parse_int(chars.iter().copied().map(Ok))
+        } else {
+            string::from_chars(ram, chars)
+        };
+        match result {
+            Ok(value) => BuiltinOutcome::Return {
+                value,
+                screen_touched: true,
+            },
+            Err(error) => {
+                self.print_sys_error(ram, err_code::MEMORY_HEAP_OVERFLOW);
+                BuiltinOutcome::Error {
+                    error,
+                    screen_touched: true,
+                }
+            }
         }
     }
 }

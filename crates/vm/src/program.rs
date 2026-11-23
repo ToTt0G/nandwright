@@ -551,11 +551,14 @@ impl Program {
                     prev_scope = cmd.function;
                 }
                 let global_pc = (pc_base + cmd_idx) as u32;
-                let enclosing_func_id = cmd.function.and_then(|local_f| {
-                    func_id_by_start_pc
-                        .get(&(pc_base as u32 + local_f))
-                        .copied()
-                });
+                let enclosing_func_id = cmd
+                    .function
+                    .filter(|&local_f| (local_f as usize) < n)
+                    .and_then(|local_f| {
+                        func_id_by_start_pc
+                            .get(&((pc_base + local_f as usize) as u32))
+                            .copied()
+                    });
 
                 let op_index_in_func = if matches!(cmd.kind, CommandKind::Label(_)) {
                     -1

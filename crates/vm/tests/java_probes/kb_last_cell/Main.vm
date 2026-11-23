@@ -1,0 +1,28 @@
+// Original probe: kb_last_cell
+function Main.main 4
+push constant 22
+push constant 63
+call Output.moveCursor 2
+pop temp 0
+push constant 8000
+call Keyboard.readChar 0
+call Memory.poke 2
+pop temp 0
+push constant 22
+push constant 62
+call Output.moveCursor 2
+pop temp 0
+push constant 0
+call String.new 1
+call Keyboard.readLine 1
+pop local 0
+push constant 8001
+push local 0
+call String.length 1
+call Memory.poke 2
+pop temp 0
+push constant 90
+call Output.printChar 1
+pop temp 0
+push constant 0
+return

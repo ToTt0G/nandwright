@@ -11,7 +11,7 @@
 //! Run in debug (overflow checks on) by `cargo test`. Set `N2T_VM_FUZZ_ITERS`
 //! to run longer.
 
-use n2t_vm::{Breakpoints, Program, RunStatus, Segment, StepStatus, Vm, parse};
+use n2t_vm::{Breakpoints, BuiltinOs, Program, RunStatus, Segment, StepStatus, Vm, parse};
 
 struct Rng(u64);
 
@@ -298,6 +298,38 @@ fn hostile_programs_ram_and_host_calls_never_panic() {
                 }
             }
             poke_inspectors(&vm);
+        }
+    }
+}
+
+#[test]
+fn every_builtin_executes_with_hostile_arguments_and_ram() {
+    let mut rng = Rng(0x8F76_C726_A843);
+    let bp = Breakpoints::new();
+    for name in BUILTINS {
+        let Some(builtin) = BuiltinOs::from_name(name) else {
+            continue;
+        };
+        let arity = builtin.arity();
+        let source = format!("call {name} {arity}\n");
+        let (program, diagnostics) = Program::link(vec![parse("Probe", &source)]);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let mut vm = Vm::new(program);
+        for _ in 0..64 {
+            vm.reset();
+            // Set up a valid call frame so execution reaches the builtin.
+            for index in 0..arity {
+                vm.set_ram(256 + index, rng.word());
+            }
+            for addr in [1, 2, 3, 4, 2048, 2049, 2050, 2051, 24576] {
+                vm.set_ram(addr, rng.word());
+            }
+            vm.set_var("sp", None, i64::from(256 + arity)).unwrap();
+            let _ = vm.run(1, u64::MAX - 10, &bp);
+            for key in [65, 0, 129, 0, 128, 0] {
+                vm.set_key(key);
+                let _ = vm.run(2, u64::MAX, &bp);
+            }
         }
     }
 }

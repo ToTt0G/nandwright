@@ -10,7 +10,7 @@
 //!   `Array`, `Output`, `Screen`, `Keyboard`, `Memory`, `Sys`).
 
 pub mod error;
-pub mod os;
+mod os;
 pub mod parse;
 pub mod program;
 pub mod vm;

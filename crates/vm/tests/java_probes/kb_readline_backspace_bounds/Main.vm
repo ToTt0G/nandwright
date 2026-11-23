@@ -1,0 +1,33 @@
+// Original probe: kb_readline_backspace_bounds
+function Main.main 4
+push constant 2
+call String.new 1
+push constant 88
+call String.appendChar 2
+push constant 89
+call String.appendChar 2
+call Keyboard.readLine 1
+pop local 0
+push constant 8000
+push local 0
+call String.length 1
+call Memory.poke 2
+pop temp 0
+push constant 3
+push constant 0
+call Output.moveCursor 2
+pop temp 0
+push constant 0
+call String.new 1
+call Keyboard.readLine 1
+pop local 1
+push constant 8001
+push local 1
+call String.length 1
+call Memory.poke 2
+pop temp 0
+push constant 90
+call Output.printChar 1
+pop temp 0
+push constant 0
+return
