@@ -352,6 +352,29 @@ describe('Nandwright', function () {
             assert.ok(missing.outcome.kind === 'error' && /cannot load/.test(missing.outcome.message), JSON.stringify(missing.outcome));
         });
 
+        it('shows the result of the last run above the chip, beside Run test', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('lens-', ['chips/Majority.hdl', 'chips/Majority.tst', 'chips/Majority.cmp']);
+            try {
+                const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                const titles = async () =>
+                    ((await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', chip)) ?? []).map((lens) => lens.command?.title ?? '');
+                assert.deepEqual(await titles(), ['$(play) Run test', '$(debug-alt) Step through', '$(circuit-board) Open in simulator']);
+                await vscode.commands.executeCommand('nandwright.runTest', chip);
+                assert.equal((await titles())[0], '$(pass) Test passes');
+                await replaceAll(editor, editor.document.getText().replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
+                await until('the result to go out of date', () => nandwright.tests.statusOf(vscode.Uri.file(path.join(folder, 'Majority.tst'))).status === 'stale');
+                assert.equal((await titles())[0], '$(play) Run test');
+                await vscode.commands.executeCommand('nandwright.runTest', chip);
+                assert.equal((await titles())[0], '$(error) Test fails: 2 of 8 rows differ');
+            } finally {
+                await discardEdits();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
         it('runs the test of the chip in the editor', async () => {
             await open('chips', 'Parity4.hdl');
             const results = await vscode.commands.executeCommand<ScriptResult[]>('nandwright.runTest');

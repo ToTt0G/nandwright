@@ -217,6 +217,48 @@ function summarize(results: ScriptResult[]): void {
     });
 }
 
+/**
+ * A CodeLens with the last result of a chip's test scripts: whether they
+ * pass, and how many rows differ when one does not. None before a run or
+ * once an edit has made the result out of date.
+ */
+export function testResultLens(tests: TestExplorer, scripts: vscode.Uri[]): vscode.Command | undefined {
+    const statuses = scripts.map((script) => ({ script, ...tests.statusOf(script) }));
+    // Plain text: a lens with no command cannot be clicked.
+    const text = (title: string, tooltip: string): vscode.Command => ({ title, tooltip, command: '' });
+    if (statuses.some((status) => status.status === 'running')) {
+        return text('$(sync~spin) Testing…', 'The test is running.');
+    }
+    const results = statuses.flatMap((status) => (status.status === 'current' ? [{ script: status.script, result: status.result }] : []));
+    if (results.length !== scripts.length) {
+        return undefined;
+    }
+    const passes = (kind: string) => kind === 'passed' || kind === 'unchecked';
+    const failing = results.filter(({ result }) => !passes(result.kind));
+    if (scripts.length > 1) {
+        return failing.length === 0
+            ? text(`$(pass) ${scripts.length} tests pass`, results.map(({ script }) => path.basename(script.fsPath)).join(', '))
+            : text(`$(error) ${failing.length} of ${scripts.length} tests fail`, failing.map(({ script }) => path.basename(script.fsPath)).join(', '));
+    }
+    const [{ script, result }] = results;
+    const name = path.basename(script.fsPath);
+    switch (result.kind) {
+        case 'passed':
+            return text('$(pass) Test passes', `${name}: all ${Math.max(0, result.comparedLines - 1)} rows match.`);
+        case 'unchecked':
+            return text('$(pass) Test passes', `${name}: ${result.message ?? ''}`);
+        case 'failed': {
+            const rows = Math.max(0, result.comparedLines - 1);
+            return text(`$(error) Test fails: ${result.failureCount} of ${rows} rows differ`, `${name} fails: ${result.failureCount} of ${rows} rows differ.`);
+        }
+        case 'error':
+        case 'limit':
+            return text('$(error) Test stopped with an error', `${name}: ${result.message ?? ''}`);
+        default:
+            return undefined;
+    }
+}
+
 async function openExample(context: vscode.ExtensionContext): Promise<void> {
     const source = vscode.Uri.joinPath(context.extensionUri, 'media', 'example');
     const target = vscode.Uri.joinPath(context.globalStorageUri, 'example');
@@ -248,6 +290,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const progress = new Progress(tests);
     registerDebugger(context, runtime);
     context.subscriptions.push(runtime, tests, chips, computers, outputs, progress);
+
+    // The result of the last run is shown in the editor, beside Run test, so
+    // nobody has to open the Test Results view to see whether a chip passes.
+    const lensesChanged = new vscode.EventEmitter<void>();
+    let lensTimer: NodeJS.Timeout | undefined;
+    context.subscriptions.push(
+        lensesChanged,
+        tests.onDidChangeStatus(() => {
+            clearTimeout(lensTimer);
+            lensTimer = setTimeout(() => lensesChanged.fire(), 150);
+        }),
+        { dispose: () => clearTimeout(lensTimer) },
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('nandwright.runTest', async (argument?: unknown) => {
@@ -346,6 +401,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         vscode.languages.registerCodeLensProvider(
             { language: 'hdl', scheme: 'file' },
             {
+                onDidChangeCodeLenses: lensesChanged.event,
                 async provideCodeLenses(document) {
                     const match = /^[ \t]*CHIP\b/m.exec(document.getText());
                     if (!match || !chipNameOf(document)) {
@@ -356,6 +412,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                     const lenses: vscode.CodeLens[] = [];
                     const scripts = await scriptsForChip(document.uri);
                     if (scripts.length > 0) {
+                        const result = testResultLens(tests, scripts);
+                        if (result) {
+                            lenses.push(new vscode.CodeLens(range, result));
+                        }
                         lenses.push(
                             new vscode.CodeLens(range, {
                                 title: scripts.length === 1 ? '$(play) Run test' : `$(play) Run ${scripts.length} tests`,

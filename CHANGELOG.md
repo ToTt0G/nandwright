@@ -13,6 +13,8 @@
 - Clock history in the chip simulator: the pins after each tick and tock.
 - Zip Project Files: packs a project folder for handing in, with your own work ticked and
   generated files left out. You choose the final list.
+- Above a chip, beside Run test, the editor shows the result of the last run: whether the
+  test passes, or how many rows differ. No need to open the Test Results view.
 
 ## 0.2.0
 
