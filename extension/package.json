@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -223,6 +223,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "When a test script waits for a key (the official project 5 `Memory.tst` asks you to hold down `K`), press that key for it. Turn this off to press the keys yourself in the chip panel, as you would in the official Hardware Simulator."
+        },
+        "nandwright.test.runOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run a file's tests when you save it: saving a chip, a program, a test script or a compare file runs the test scripts in the same folder that use it. Results appear in the Testing view and in the chip simulator without taking focus. Scripts that repeat forever are not run this way."
         },
         "nandwright.trace.server": {
           "type": "string",

@@ -5,6 +5,7 @@
 // the first compare line that differs. On top of that a failure shows every
 // failing row and the value of every pin at that step.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime, RuntimeError } from './runtime/client';
@@ -18,7 +19,9 @@ import {
     TestOpened,
     TestOutcome,
     TestStatus,
+    isError,
 } from './runtime/protocol';
+import { ignoresCase, pathKey, samePath } from './paths';
 import { describePin, keyName } from './values';
 
 /** A script is stopped after this many commands. The longest official test
@@ -29,6 +32,33 @@ const MAX_COMMANDS = 200_000_000;
 const MAX_FAILURE_MESSAGES = 25;
 
 const EXCLUDE = '**/{node_modules,.git,target,dist}/**';
+
+/** Files the engine reads: a change to one can change a test's result. */
+export const ENGINE_FILE = /\.(hdl|tst|cmp|asm|hack|vm|jack)$/i;
+
+/** Saves in one folder within this long are run together. */
+const SAVE_DELAY_MS = 200;
+
+const STORE_KEY = 'nandwright.results';
+
+/** The last result of a script, kept for the simulator and the status bar. */
+export interface StoredResult {
+    kind: TestOutcome['kind'];
+    /** Lines of the compare file compared, the header included. */
+    comparedLines: number;
+    failureCount: number;
+    /** The compare-file line and what the chip gave there, for the failures kept. */
+    failures: { line: number; actual: string | null }[];
+    notes: string[];
+    /** The error message, or why there is no result (limit, skipped, cancelled, unchecked). */
+    message?: string;
+    started: number;
+    finished: number;
+}
+
+export type ScriptStatus =
+    | { status: 'none' | 'running'; result?: StoredResult }
+    | { status: 'current' | 'stale'; result: StoredResult };
 
 export function toRange(range: Range): vscode.Range {
     return new vscode.Range(range.startLine, range.startCharacter, range.endLine, range.endCharacter);
@@ -49,10 +79,22 @@ export class TestExplorer implements vscode.Disposable {
     /** Fires after each script finishes. Used by commands and by tests. */
     readonly onDidFinishScript = this.resultEmitter.event;
     private ready: Promise<void> | undefined;
+    private readonly results = new Map<string, { uri: vscode.Uri; result: StoredResult }>();
+    private readonly running = new Map<string, number>();
+    /** When an engine file in a folder last changed, by folder key. */
+    private readonly changedAt = new Map<string, number>();
+    private readonly statusEmitter = new vscode.EventEmitter<vscode.Uri | undefined>();
+    /** Fires when a script starts or finishes, or results go stale (with no script). */
+    readonly onDidChangeStatus = this.statusEmitter.event;
+    private readonly saveTimers = new Map<string, { timer: NodeJS.Timeout; saved: vscode.Uri[] }>();
+    private readonly autoRuns = new Map<string, { source: vscode.CancellationTokenSource; pending: Map<string, vscode.Uri>; done: Promise<unknown> }>();
+    private readonly foreverCache = new Map<string, boolean>();
+    private persistTimer: NodeJS.Timeout | undefined;
 
     constructor(
         private readonly runtime: Runtime,
         private readonly startDebugging: (uri: vscode.Uri) => Thenable<boolean>,
+        private readonly state?: vscode.Memento,
     ) {
         this.controller = vscode.tests.createTestController('nandwright', 'Nand2Tetris');
         this.controller.resolveHandler = async (item) => {
@@ -88,7 +130,263 @@ export class TestExplorer implements vscode.Disposable {
                     this.add(document.uri);
                 }
             }),
+            this.statusEmitter,
         );
+        this.watchChanges();
+        this.load();
+    }
+
+    // ----- Results, and when they stop being current -----
+
+    private watchChanges(): void {
+        const changed = (uri: vscode.Uri, at: number) => {
+            if (uri.scheme !== 'file' || !ENGINE_FILE.test(uri.fsPath)) {
+                return;
+            }
+            const folder = pathKey(path.dirname(uri.fsPath));
+            if (at > (this.changedAt.get(folder) ?? 0)) {
+                this.changedAt.set(folder, at);
+                this.statusEmitter.fire(undefined);
+            }
+        };
+        // A file event can arrive well after the change (and after a run that
+        // already saw it): the file's own time says when it changed.
+        const onDisk = (uri: vscode.Uri) => {
+            fs.promises.stat(uri.fsPath).then(
+                (stat) => changed(uri, stat.mtimeMs),
+                () => changed(uri, Date.now()),
+            );
+        };
+        // `.out` files are written by the runs themselves and are not engine files.
+        const watcher = vscode.workspace.createFileSystemWatcher('**/*.{hdl,tst,cmp,asm,hack,vm,jack,HDL,TST,CMP,ASM,HACK,VM,JACK}');
+        watcher.onDidChange(onDisk);
+        watcher.onDidCreate(onDisk);
+        watcher.onDidDelete((uri) => changed(uri, Date.now()));
+        this.disposables.push(
+            watcher,
+            vscode.workspace.onDidChangeTextDocument((event) => {
+                if (event.contentChanges.length > 0) {
+                    changed(event.document.uri, Date.now());
+                }
+            }),
+            vscode.workspace.onDidSaveTextDocument((document) => {
+                changed(document.uri, Date.now());
+                this.saved(document);
+            }),
+        );
+    }
+
+    /** The last result of a script and whether it still holds. */
+    statusOf(script: vscode.Uri): ScriptStatus {
+        const key = pathKey(script.fsPath);
+        const entry = this.results.get(key)?.result;
+        if (this.running.has(key)) {
+            return { status: 'running', result: entry };
+        }
+        if (!entry) {
+            return { status: 'none' };
+        }
+        const changed = this.changedAt.get(pathKey(path.dirname(script.fsPath))) ?? 0;
+        // From the start of the run: an edit made while it ran is not in its result.
+        return { status: changed > entry.started ? 'stale' : 'current', result: entry };
+    }
+
+    private store(uri: vscode.Uri, result: StoredResult): void {
+        // A cancelled run says nothing about the chip: keep what was known.
+        if (result.kind !== 'cancelled') {
+            this.results.set(pathKey(uri.fsPath), { uri, result });
+            this.persist();
+        }
+    }
+
+    private setRunning(uri: vscode.Uri, delta: 1 | -1): void {
+        const key = pathKey(uri.fsPath);
+        const count = (this.running.get(key) ?? 0) + delta;
+        if (count > 0) {
+            this.running.set(key, count);
+        } else {
+            this.running.delete(key);
+        }
+        this.statusEmitter.fire(uri);
+    }
+
+    private persist(): void {
+        if (!this.state) {
+            return;
+        }
+        clearTimeout(this.persistTimer);
+        this.persistTimer = setTimeout(() => {
+            const saved: Record<string, StoredResult & { path: string }> = {};
+            for (const [key, { uri, result }] of this.results) {
+                saved[key] = { path: uri.fsPath, ...result, failures: result.failures.slice(0, 50), notes: result.notes.slice(0, 5) };
+            }
+            void this.state!.update(STORE_KEY, saved);
+        }, 1000);
+    }
+
+    /**
+     * Results of earlier sessions. A script that is gone is dropped; a folder
+     * whose engine files changed since is marked by their times.
+     */
+    private load(): void {
+        const saved = this.state?.get<Record<string, StoredResult & { path: string }>>(STORE_KEY);
+        if (!saved) {
+            return;
+        }
+        const folders = new Set<string>();
+        for (const [key, { path: file, ...result }] of Object.entries(saved)) {
+            if (!fs.existsSync(file)) {
+                continue;
+            }
+            this.results.set(key, { uri: vscode.Uri.file(file), result });
+            folders.add(path.dirname(file));
+        }
+        for (const folder of folders) {
+            let latest = 0;
+            try {
+                for (const name of fs.readdirSync(folder)) {
+                    if (ENGINE_FILE.test(name)) {
+                        latest = Math.max(latest, fs.statSync(path.join(folder, name)).mtimeMs);
+                    }
+                }
+            } catch {
+                // An unreadable folder: its results stay as they were.
+            }
+            const key = pathKey(folder);
+            this.changedAt.set(key, Math.max(latest, this.changedAt.get(key) ?? 0));
+        }
+        this.persist();
+    }
+
+    /**
+     * Whether a script repeats forever (a demonstration to watch, not a
+     * test). The engine says; the answer is kept per version of the script.
+     */
+    async runsForever(script: vscode.Uri): Promise<boolean> {
+        const open = vscode.workspace.textDocuments.find((d) => d.uri.scheme === 'file' && samePath(d.uri.fsPath, script.fsPath));
+        let version: string;
+        if (open?.isDirty) {
+            version = `text:${open.getText()}`;
+        } else {
+            try {
+                version = `mtime:${(await fs.promises.stat(script.fsPath)).mtimeMs}`;
+            } catch {
+                return false;
+            }
+        }
+        const key = `${pathKey(script.fsPath)}\n${version}`;
+        const known = this.foreverCache.get(key);
+        if (known !== undefined) {
+            return known;
+        }
+        let answer = false;
+        try {
+            if (open?.isDirty) {
+                await this.runtime.syncUnsaved();
+            }
+            const opened = await this.runtime.tryCall<TestOpened>({ op: 'test.open', path: script.fsPath });
+            if (!isError(opened)) {
+                this.runtime.close(opened.session);
+                answer = opened.runsForever;
+            }
+        } catch {
+            // Not known: treat it as a test, and its run will say what is wrong.
+        }
+        if (this.foreverCache.size > 1000) {
+            this.foreverCache.clear();
+        }
+        this.foreverCache.set(key, answer);
+        return answer;
+    }
+
+    // ----- Running the tests of a saved file -----
+
+    private saved(document: vscode.TextDocument): void {
+        if (document.uri.scheme !== 'file' || !ENGINE_FILE.test(document.fileName)) {
+            return;
+        }
+        if (!vscode.workspace.getConfiguration('nandwright').get<boolean>('test.runOnSave', true)) {
+            return;
+        }
+        const folder = pathKey(path.dirname(document.uri.fsPath));
+        const pending = this.saveTimers.get(folder);
+        clearTimeout(pending?.timer);
+        const saved = [...(pending?.saved ?? []).filter((uri) => !samePath(uri.fsPath, document.uri.fsPath)), document.uri];
+        const timer = setTimeout(() => {
+            this.saveTimers.delete(folder);
+            void this.runSaved(folder, saved);
+        }, SAVE_DELAY_MS);
+        this.saveTimers.set(folder, { timer, saved });
+    }
+
+    /**
+     * Runs the scripts that use the files saved. A newer save in the folder
+     * cancels the automatic run still going there; the new run takes over
+     * the scripts that one had not finished.
+     */
+    private runSaved(folder: string, saved: vscode.Uri[]): Promise<unknown> {
+        const previous = this.autoRuns.get(folder);
+        previous?.source.cancel();
+        const source = new vscode.CancellationTokenSource();
+        const pending = new Map<string, vscode.Uri>();
+        const entry = { source, pending, done: Promise.resolve() as Promise<unknown> };
+        this.autoRuns.set(folder, entry);
+        entry.done = (async () => {
+            for (const file of saved) {
+                for (const script of await scriptsUsing(file)) {
+                    pending.set(pathKey(script.fsPath), script);
+                }
+            }
+            if (previous) {
+                await previous.done;
+                previous.pending.forEach((uri, key) => pending.set(key, uri));
+            }
+            if (source.token.isCancellationRequested) {
+                return;
+            }
+            const tests: vscode.Uri[] = [];
+            for (const [key, script] of [...pending]) {
+                if (await this.runsForever(script)) {
+                    pending.delete(key);
+                } else {
+                    tests.push(script);
+                }
+            }
+            if (tests.length === 0 || source.token.isCancellationRequested) {
+                return;
+            }
+            const finished = this.onDidFinishScript((result) => {
+                if (result.outcome.kind !== 'cancelled') {
+                    pending.delete(pathKey(result.uri.fsPath));
+                }
+            });
+            try {
+                await this.runScripts(tests, { quiet: true, token: source.token });
+            } finally {
+                finished.dispose();
+            }
+        })()
+            .catch(() => {
+                // An automatic run that cannot start shows nothing; a manual run will say why.
+            })
+            .finally(() => {
+                source.dispose();
+                if (this.autoRuns.get(folder) === entry) {
+                    this.autoRuns.delete(folder);
+                }
+            });
+        return entry.done;
+    }
+
+    /** Settles when the automatic runs started by saves so far have finished, for tests. */
+    async savedRunsSettled(): Promise<void> {
+        for (;;) {
+            await new Promise((resolve) => setTimeout(resolve, SAVE_DELAY_MS + 50));
+            if (this.saveTimers.size === 0 && this.autoRuns.size === 0) {
+                return;
+            }
+            await Promise.all([...this.autoRuns.values()].map((run) => run.done));
+        }
     }
 
     /** Finds every script in the workspace. Safe to call repeatedly. */
@@ -187,10 +485,23 @@ export class TestExplorer implements vscode.Disposable {
         return scripts.sort((a, b) => a.id.localeCompare(b.id));
     }
 
-    /** Runs scripts and shows the results in the Testing view. */
-    async runScripts(uris: vscode.Uri[], token?: vscode.CancellationToken): Promise<ScriptResult[]> {
+    /**
+     * Runs scripts and shows the results in the Testing view. A quiet run
+     * opens no view and moves no focus: it is marked as an automatic
+     * (continuous) run, for which VS Code does not open the failure peek, and
+     * keeps focus, so the Test Results view does not open either. A run that
+     * is not quiet behaves like one started in the Testing view.
+     */
+    async runScripts(
+        uris: vscode.Uri[],
+        options: { quiet?: boolean; token?: vscode.CancellationToken } = {},
+    ): Promise<ScriptResult[]> {
         const items = uris.map((uri) => this.add(uri));
-        return this.run(new vscode.TestRunRequest(items), token ?? new vscode.CancellationTokenSource().token);
+        const request =
+            options.quiet === undefined
+                ? new vscode.TestRunRequest(items)
+                : new vscode.TestRunRequest(items, undefined, undefined, options.quiet, options.quiet);
+        return this.run(request, options.token ?? new vscode.CancellationTokenSource().token);
     }
 
     private async debug(request: vscode.TestRunRequest): Promise<void> {
@@ -212,7 +523,13 @@ export class TestExplorer implements vscode.Disposable {
                     run.skipped(item);
                     continue;
                 }
-                const result = await this.runOne(run, item, token);
+                this.setRunning(item.uri!, 1);
+                let result: ScriptResult;
+                try {
+                    result = await this.runOne(run, item, token);
+                } finally {
+                    this.setRunning(item.uri!, -1);
+                }
                 results.push(result);
                 this.resultEmitter.fire(result);
             }
@@ -236,14 +553,18 @@ export class TestExplorer implements vscode.Disposable {
         const say = (text: string) => run.appendOutput(`${text.replace(/\r?\n/g, '\r\n')}\r\n`, undefined, item);
         const started = Date.now();
         run.started(item);
+        const notes: string[] = [];
+        const remember = (kind: TestOutcome['kind'], details: Partial<StoredResult> = {}) =>
+            this.store(uri, { kind, comparedLines: 0, failureCount: 0, failures: [], notes, started, finished: Date.now(), ...details });
 
-        const errored = (message: string, range: Range | null): ScriptResult => {
+        const errored = (message: string, range: Range | null, kind: 'error' | 'limit' = 'error'): ScriptResult => {
             const testMessage = new vscode.TestMessage(message);
             if (range) {
                 testMessage.location = new vscode.Location(uri, toRange(range));
             }
             run.errored(item, testMessage, Date.now() - started);
             say(`✗ ${name}: ${message}`);
+            remember(kind, { message });
             return { uri, outcome: { kind: 'error', message, range: null }, failures: [], keysPressed: [] };
         };
 
@@ -265,12 +586,12 @@ export class TestExplorer implements vscode.Disposable {
                     'This script repeats forever by design (it has a `repeat` without a count), so it has no result to report. It is meant to be watched: use "Step Through the Script" to run it.';
                 run.skipped(item);
                 say(`- ${name}: skipped. ${reason}`);
+                remember('skipped', { message: reason });
                 return { uri, outcome: { kind: 'skipped', reason }, failures: [], keysPressed: [] };
             }
             const lines: string[] = [];
             const failures: TestFailure[] = [];
             const keysPressed: number[] = [];
-            const notes: string[] = [];
             const onEvents = (events: TestEvent[]) => {
                 for (const event of events) {
                     if (event.type === 'echo') {
@@ -304,6 +625,7 @@ export class TestExplorer implements vscode.Disposable {
             switch (outcome.kind) {
                 case 'passed': {
                     run.passed(item, duration);
+                    remember('passed', { comparedLines: outcome.comparedLines });
                     say(`✓ ${name}: comparison ended successfully (${outcome.comparedLines} lines compared)`);
                     if (outcome.unreachedLines > 0) {
                         say(
@@ -312,13 +634,22 @@ export class TestExplorer implements vscode.Disposable {
                     }
                     break;
                 }
-                case 'unchecked':
+                case 'unchecked': {
                     run.passed(item, duration);
-                    say(`✓ ${name}: the script ran to its end. It has no compare-to, so nothing was checked.`);
+                    const reason = 'the script ran to its end. It has no compare-to, so nothing was checked.';
+                    remember('unchecked', { message: reason });
+                    say(`✓ ${name}: ${reason}`);
                     break;
+                }
                 case 'failed': {
                     const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
                     run.failed(item, failureMessages(uri, failures, inspection, notes), duration);
+                    remember('failed', {
+                        // Every line the script wrote was compared, up to the end of the compare file.
+                        comparedLines: Math.min(lines.length, inspection.expected?.length ?? lines.length),
+                        failureCount: outcome.failureCount,
+                        failures: failures.map((failure) => ({ line: failure.line, actual: failure.actual })),
+                    });
                     say(`✗ ${name}: comparison failure at line ${outcome.line}`);
                     say(`    expected: ${outcome.expected ?? '(the compare file ended here)'}`);
                     say(`    actual:   ${outcome.actual ?? '(the script produced no more lines)'}`);
@@ -336,13 +667,16 @@ export class TestExplorer implements vscode.Disposable {
                             (outcome.echo ? ` Its last message was: "${outcome.echo}".` : '') +
                             ' A script that loops forever or waits for input is meant to be used interactively.',
                         null,
+                        'limit',
                     );
                 case 'cancelled':
                     run.skipped(item);
                     say(`- ${name}: cancelled`);
+                    remember('cancelled', { message: 'cancelled' });
                     break;
                 case 'skipped':
                     run.skipped(item);
+                    remember('skipped', { message: outcome.reason });
                     break;
             }
             return { uri, outcome, failures, keysPressed };
@@ -359,6 +693,9 @@ export class TestExplorer implements vscode.Disposable {
     }
 
     dispose(): void {
+        this.saveTimers.forEach(({ timer }) => clearTimeout(timer));
+        this.autoRuns.forEach(({ source }) => source.cancel());
+        clearTimeout(this.persistTimer);
         this.controller.dispose();
         this.disposables.forEach((d) => d.dispose());
     }
@@ -445,4 +782,61 @@ function failureMessages(
         messages.push(message);
     }
     return messages;
+}
+
+/** The text of a file as the student sees it: an open editor's, saved or not, else the disk's. */
+export async function textOf(file: string): Promise<string | null> {
+    const open = vscode.workspace.textDocuments.find((document) => document.uri.scheme === 'file' && samePath(document.uri.fsPath, file));
+    if (open) {
+        return open.getText();
+    }
+    try {
+        return await fs.promises.readFile(file, 'latin1');
+    } catch {
+        return null;
+    }
+}
+
+/** A script's text without comments: a command named only in a comment does not count. */
+export function withoutComments(text: string): string {
+    return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+}
+
+/** The files a script names in `load` and `compare-to` commands. */
+export function namedFiles(script: string): string[] {
+    return [...withoutComments(script).matchAll(/\b(?:load|compare-to)\s+([^\s,;]+)/g)].map((match) => match[1]);
+}
+
+/**
+ * The scripts in a file's folder that test it: the file itself if it is a
+ * script, scripts with the same name, and scripts that load it or compare
+ * with it. Names are compared as the folder's file system compares them.
+ */
+export async function scriptsUsing(file: vscode.Uri): Promise<vscode.Uri[]> {
+    const dir = path.dirname(file.fsPath);
+    const fold = ignoresCase(file.fsPath) ? (name: string) => name.toLowerCase() : (name: string) => name;
+    const savedName = fold(path.basename(file.fsPath));
+    const stem = (name: string) => name.replace(/\.[^.]*$/, '');
+    let names: string[];
+    try {
+        names = await fs.promises.readdir(dir);
+    } catch {
+        return [];
+    }
+    const found: vscode.Uri[] = [];
+    for (const name of names.sort()) {
+        if (!/\.tst$/i.test(name)) {
+            continue;
+        }
+        const script = path.join(dir, name);
+        let uses = fold(name) === savedName || stem(fold(name)) === stem(savedName);
+        if (!uses) {
+            const text = await textOf(script);
+            uses = text !== null && namedFiles(text).some((named) => fold(named) === savedName);
+        }
+        if (uses) {
+            found.push(vscode.Uri.file(script));
+        }
+    }
+    return found;
 }

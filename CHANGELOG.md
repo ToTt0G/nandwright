@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Tests run when you save: saving a chip, a program, a test script or a compare file runs
+  the test scripts in its folder that use it, quietly, in the Testing view. The setting
+  `nandwright.test.runOnSave` turns this off.
+
 ## 0.2.0
 
 - The chip simulator follows the editor: switch to another `.hdl` file and the simulator

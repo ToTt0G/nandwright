@@ -50,6 +50,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 - The `.out` file is written next to the script, as the official tools do.
 - Scripts that wait for a key (project 5's `Memory.tst`) get the key pressed for them, and
   the output says so.
+- Tests run when you save a file, quietly, in the Testing view.
 
 ![The Testing view listing test scripts with their results](docs/images/testing-view.png)
 

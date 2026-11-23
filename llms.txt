@@ -17,6 +17,7 @@ Key facts:
 - Results follow the official Java tools; deliberate differences are in docs/DEVIATIONS.md.
 - The simulators are a Rust engine compiled to WebAssembly and shipped inside the extension.
 - License: MPL-2.0.
+- Tests run when you save a file, quietly, in the Testing view.
 
 ## Docs
 

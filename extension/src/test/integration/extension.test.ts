@@ -67,6 +67,15 @@ async function removeFolder(folder: string): Promise<void> {
     }
 }
 
+/** A scratch folder inside the workspace holding copies of fixture files, given as `folder/name`. */
+function scratchCopy(prefix: string, files: string[]): string {
+    const folder = fs.mkdtempSync(path.join(workspace, prefix));
+    for (const name of files) {
+        fs.copyFileSync(file(...name.split('/')).fsPath, path.join(folder, path.basename(name)));
+    }
+    return folder;
+}
+
 async function closeAll(): Promise<void> {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
 }
@@ -346,6 +355,78 @@ describe('Nandwright', function () {
                 results.map((r) => [path.basename(r.uri.fsPath), r.outcome.kind]),
                 [['Parity4.tst', 'passed']],
             );
+        });
+    });
+
+    describe('tests on save', () => {
+        const majority = ['chips/Majority.hdl', 'chips/Majority.tst', 'chips/Majority.cmp'];
+        const statusOf = async (uri: vscode.Uri) => (await api()).tests.statusOf(uri);
+
+        it('runs the tests of a saved chip quietly, and an edit makes the result stale', async () => {
+            const folder = scratchCopy('on-save-', majority);
+            try {
+                const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const script = vscode.Uri.file(path.join(folder, 'Majority.tst'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                assert.equal((await statusOf(script)).status, 'none');
+                await replaceAll(editor, `${editor.document.getText()}\n// saved\n`);
+                assert.ok(await editor.document.save());
+                const status = await until('a current result', async () => {
+                    const found = await statusOf(script);
+                    return found.status === 'current' && found;
+                }, 30_000);
+                assert.equal(status.result?.kind, 'passed');
+                // Nine lines: the header and eight rows.
+                assert.equal(status.result?.comparedLines, 9);
+                assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath, chip.fsPath, 'the run took focus');
+                await replaceAll(editor, editor.document.getText().replace('// saved', '// edited'));
+                await until('the result to go stale', async () => (await statusOf(script)).status === 'stale');
+            } finally {
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('runs nothing when the setting is off', async () => {
+            const nandwright = await api();
+            const settings = vscode.workspace.getConfiguration('nandwright.test');
+            await settings.update('runOnSave', false, vscode.ConfigurationTarget.Global);
+            const folder = scratchCopy('on-save-off-', majority);
+            try {
+                const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                await replaceAll(editor, `${editor.document.getText()}\n// saved\n`);
+                assert.ok(await editor.document.save());
+                await nandwright.tests.savedRunsSettled();
+                assert.equal(nandwright.tests.statusOf(vscode.Uri.file(path.join(folder, 'Majority.tst'))).status, 'none');
+            } finally {
+                await settings.update('runOnSave', undefined, vscode.ConfigurationTarget.Global);
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('ends with one current result for the last of two quick saves', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('on-save-twice-', majority);
+            try {
+                const chip = vscode.Uri.file(path.join(folder, 'Majority.hdl'));
+                const script = vscode.Uri.file(path.join(folder, 'Majority.tst'));
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(chip), { preview: false });
+                const original = editor.document.getText();
+                await replaceAll(editor, original.replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
+                assert.ok(await editor.document.save());
+                await replaceAll(editor, original);
+                assert.ok(await editor.document.save());
+                await until('a current result', () => nandwright.tests.statusOf(script).status === 'current', 30_000);
+                await nandwright.tests.savedRunsSettled();
+                const status = nandwright.tests.statusOf(script);
+                assert.equal(status.status, 'current');
+                assert.equal(status.result?.kind, 'passed', JSON.stringify(status.result));
+            } finally {
+                await closeAll();
+                await removeFolder(folder);
+            }
         });
     });
 
