@@ -254,6 +254,8 @@ xvfb-run -a npm run test:integration   # the extension in a real VS Code (plain 
 npm run package                        # dist/nandwright-<version>.vsix
 ```
 
+On Windows, run them from a short path such as `C:\src\nandwright`: the copy of VS Code that the tests download lives inside the checkout, and it stops working when its path grows beyond 260 characters.
+
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how the pieces fit;
 [conformance/README.md](conformance/README.md) explains how to run the comparison with the
 Java tools (you need your own copy of the course files; they are not in this repository).
