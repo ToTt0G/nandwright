@@ -1,6 +1,13 @@
+# Source files are LF in the repository and in every checkout, so tests and
+# formatting checks behave the same on Windows, macOS and Linux.
 * text=auto eol=lf
-*.cmp text eol=lf
-*.expected text eol=lf
+
+# Fixtures are data: their exact bytes matter (some test CRLF, lone CR,
+# a byte order mark or Windows-1252 on purpose).
+tests/fixtures/** -text
+crates/*/tests/fixtures/** -text
+extension/media/example/** -text
+
 *.png binary
 *.gif binary
 *.wasm binary

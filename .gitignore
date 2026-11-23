@@ -12,3 +12,8 @@ out/
 dist-test/
 extension/dist/
 __pycache__/
+/dist/
+extension/README.md
+extension/CHANGELOG.md
+extension/LICENSE
+extension/NOTICE.md

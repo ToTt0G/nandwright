@@ -5,7 +5,6 @@
   "version": "0.1.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
-  "private": true,
   "icon": "media/icon.png",
   "galleryBanner": {
     "color": "#1f2430",
