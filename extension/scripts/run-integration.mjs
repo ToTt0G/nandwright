@@ -8,7 +8,7 @@
 
 import { downloadAndUnzipVSCode, resolveCliArgsFromVSCodeExecutablePath, runTests } from '@vscode/test-electron';
 import { spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +37,10 @@ await esbuild.build({
 
 // A fresh workspace with a space in its path, holding copies of the fixtures:
 // the tests write `.out` files and edit chips.
-const scratch = mkdtempSync(join(tmpdir(), 'nandwright it '));
+// (The temp folder is resolved to its real name: on Windows it may be given
+// in 8.3 form, `RUNNER~1`, which VS Code would spell differently.)
+const scratch = mkdtempSync(join(realpathSync.native(tmpdir()), 'nandwright it '));
+const report = join(scratch, 'report.txt');
 const workspace = join(scratch, 'My Projects', 'nand2tetris');
 mkdirSync(workspace, { recursive: true });
 cpSync(join(repo, 'tests', 'fixtures', 'chips'), join(workspace, 'chips'), { recursive: true });
@@ -88,13 +91,16 @@ try {
         extensionTestsEnv: {
             NANDWRIGHT_TEST_WORKSPACE: workspace,
             NANDWRIGHT_TEST_VSIX: vsix ? '1' : '',
-            NANDWRIGHT_SCREENSHOTS: process.env.NANDWRIGHT_SCREENSHOTS ?? '',
+            NANDWRIGHT_TEST_REPORT: report,
         },
     });
 } catch (error) {
     console.error(String(error?.message ?? error));
     code = 1;
 } finally {
+    if (existsSync(report)) {
+        console.log(`\nTest report:\n${readFileSync(report, 'utf8')}`);
+    }
     try {
         rmSync(scratch, { recursive: true, force: true });
     } catch {
