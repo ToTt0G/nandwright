@@ -8,7 +8,7 @@ Then find out why:
 
 - **Open in simulator** shows the chip beside its code. Flip the inputs and
   watch the outputs and internal pins. Small chips get a full truth table.
-  The panel follows your edits as you type.
+  The panel follows your edits as you type. It follows you to whichever chip you open next.
 - **Step through** runs the test script one step at a time with the
   debugger: Step Over runs to the next `;`, the Variables view shows the pins,
   and you can set breakpoints in the `.tst` file.

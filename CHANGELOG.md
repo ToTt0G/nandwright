@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- The chip simulator follows the editor: switch to another `.hdl` file and the simulator
+  shows that chip, without closing and reopening it. The setting
+  `nandwright.simulator.followEditor` turns this off.
+
 ## 0.1.0
 
 The first version.

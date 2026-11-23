@@ -302,6 +302,12 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             }
             current = message.state;
             table = message.table;
+        } else {
+            // The panel moved to another chip that has not loaded: the old
+            // chip's pins must not stay on screen under the new one's name.
+            current = null;
+            table = null;
+            previous = new Map();
         }
         render(message.problem);
     } else if (message.type === 'rejected') {

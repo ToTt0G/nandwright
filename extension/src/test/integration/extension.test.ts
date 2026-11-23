@@ -385,6 +385,110 @@ describe('Nandwright', function () {
             await until('the panel to recover', () => panel.snapshot().problem === null);
             panel.panel.dispose();
         });
+
+        describe('following the editor', () => {
+            const chipOf = (panel: { snapshot(): { state: { chip: string } | null } }) => panel.snapshot().state?.chip;
+
+            it('shows the chip of the .hdl editor and ignores other editors', async () => {
+                const nandwright = await api();
+                const a = file('chips', 'Majority.hdl');
+                const b = file('chips', 'Parity4.hdl');
+                const panel = await nandwright.chips.open(a);
+                await open('chips', 'Parity4.hdl');
+                await until('the panel to show Parity4', () => chipOf(panel) === 'Parity4', 20_000, () => `the panel showed ${chipOf(panel)}`);
+                await panel.settled();
+                assert.equal(panel.panel.title, 'Parity4 · simulator');
+                assert.equal(nandwright.chips.get(b), panel);
+                assert.equal(nandwright.chips.get(a), undefined);
+                assert.equal(panel.snapshot().problem, null);
+                await open('chips', 'Majority.tst');
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                await panel.settled();
+                assert.equal(chipOf(panel), 'Parity4');
+                assert.equal(nandwright.chips.get(b), panel);
+                panel.panel.dispose();
+                assert.equal(nandwright.chips.get(b), undefined);
+            });
+
+            it('survives quick switching and ends on a working session of the last chip', async () => {
+                const nandwright = await api();
+                const panel = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                for (const name of ['Parity4', 'Majority', 'Parity4']) {
+                    await open('chips', `${name}.hdl`);
+                }
+                await until('the panel to show Parity4', () => chipOf(panel) === 'Parity4', 20_000, () => `the panel showed ${chipOf(panel)}`);
+                await panel.settled();
+                assert.equal(chipOf(panel), 'Parity4');
+                assert.equal(nandwright.chips.get(file('chips', 'Parity4.hdl')), panel);
+                // One bit set is odd parity: only Parity4's own session can answer this.
+                await panel.simulate({ type: 'set', pin: 'in', value: 1 });
+                assert.equal(panel.snapshot().state?.pins.find((pin) => pin.name === 'out')?.bits, 1);
+                await panel.simulate({ type: 'set', pin: 'in', value: 3 });
+                assert.equal(panel.snapshot().state?.pins.find((pin) => pin.name === 'out')?.bits, 0);
+                assert.equal(panel.snapshot().problem, null);
+                panel.panel.dispose();
+            });
+
+            it('retargets the one panel when the simulator is opened on another chip', async () => {
+                const nandwright = await api();
+                const panel = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                const again = await nandwright.chips.open(file('chips', 'Parity4.hdl'));
+                assert.equal(again, panel);
+                assert.equal(chipOf(panel), 'Parity4');
+                assert.equal(nandwright.chips.get(file('chips', 'Majority.hdl')), undefined);
+                const back = (await vscode.commands.executeCommand('nandwright.openChip', file('chips', 'Majority.hdl'))) as typeof panel;
+                assert.equal(back, panel);
+                assert.equal(chipOf(panel), 'Majority');
+                panel.panel.dispose();
+            });
+
+            it('stays on its chip, one panel per chip, when the setting is off', async () => {
+                const nandwright = await api();
+                const settings = vscode.workspace.getConfiguration('nandwright.simulator');
+                await settings.update('followEditor', false, vscode.ConfigurationTarget.Global);
+                try {
+                    const first = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                    await open('chips', 'Parity4.hdl');
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                    await first.settled();
+                    assert.equal(chipOf(first), 'Majority');
+                    const second = await nandwright.chips.open(file('chips', 'Parity4.hdl'));
+                    assert.notEqual(second, first);
+                    assert.equal(chipOf(first), 'Majority');
+                    assert.equal(chipOf(second), 'Parity4');
+                    assert.equal(nandwright.chips.get(file('chips', 'Majority.hdl')), first);
+                    assert.equal(nandwright.chips.get(file('chips', 'Parity4.hdl')), second);
+                    first.panel.dispose();
+                    second.panel.dispose();
+                } finally {
+                    await settings.update('followEditor', undefined, vscode.ConfigurationTarget.Global);
+                }
+            });
+
+            it('leaves nothing behind when the panel is closed while it switches', async () => {
+                const nandwright = await api();
+                const rejections: unknown[] = [];
+                const onRejection = (reason: unknown) => rejections.push(reason);
+                process.on('unhandledRejection', onRejection);
+                try {
+                    for (let i = 0; i < 5; i++) {
+                        const panel = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                        await open('chips', 'Parity4.hdl');
+                        panel.panel.dispose();
+                        await panel.settled();
+                        await closeAll();
+                    }
+                    const panel = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                    assert.equal(chipOf(panel), 'Majority');
+                    await panel.simulate({ type: 'set', pin: 'a', value: 1 });
+                    panel.panel.dispose();
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                    assert.deepEqual(rejections, []);
+                } finally {
+                    process.off('unhandledRejection', onRejection);
+                }
+            });
+        });
     });
 
     describe('panels that are closed while they open', () => {

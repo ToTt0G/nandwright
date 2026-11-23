@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
 import { ChipState, EngineError, TruthTable, isError } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
+import { pathKey, samePath } from './paths';
 import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
@@ -18,23 +19,28 @@ class ChipPanel {
     private problem: string | null = null;
     private reloadTimer: NodeJS.Timeout | undefined;
     private disposed = false;
+    /** The chip shown. It changes when the panel follows the editor. */
+    private chip: vscode.Uri;
+    /** The chip the panel was last asked to show, until the queue gets to it. */
+    private wanted: vscode.Uri | undefined;
     private readonly disposables: vscode.Disposable[] = [];
     /** Requests are handled one at a time, in order. */
     private queue: Promise<void> = Promise.resolve();
 
     constructor(
-        readonly uri: vscode.Uri,
+        uri: vscode.Uri,
         readonly panel: vscode.WebviewPanel,
         private readonly runtime: Runtime,
         private readonly onDispose: () => void,
     ) {
+        this.chip = uri;
         panel.webview.onDidReceiveMessage((message: FromPanel) => this.enqueue(() => this.handle(message)), null, this.disposables);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
-        const dir = path.dirname(uri.fsPath);
+        // The folder is read each time: the chip shown can change.
         const inFolder = (document: vscode.TextDocument) =>
             document.uri.scheme === 'file' &&
             document.fileName.toLowerCase().endsWith('.hdl') &&
-            path.dirname(document.uri.fsPath) === dir;
+            pathKey(path.dirname(document.uri.fsPath)) === pathKey(path.dirname(this.chip.fsPath));
         this.disposables.push(
             vscode.workspace.onDidChangeTextDocument((event) => {
                 if (inFolder(event.document) && event.contentChanges.length > 0) {
@@ -47,6 +53,47 @@ class ChipPanel {
                 }
             }),
         );
+    }
+
+    /** The chip file shown now. */
+    get uri(): vscode.Uri {
+        return this.chip;
+    }
+
+    /** The chip file shown, or the one the panel is about to switch to. */
+    get target(): vscode.Uri {
+        return this.wanted ?? this.chip;
+    }
+
+    /**
+     * Asks the panel to show another chip. Requests made while one is
+     * loading are folded into the last: each queued job takes whatever is
+     * wanted when its turn comes, and finds nothing if an earlier job took it.
+     */
+    showChip(uri: vscode.Uri): Promise<void> {
+        this.wanted = uri;
+        this.enqueue(() => this.switchChip());
+        return this.queue;
+    }
+
+    private async switchChip(): Promise<void> {
+        const next = this.wanted;
+        this.wanted = undefined;
+        if (!next || samePath(next.fsPath, this.chip.fsPath)) {
+            return;
+        }
+        clearTimeout(this.reloadTimer);
+        if (this.session !== undefined) {
+            this.runtime.close(this.session);
+            this.session = undefined;
+        }
+        this.chip = next;
+        this.state = null;
+        this.table = null;
+        this.problem = null;
+        this.panel.title = `${path.basename(next.fsPath, path.extname(next.fsPath))} · simulator`;
+        this.post();
+        await this.reload();
     }
 
     private enqueue(work: () => Promise<void>): void {
@@ -106,7 +153,7 @@ class ChipPanel {
     private async reload(): Promise<void> {
         await this.runtime.syncUnsaved();
         if (this.session === undefined) {
-            const reply = await this.runtime.tryCall<ChipState>({ op: 'chip.open', path: this.uri.fsPath });
+            const reply = await this.runtime.tryCall<ChipState>({ op: 'chip.open', path: this.chip.fsPath });
             if (this.disposed) {
                 // The panel was closed while the chip was loading: the
                 // session that has just been made has no owner.
@@ -220,6 +267,7 @@ class ChipPanel {
             return;
         }
         this.disposed = true;
+        this.wanted = undefined;
         clearTimeout(this.reloadTimer);
         if (this.session !== undefined) {
             this.runtime.close(this.session);
@@ -230,18 +278,50 @@ class ChipPanel {
     }
 }
 
+/** Whether the simulator follows the chip being edited (read when it matters). */
+function followsEditor(): boolean {
+    return vscode.workspace.getConfiguration('nandwright.simulator').get<boolean>('followEditor', true);
+}
+
 export class ChipPanels implements vscode.Disposable {
-    private readonly panels = new Map<string, ChipPanel>();
+    // A set, not a map keyed by file: a panel can change chip.
+    private readonly panels = new Set<ChipPanel>();
+    private readonly subscription: vscode.Disposable;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly runtime: Runtime,
-    ) {}
+    ) {
+        this.subscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
+            // Anything but a chip file (a script, a built-in chip, the panel
+            // itself, which leaves no editor) leaves the panel as it is.
+            const uri = editor?.document.uri;
+            if (!uri || uri.scheme !== 'file' || !/\.hdl$/i.test(uri.fsPath) || !followsEditor()) {
+                return;
+            }
+            const panel = this.followed();
+            if (panel && !this.showing(uri)) {
+                void panel.showChip(uri);
+            }
+        });
+    }
+
+    /** The panel that follows the editor: the newest, if the setting was turned off and on. */
+    private followed(): ChipPanel | undefined {
+        return [...this.panels].pop();
+    }
+
+    private showing(uri: vscode.Uri): ChipPanel | undefined {
+        return [...this.panels].find((panel) => samePath(panel.target.fsPath, uri.fsPath));
+    }
 
     /** Opens (or reveals) the simulator for a chip file. */
     async open(uri: vscode.Uri): Promise<ChipPanel> {
-        const key = uri.toString();
-        const existing = this.panels.get(key);
+        let existing = this.showing(uri);
+        if (!existing && followsEditor()) {
+            existing = this.followed();
+            void existing?.showChip(uri);
+        }
         if (existing) {
             existing.panel.reveal(undefined, true);
             await existing.settled();
@@ -258,18 +338,20 @@ export class ChipPanels implements vscode.Disposable {
             },
         );
         panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'chip.js', `${name} simulator`, CHIP_STYLE);
-        const chip = new ChipPanel(uri, panel, this.runtime, () => this.panels.delete(key));
-        this.panels.set(key, chip);
+        const chip: ChipPanel = new ChipPanel(uri, panel, this.runtime, () => this.panels.delete(chip));
+        this.panels.add(chip);
         await chip.load();
         return chip;
     }
 
+    /** The panel showing this chip now. */
     get(uri: vscode.Uri): ChipPanel | undefined {
-        return this.panels.get(uri.toString());
+        return [...this.panels].find((panel) => samePath(panel.uri.fsPath, uri.fsPath));
     }
 
     dispose(): void {
-        for (const panel of [...this.panels.values()]) {
+        this.subscription.dispose();
+        for (const panel of [...this.panels]) {
             panel.panel.dispose();
         }
     }
