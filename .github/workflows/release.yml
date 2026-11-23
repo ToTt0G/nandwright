@@ -3,7 +3,8 @@ name: Release
 # Pushing a tag like v0.1.0 runs the whole CI workflow for that commit (the
 # engine and the extension on Linux, Windows and macOS) and, only if all of
 # it passes, attaches the VSIX those jobs built and tested to a GitHub
-# release. Publishing to the Marketplace is a separate, manual workflow.
+# release. It then starts the Publish workflow for the tag, which puts that
+# same VSIX on the Marketplace.
 
 on:
   push:
@@ -21,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # To start the Publish workflow.
+      actions: write
     steps:
       - uses: actions/checkout@v4
       - name: The tag matches the extension version
@@ -31,5 +34,11 @@ jobs:
           name: vsix
       - name: Create the release
         run: gh release create "$GITHUB_REF_NAME" "dist/nandwright-${GITHUB_REF_NAME#v}.vsix" --title "Nandwright ${GITHUB_REF_NAME#v}" --notes-file CHANGELOG.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+      # A separate workflow, because the Marketplace only accepts a publish
+      # from the workflow file its Trusted Publishing policy names.
+      - name: Start publishing to the Marketplace
+        run: gh workflow run publish.yml --ref main -f tag="$GITHUB_REF_NAME"
         env:
           GH_TOKEN: ${{ github.token }}

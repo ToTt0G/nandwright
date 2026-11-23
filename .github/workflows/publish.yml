@@ -1,14 +1,19 @@
 name: Publish
 
 # Publishes the VSIX of an existing GitHub release to the Visual Studio
-# Marketplace and to Open VSX. Run it by hand, once the release exists. The
-# release workflow only creates a release after the tests have passed on
-# Linux, Windows and macOS, so what is published is what was tested.
+# Marketplace and, if a token for it is set, to Open VSX. The release workflow
+# starts it once the release exists; it can also be run by hand for a tag. A
+# release is only created after the tests have passed on Linux, Windows and
+# macOS, so what is published is what was tested.
 #
-# Needs two repository secrets:
-#   VSCE_PAT  a Marketplace personal access token for the publisher in
-#             extension/package.json
-#   OVSX_PAT  an Open VSX access token (optional; that step is skipped without it)
+# The Marketplace needs no stored secret. The publisher in
+# extension/package.json has a Trusted Publishing policy that names this
+# repository and this file, publish.yml: renaming the file or moving the
+# publish step into another workflow breaks it until the policy is changed
+# to match.
+#
+# Open VSX is optional and needs one repository secret:
+#   OVSX_PAT  an Open VSX access token (that step is skipped without it)
 
 on:
   workflow_dispatch:
@@ -23,6 +28,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the job ask GitHub for the short-lived identity token that the
+      # Marketplace exchanges for permission to publish.
+      id-token: write
     env:
       TAG: ${{ inputs.tag }}
     steps:
@@ -43,9 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Publish to the Visual Studio Marketplace
-        run: extension/node_modules/.bin/vsce publish --packagePath "release/nandwright-${TAG#v}.vsix"
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: extension/node_modules/.bin/vsce publish --oidc --packagePath "release/nandwright-${TAG#v}.vsix"
       - name: Publish to Open VSX
         if: env.OVSX_PAT != ''
         run: npx --yes ovsx@1.4.0 publish "release/nandwright-${TAG#v}.vsix"
