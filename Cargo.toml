@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/ToTt0G/nandwright"
+
+[workspace.dependencies]
+n2t-core = { path = "crates/core" }
+n2t-lsp = { path = "crates/lsp" }
+n2t-simulator = { path = "crates/simulator" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"

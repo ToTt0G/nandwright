@@ -1,0 +1,10 @@
+target/
+node_modules/
+dist/
+out/
+*.vsix
+.vscode-test/
+*.out
+!tests/fixtures/**/*.out
+.DS_Store
+/private/
