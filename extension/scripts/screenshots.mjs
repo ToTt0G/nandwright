@@ -46,6 +46,7 @@ for (const name of ['Majority', 'Parity4', 'SwapBytes', 'Accumulator', 'Scratchp
 for (const ext of ['asm', 'tst', 'cmp']) {
     cpSync(join(repo, 'tests', 'fixtures', 'programs', `Countdown.${ext}`), join(workspace, `Countdown.${ext}`));
 }
+cpSync(join(repo, 'crates', 'hack', 'tests', 'fixtures', 'Diagonal.asm'), join(workspace, 'Diagonal.asm'));
 
 const userData = join(scratch, 'user');
 mkdirSync(join(userData, 'User'), { recursive: true });
@@ -110,6 +111,7 @@ const KEYS = {
     showExplorer: ['ctrl+alt+shift+e', 'workbench.view.explorer'],
     toggleSidebar: ['ctrl+alt+shift+b', 'workbench.action.toggleSidebarVisibility'],
     showDebug: ['ctrl+alt+shift+d', 'workbench.view.debug'],
+    runProgram: ['ctrl+alt+shift+r', 'nandwright.runProgram'],
     focusEditor: ['ctrl+alt+shift+f', 'workbench.action.focusFirstEditorGroup'],
     expandTests: ['ctrl+alt+shift+x', 'testing.expandAll'],
     suggest: ['ctrl+alt+shift+c', 'editor.action.triggerSuggest'],
@@ -287,6 +289,19 @@ const scenes = {
         await pause(1000);
     },
 
+    // A program on the Hack computer: screen, registers, memory.
+    async computer() {
+        await openFile('Diagonal.asm');
+        await command('runProgram');
+        await pause(3500);
+        const frame = await panelFrame('.screen canvas');
+        await frame.getByRole('button', { name: 'Run' }).click();
+        await pause(1500);
+        await frame.getByRole('button', { name: 'Pause' }).click();
+        await pause(1200);
+        await shot('hack-computer');
+    },
+
     // Diagnostics and hover while editing.
     async editing() {
         await openFile('Parity4.hdl');
@@ -307,18 +322,20 @@ const scenes = {
     },
 };
 
-/** The frame of the chip simulator webview. */
-async function chipFrame() {
+/** The frame of the webview panel that contains `selector`. */
+async function panelFrame(selector) {
     for (let attempt = 0; attempt < 40; attempt++) {
         for (const frame of page.frames()) {
-            if ((await frame.locator('#root header h1').count().catch(() => 0)) > 0) {
+            if ((await frame.locator(selector).count().catch(() => 0)) > 0) {
                 return frame;
             }
         }
         await pause(250);
     }
-    throw new Error('the chip simulator did not appear');
+    throw new Error(`no panel with ${selector} appeared`);
 }
+
+const chipFrame = () => panelFrame('#root .pins');
 
 let failed = false;
 try {

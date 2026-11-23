@@ -38,6 +38,14 @@ const builds = [
         entryPoints: ['src/webview/chip.ts'],
         outfile: 'dist/webview/chip.js',
     },
+    {
+        ...common,
+        platform: 'browser',
+        target: 'es2022',
+        format: 'iife',
+        entryPoints: ['src/webview/computer.ts'],
+        outfile: 'dist/webview/computer.js',
+    },
 ];
 
 if (process.argv.includes('--tests')) {

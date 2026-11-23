@@ -44,6 +44,9 @@ cpSync(join(repo, 'tests', 'fixtures', 'chips'), join(workspace, 'chips'), { rec
 cpSync(join(repo, 'tests', 'fixtures', 'runtime'), join(workspace, 'runtime'), { recursive: true });
 cpSync(join(repo, 'tests', 'fixtures', 'programs'), join(workspace, 'programs'), { recursive: true });
 cpSync(join(repo, 'crates', 'jack', 'tests', 'fixtures', 'Counter'), join(workspace, 'jack'), { recursive: true });
+for (const program of ['Diagonal.asm', 'KeyLog.asm']) {
+    cpSync(join(repo, 'crates', 'hack', 'tests', 'fixtures', program), join(workspace, 'programs', program));
+}
 
 const userData = join(scratch, 'user-data');
 const extensionsDir = join(scratch, 'extensions');

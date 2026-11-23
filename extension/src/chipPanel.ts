@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
 import { ChipState, EngineError, TruthTable, isError } from './runtime/protocol';
+import { panelHtml } from './panelHtml';
 import type { FromPanel, ToPanel } from './webview/chip';
 
 /** Typing pauses this long before the panel reloads the chip. */
@@ -235,7 +236,7 @@ export class ChipPanels implements vscode.Disposable {
                 localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview')],
             },
         );
-        panel.webview.html = this.html(panel.webview, name);
+        panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'chip.js', `${name} simulator`, CHIP_STYLE);
         const chip = new ChipPanel(uri, panel, this.runtime, () => this.panels.delete(key));
         this.panels.set(key, chip);
         await chip.reload();
@@ -246,30 +247,6 @@ export class ChipPanels implements vscode.Disposable {
         return this.panels.get(uri.toString());
     }
 
-    private html(webview: vscode.Webview, name: string): string {
-        const script = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'dist', 'webview', 'chip.js'));
-        const nonce = Array.from({ length: 32 }, () => Math.floor(Math.random() * 36).toString(36)).join('');
-        const csp = [
-            "default-src 'none'",
-            `style-src 'nonce-${nonce}'`,
-            `script-src 'nonce-${nonce}'`,
-        ].join('; ');
-        return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${name} simulator</title>
-<style nonce="${nonce}">${STYLE}</style>
-</head>
-<body>
-<main id="root"><p class="hint">Loading the chip…</p></main>
-<script nonce="${nonce}" src="${script}"></script>
-</body>
-</html>`;
-    }
-
     dispose(): void {
         for (const panel of [...this.panels.values()]) {
             panel.panel.dispose();
@@ -277,39 +254,11 @@ export class ChipPanels implements vscode.Disposable {
     }
 }
 
-// Everything is drawn with VS Code's own theme variables, so the panel is
-// right in light, dark and high-contrast themes without knowing which is on.
-const STYLE = `
-:root { --gap: 12px; --line: var(--vscode-widget-border, var(--vscode-contrastBorder, var(--vscode-panel-border, transparent))); }
-* { box-sizing: border-box; }
-body { margin: 0; padding: 0 20px 28px; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); line-height: 1.45; }
-main { max-width: 640px; }
-header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; padding: 18px 0 10px; }
-h1 { margin: 0; font-size: 1.5em; font-weight: 600; font-family: var(--vscode-editor-font-family); letter-spacing: -0.01em; }
-h2 { margin: 22px 0 6px; font-size: 0.8em; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--vscode-descriptionForeground); }
-.badge { padding: 1px 8px; border-radius: 10px; font-size: 0.85em; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); border: 1px solid var(--vscode-contrastBorder, transparent); }
-.time { margin-left: auto; font-family: var(--vscode-editor-font-family); color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.hint { margin: 2px 0 8px; color: var(--vscode-descriptionForeground); }
-.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-bottom: 4px; }
-.spacer { flex: 1 1 auto; }
-button { font: inherit; color: inherit; cursor: pointer; }
-button:focus-visible, input:focus-visible, tr:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.primary, .secondary { padding: 4px 12px; border-radius: 2px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); }
-.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
-.primary:hover { background: var(--vscode-button-hoverBackground); }
-.secondary { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
-.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
-.segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }
-.segmented button { padding: 3px 10px; border: 0; background: transparent; color: var(--vscode-descriptionForeground); }
-.segmented button + button { border-left: 1px solid var(--line); }
-.segmented button:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
-.segmented .selected { color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground)); background: var(--vscode-list-activeSelectionBackground); }
+const CHIP_STYLE = `
 .pins { border-top: 1px solid var(--line); }
 .pin { display: flex; align-items: center; min-height: 32px; gap: var(--gap); padding: 3px 4px; border-bottom: 1px solid var(--line); }
 .pin-name { flex: 0 0 34%; min-width: 0; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family); }
 .pin-width { margin-left: 2px; color: var(--vscode-descriptionForeground); }
-.value, .bus, .bit, .truth { font-family: var(--vscode-editor-font-family); font-variant-numeric: tabular-nums; }
-.value { white-space: pre-wrap; overflow-wrap: anywhere; }
 .bit { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, var(--vscode-descriptionForeground))); background: transparent; color: var(--vscode-foreground); }
 .bit.on { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-border, var(--vscode-contrastBorder, var(--vscode-button-background))); font-weight: 600; }
 button.bit:hover { border-color: var(--vscode-focusBorder); }
@@ -317,10 +266,6 @@ button.bit:hover { border-color: var(--vscode-focusBorder); }
 .bit.readonly.on { border-style: solid; }
 .bus-cell { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .bus { width: 100%; max-width: 260px; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent)); border-radius: 2px; }
-.rejected { color: var(--vscode-errorForeground); font-size: 0.9em; }
-.rejected:empty { display: none; }
-.problem { margin-top: 16px; padding: 10px 12px; border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); background: var(--vscode-inputValidation-errorBackground, transparent); border-radius: 3px; }
-.problem pre { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
 .truth { border-collapse: collapse; margin-top: 4px; }
 .truth th, .truth td { padding: 3px 14px; text-align: center; border-bottom: 1px solid var(--line); }
 .truth th { font-weight: 600; color: var(--vscode-descriptionForeground); }

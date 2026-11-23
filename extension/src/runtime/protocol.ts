@@ -4,11 +4,13 @@
 export type ToWorker =
     | { type: 'call'; id: number; request: Record<string, unknown> }
     | { type: 'runTest'; id: number; request: Record<string, unknown> }
+    | { type: 'runMachine'; id: number; request: MachineRunRequest }
     | { type: 'cancel'; id: number };
 
 export type FromWorker =
     | { type: 'reply'; id: number; reply: any }
     | { type: 'progress'; id: number; events: TestEvent[] }
+    | { type: 'frame'; id: number; state: MachineState }
     | { type: 'log'; line: string };
 
 export interface EngineError {
@@ -113,5 +115,38 @@ export interface TruthTable {
 }
 
 export function isError(reply: unknown): reply is EngineError {
-    return typeof reply === 'object' && reply !== null && 'error' in reply;
+    // A machine state has an `error` string of its own; an engine error is
+    // an object with a message.
+    const error = (reply as { error?: unknown } | null)?.error;
+    return typeof error === 'object' && error !== null && 'message' in error;
+}
+
+/** A running Hack computer (CPU emulator) or VM, as the panel shows it. */
+export interface MachineState {
+    session?: number;
+    kind: 'cpu' | 'vm';
+    /** `running` only while a run is in progress. */
+    status: 'running' | 'paused' | 'breakpoint' | 'error';
+    error: string | null;
+    registers: { name: string; value: number | null }[];
+    /** The instruction about to execute, disassembled. */
+    instruction: string;
+    steps: number;
+    programLength: number;
+    file: string | null;
+    /** Zero-based source line of the instruction about to execute. */
+    line: number | null;
+    key: number;
+    ram: { start: number; values: number[] } | null;
+    /** The 8192 screen words as hexadecimal, when the screen has changed. */
+    screen: string | null;
+}
+
+export interface MachineRunRequest {
+    kind: 'cpu' | 'vm';
+    session: number;
+    /** Instructions per second; 0 runs as fast as possible. */
+    speed: number;
+    breakLines: number[];
+    ram: [number, number];
 }

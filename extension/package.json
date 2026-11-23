@@ -237,8 +237,14 @@
         "icon": "$(circuit-board)"
       },
       {
+        "command": "nandwright.runProgram",
+        "title": "Run on the Hack Computer",
+        "category": "Nand2Tetris",
+        "icon": "$(vm-running)"
+      },
+      {
         "command": "nandwright.compareOutput",
-        "title": "Compare Output with Expected (.out ↔ .cmp)",
+        "title": "Compare Output with Expected (.out \u2194 .cmp)",
         "category": "Nand2Tetris",
         "icon": "$(diff)"
       },
@@ -259,6 +265,11 @@
           "command": "nandwright.debugTest",
           "when": "resourceLangId == hdl || resourceLangId == tst",
           "group": "navigation@2"
+        },
+        {
+          "command": "nandwright.runProgram",
+          "when": "resourceLangId == hack-asm || resourceLangId == hack",
+          "group": "navigation@1"
         }
       ],
       "editor/title": [
@@ -283,6 +294,11 @@
           "command": "nandwright.openChip",
           "when": "resourceExtname == .hdl",
           "group": "nandwright@2"
+        },
+        {
+          "command": "nandwright.runProgram",
+          "when": "resourceExtname == .asm || resourceExtname == .hack",
+          "group": "nandwright@3"
         }
       ],
       "commandPalette": [
@@ -301,6 +317,10 @@
         {
           "command": "nandwright.compareOutput",
           "when": "editorLangId == cmp || editorLangId == tst || editorLangId == hdl"
+        },
+        {
+          "command": "nandwright.runProgram",
+          "when": "editorLangId == hack-asm || editorLangId == hack"
         }
       ]
     },
@@ -310,11 +330,23 @@
         "key": "ctrl+alt+t",
         "mac": "cmd+alt+t",
         "when": "editorLangId == hdl || editorLangId == tst"
+      },
+      {
+        "command": "nandwright.runProgram",
+        "key": "ctrl+alt+t",
+        "mac": "cmd+alt+t",
+        "when": "editorLangId == hack-asm || editorLangId == hack"
       }
     ],
     "breakpoints": [
       {
         "language": "tst"
+      },
+      {
+        "language": "hack-asm"
+      },
+      {
+        "language": "hack"
       }
     ],
     "debuggers": [

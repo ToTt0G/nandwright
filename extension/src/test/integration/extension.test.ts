@@ -379,6 +379,65 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('Hack computer', () => {
+        it('steps, runs, draws on the screen, pauses and resets', async () => {
+            const nandwright = await api();
+            const computer = await nandwright.computers.open(file('programs', 'Diagonal.asm'));
+            const register = (name: string) => computer.snapshot().state?.registers.find((r) => r.name === name)?.value;
+            assert.equal(computer.snapshot().problem, null);
+            assert.equal(register('PC'), 0);
+            await computer.simulate({ type: 'step' });
+            assert.equal(register('PC'), 1);
+            assert.equal(computer.snapshot().state?.steps, 1);
+            await computer.simulate({ type: 'run' });
+            assert.equal(computer.snapshot().running, true);
+            await until('the program to draw', () => /[1-9a-f]/.test(computer.snapshot().state?.screen ?? ''));
+            await computer.simulate({ type: 'pause' });
+            assert.equal(computer.snapshot().running, false);
+            assert.ok((computer.snapshot().state?.steps ?? 0) > 100);
+            await computer.simulate({ type: 'reset' });
+            assert.equal(register('PC'), 0);
+            assert.equal(computer.snapshot().state?.steps, 0);
+            computer.panel.dispose();
+        });
+
+        it('stops at a breakpoint set in the editor and shows memory', async () => {
+            const nandwright = await api();
+            const uri = file('programs', 'Countdown.asm');
+            const document = await vscode.workspace.openTextDocument(uri);
+            const done = document.getText().split(/\r?\n/).findIndex((line) => line.trim() === '(DONE)');
+            vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(done, 0)))]);
+            try {
+                const computer = await nandwright.computers.open(uri);
+                await computer.simulate({ type: 'set', target: 'RAM', address: 0, value: '3' });
+                await computer.simulate({ type: 'memory', start: 100 });
+                await computer.simulate({ type: 'run' });
+                await until('the breakpoint', () => computer.snapshot().state?.status === 'breakpoint');
+                const { state, running } = computer.snapshot();
+                assert.equal(running, false);
+                assert.equal(state?.line, done + 1);
+                assert.deepEqual(state?.ram?.values.slice(0, 3), [3, 2, 1]);
+                computer.panel.dispose();
+            } finally {
+                vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+            }
+        });
+
+        it('feeds the keyboard and explains a program that goes wrong', async () => {
+            const nandwright = await api();
+            const computer = await nandwright.computers.open(file('programs', 'KeyLog.asm'));
+            await computer.simulate({ type: 'memory', start: 24561 });
+            await computer.simulate({ type: 'key', code: 75 });
+            await computer.simulate({ type: 'memory', start: 24561 });
+            assert.equal(computer.snapshot().state?.ram?.values[15], 75);
+            assert.equal(computer.snapshot().state?.key, 75);
+            // A wrong value is refused without disturbing the program.
+            await computer.simulate({ type: 'set', target: 'RAM', address: 0, value: '99999' });
+            assert.equal(computer.snapshot().problem, null);
+            computer.panel.dispose();
+        });
+    });
+
     describe('stepping through a script', () => {
         it('stops on entry, steps, shows the pins and runs to the end', async function () {
             this.timeout(90_000);

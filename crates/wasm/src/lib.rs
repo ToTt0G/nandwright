@@ -13,12 +13,14 @@
 //! | `overlay.set`, `overlay.clear` | unsaved editor buffers that shadow files |
 //! | `test.open`, `test.run`, `test.step`, `test.inspect` | a `.tst` script run |
 //! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.reset`, `chip.state` | an interactive chip |
+//! | `cpu.open`, `cpu.run`, `cpu.step`, `cpu.reset`, `cpu.restart`, `cpu.set`, `cpu.state` | a Hack computer running a program |
 //! | `key` | presses a key on a session's keyboard |
 //! | `close` | ends a session |
 
 #[cfg(target_arch = "wasm32")]
 pub mod abi;
 mod chip;
+mod computer;
 mod overlay;
 mod test;
 
@@ -31,6 +33,7 @@ use n2t_lsp::JsonServer;
 use serde_json::{Value, json};
 
 use crate::chip::ChipSession;
+use crate::computer::ComputerSession;
 use crate::overlay::OverlayHost;
 use crate::test::TestSession;
 
@@ -41,6 +44,7 @@ pub(crate) type Reply = Result<Value, Failure>;
 enum Session {
     Test(Box<TestSession>),
     Chip(Box<ChipSession>),
+    Computer(Box<ComputerSession>),
 }
 
 pub struct Engine {
@@ -108,6 +112,12 @@ impl Engine {
                 reply["session"] = json!(self.add(Session::Chip(Box::new(session))));
                 Ok(reply)
             }
+            "cpu.open" => {
+                let mut session = ComputerSession::open(&self.host, request)?;
+                let mut reply = session.state("paused", request);
+                reply["session"] = json!(self.add(Session::Computer(Box::new(session))));
+                Ok(reply)
+            }
             "close" => {
                 self.sessions
                     .remove(&request["session"].as_u64().unwrap_or(0));
@@ -124,6 +134,7 @@ impl Engine {
                 match session {
                     Session::Test(test) => test.call(op, request),
                     Session::Chip(chip) => chip.call(op, request),
+                    Session::Computer(computer) => computer.call(op, request),
                 }
             }
         }

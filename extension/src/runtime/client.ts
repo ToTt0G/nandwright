@@ -6,6 +6,8 @@ import * as vscode from 'vscode';
 import {
     EngineError,
     FromWorker,
+    MachineRunRequest,
+    MachineState,
     TestEvent,
     TestStatus,
     ToWorker,
@@ -18,6 +20,7 @@ export class RuntimeError extends Error {}
 interface Pending {
     resolve(reply: any): void;
     onEvents?: (events: TestEvent[]) => void;
+    onFrame?: (state: MachineState) => void;
 }
 
 /** File types whose unsaved text the engine should see. */
@@ -43,6 +46,8 @@ export class Runtime implements vscode.Disposable {
                 this.output.appendLine(message.line);
             } else if (message.type === 'progress') {
                 this.pending.get(message.id)?.onEvents?.(message.events);
+            } else if (message.type === 'frame') {
+                this.pending.get(message.id)?.onFrame?.(message.state);
             } else {
                 const pending = this.pending.get(message.id);
                 this.pending.delete(message.id);
@@ -69,9 +74,13 @@ export class Runtime implements vscode.Disposable {
         return worker;
     }
 
-    private send(message: ToWorker, onEvents?: (events: TestEvent[]) => void): Promise<any> {
+    private send(
+        message: ToWorker,
+        onEvents?: (events: TestEvent[]) => void,
+        onFrame?: (state: MachineState) => void,
+    ): Promise<any> {
         return new Promise((resolve) => {
-            this.pending.set(message.id, { resolve, onEvents });
+            this.pending.set(message.id, { resolve, onEvents, onFrame });
             this.ensure().postMessage(message);
         });
     }
@@ -116,6 +125,22 @@ export class Runtime implements vscode.Disposable {
         } finally {
             subscription?.dispose();
         }
+    }
+
+    /**
+     * Runs a program until it stops by itself or `stop()` is called. Frames
+     * arrive through `onFrame`; the promise resolves with the final state.
+     */
+    runMachine(
+        request: MachineRunRequest,
+        onFrame: (state: MachineState) => void,
+    ): { done: Promise<MachineState | EngineError>; stop(): void } {
+        const id = this.nextId++;
+        const done = this.send({ type: 'runMachine', id, request }, undefined, onFrame);
+        return {
+            done,
+            stop: () => this.worker?.postMessage({ type: 'cancel', id } satisfies ToWorker),
+        };
     }
 
     /**

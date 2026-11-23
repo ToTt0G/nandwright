@@ -426,6 +426,164 @@ fn the_next_command_after_a_loop_is_the_one_after_it() {
 }
 
 #[test]
+fn a_program_runs_on_the_hack_computer() {
+    let (mut engine, host) = engine();
+    for file in ["Countdown.asm", "Diagonal.asm", "KeyLog.asm"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../hack/tests/fixtures")
+            .join(file);
+        host.insert(&format!("{DIR}/{file}"), std::fs::read(path).unwrap());
+    }
+    let ram = |state: &Value, address: u64| {
+        let start = state["ram"]["start"].as_u64().unwrap();
+        state["ram"]["values"][(address - start) as usize]
+            .as_u64()
+            .unwrap()
+    };
+    let register = |state: &Value, name: &str| {
+        state["registers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap()["value"]
+            .clone()
+    };
+
+    let opened = call(
+        &mut engine,
+        json!({"op": "cpu.open", "path": format!("{DIR}/Countdown.asm")}),
+    );
+    let session = &opened["session"];
+    assert_eq!(opened["kind"], "cpu");
+    assert_eq!(
+        opened["line"], 2,
+        "the first instruction is on the third line"
+    );
+    assert_eq!(opened["instruction"], "@100");
+    call(
+        &mut engine,
+        json!({"op": "cpu.set", "session": session, "target": "RAM", "address": 0, "value": 3}),
+    );
+    // One instruction at a time.
+    let state = call(&mut engine, json!({"op": "cpu.step", "session": session}));
+    assert_eq!(register(&state, "A"), 100);
+    assert_eq!(register(&state, "PC"), 1);
+    assert_eq!(state["instruction"], "D=A");
+    // Run to a breakpoint on the line of `(DONE)`: the next instruction after it.
+    let source = String::from_utf8(host.get(&format!("{DIR}/Countdown.asm")).unwrap()).unwrap();
+    let done_line = source.lines().position(|l| l.trim() == "(DONE)").unwrap();
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.run", "session": session, "budget": 100000, "breakLines": [done_line], "ram": [100, 4]}),
+    );
+    assert_eq!(state["status"], "breakpoint", "{state}");
+    assert_eq!(state["line"].as_u64().unwrap() as usize, done_line + 1);
+    assert_eq!(
+        [ram(&state, 100), ram(&state, 101), ram(&state, 102)],
+        [3, 2, 1]
+    );
+    // An endless loop just uses up the budget.
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.run", "session": session, "budget": 1000, "ram": [0, 2]}),
+    );
+    assert_eq!(state["status"], "running");
+    assert_eq!(ram(&state, 1), 3);
+    // Reset reloads the program and clears memory.
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.reset", "session": session, "ram": [0, 2]}),
+    );
+    assert_eq!(register(&state, "PC"), 0);
+    assert_eq!(ram(&state, 1), 0);
+
+    // The screen is sent once, then only when it changes.
+    let drawing = call(
+        &mut engine,
+        json!({"op": "cpu.open", "path": format!("{DIR}/Diagonal.asm"), "screen": true}),
+    );
+    let blank = drawing["screen"].as_str().unwrap();
+    assert_eq!(blank.len(), 8192 * 4);
+    assert!(blank.bytes().all(|b| b == b'0'));
+    let session = &drawing["session"];
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.run", "session": session, "budget": 200000, "screen": true}),
+    );
+    let drawn = state["screen"].as_str().unwrap();
+    assert!(drawn.bytes().any(|b| b != b'0'), "the program drew nothing");
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.state", "session": session, "screen": true}),
+    );
+    assert!(
+        state["screen"].is_null(),
+        "an unchanged screen is not sent again"
+    );
+
+    // The keyboard is memory-mapped at 24576.
+    let keys = call(
+        &mut engine,
+        json!({"op": "cpu.open", "path": format!("{DIR}/KeyLog.asm")}),
+    );
+    call(
+        &mut engine,
+        json!({"op": "key", "session": keys["session"], "code": 75}),
+    );
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.state", "session": keys["session"], "ram": [24576, 1]}),
+    );
+    assert_eq!(ram(&state, 24576), 75);
+    assert_eq!(state["key"], 75);
+}
+
+#[test]
+fn a_program_that_goes_wrong_stops_with_an_explanation() {
+    let (mut engine, host) = engine();
+    host.insert(&format!("{DIR}/Wild.asm"), "@30000\nM=1\n");
+    host.insert(&format!("{DIR}/Typo.asm"), "@1\nD=Q\n");
+    let opened = call(
+        &mut engine,
+        json!({"op": "cpu.open", "path": format!("{DIR}/Wild.asm")}),
+    );
+    let state = call(
+        &mut engine,
+        json!({"op": "cpu.run", "session": opened["session"], "budget": 10}),
+    );
+    assert_eq!(state["status"], "error");
+    assert!(
+        state["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a RAM address"),
+        "{state}"
+    );
+    let again = call(
+        &mut engine,
+        json!({"op": "cpu.run", "session": opened["session"], "budget": 10}),
+    );
+    assert!(
+        again["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Reset the program")
+    );
+    let typo = call(
+        &mut engine,
+        json!({"op": "cpu.open", "path": format!("{DIR}/Typo.asm")}),
+    );
+    assert!(
+        typo["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Typo.asm:2"),
+        "{typo}"
+    );
+}
+
+#[test]
 fn a_chip_with_errors_explains_itself() {
     let (mut engine, host) = engine();
     host.insert(

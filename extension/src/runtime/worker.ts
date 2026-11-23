@@ -8,7 +8,7 @@
 import * as path from 'node:path';
 import { parentPort } from 'node:worker_threads';
 import { EngineCrash, WasmEngine } from '../engine/wasm';
-import type { FromWorker, ToWorker } from './protocol';
+import type { FromWorker, MachineRunRequest, ToWorker } from './protocol';
 
 const wasmPath = path.join(__dirname, 'engine.wasm');
 const port = parentPort!;
@@ -78,6 +78,62 @@ async function runTest(id: number, request: Record<string, unknown>): Promise<an
     }
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** The panel is redrawn at most this often while a program runs. */
+const FRAME_MS = 33;
+
+/**
+ * Runs a program until it is paused (cancelled), reaches a breakpoint or
+ * fails, posting a frame for the panel about thirty times a second.
+ */
+async function runMachine(id: number, request: MachineRunRequest): Promise<any> {
+    const base = { session: request.session, breakLines: request.breakLines, ram: request.ram };
+    let budget = 50_000;
+    let owed = 0;
+    let last = performance.now();
+    let lastFrame = 0;
+    for (;;) {
+        if (cancelled.delete(id)) {
+            return call({ ...base, op: `${request.kind}.state`, screen: true });
+        }
+        const now = performance.now();
+        if (request.speed > 0) {
+            // Paced: run the instructions that are due since the last slice.
+            owed += (request.speed * (now - last)) / 1000;
+            budget = Math.floor(owed);
+            owed -= budget;
+        }
+        last = now;
+        const frameDue = now - lastFrame >= FRAME_MS;
+        if (budget > 0) {
+            const started = performance.now();
+            const state = call({ ...base, op: `${request.kind}.run`, budget, screen: frameDue });
+            if (state.error?.message) {
+                return state;
+            }
+            if (state.status !== 'running') {
+                // Stopped: send the final picture with it.
+                const final = call({ ...base, op: `${request.kind}.state`, screen: true });
+                return { ...final, status: state.status, screen: final.screen ?? state.screen };
+            }
+            if (frameDue) {
+                lastFrame = now;
+                post({ type: 'frame', id, state });
+            }
+            if (request.speed === 0) {
+                const elapsed = Math.max(performance.now() - started, 0.05);
+                budget = Math.round(Math.min(Math.max((budget * 12) / elapsed, 1000), 50_000_000));
+            }
+        }
+        if (request.speed === 0) {
+            await yieldToEvents();
+        } else {
+            await sleep(request.speed < 100 ? 15 : 4);
+        }
+    }
+}
+
 port.on('message', (message: ToWorker) => {
     switch (message.type) {
         case 'cancel':
@@ -85,6 +141,17 @@ port.on('message', (message: ToWorker) => {
             break;
         case 'call':
             post({ type: 'reply', id: message.id, reply: call(message.request) });
+            break;
+        case 'runMachine':
+            runMachine(message.id, message.request).then(
+                (reply) => post({ type: 'reply', id: message.id, reply }),
+                (error) =>
+                    post({
+                        type: 'reply',
+                        id: message.id,
+                        reply: { error: { message: String(error?.message ?? error) } },
+                    }),
+            );
             break;
         case 'runTest':
             runTest(message.id, message.request).then(

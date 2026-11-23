@@ -9,6 +9,7 @@ import {
     TransportKind,
 } from 'vscode-languageclient/node';
 import { ChipPanels } from './chipPanel';
+import { ComputerPanels } from './computerPanel';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
 import { ScriptResult, TestExplorer } from './testing';
@@ -20,6 +21,7 @@ const BUILTIN_SCHEME = 'n2t-builtin';
 export interface NandwrightApi {
     tests: TestExplorer;
     chips: ChipPanels;
+    computers: ComputerPanels;
     runtime: Runtime;
     client: LanguageClient;
 }
@@ -234,8 +236,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     registerBuiltinDocuments(context, client);
     const tests = new TestExplorer(runtime, debugScript);
     const chips = new ChipPanels(context.extensionUri, runtime);
+    const computers = new ComputerPanels(context.extensionUri, runtime);
     registerDebugger(context, runtime);
-    context.subscriptions.push(runtime, tests, chips);
+    context.subscriptions.push(runtime, tests, chips, computers);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('nandwright.runTest', async (argument?: unknown) => {
@@ -263,6 +266,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                 return undefined;
             }
             return chips.open(uri);
+        }),
+        vscode.commands.registerCommand('nandwright.runProgram', async (argument?: unknown) => {
+            const uri = targetUri(argument);
+            if (!uri || !/\.(asm|hack)$/i.test(uri.fsPath)) {
+                void vscode.window.showInformationMessage(
+                    'Open a Hack assembly program (.asm) or machine code (.hack) to run it on the Hack computer.',
+                );
+                return undefined;
+            }
+            return computers.open(uri);
         }),
         vscode.commands.registerCommand('nandwright.compareOutput', async (argument?: unknown) => {
             const uri = targetUri(argument);
@@ -347,7 +360,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         void vscode.commands.executeCommand('nandwright.getStarted');
     }
 
-    return { tests, chips, runtime, client };
+    return { tests, chips, computers, runtime, client };
 }
 
 export function deactivate(): void {}

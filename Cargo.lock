@@ -363,6 +363,7 @@ name = "n2t-wasm"
 version = "0.1.0"
 dependencies = [
  "n2t-core",
+ "n2t-hack",
  "n2t-lsp",
  "n2t-simulator",
  "serde_json",
