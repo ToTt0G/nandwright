@@ -51,6 +51,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 - Scripts that wait for a key (project 5's `Memory.tst`) get the key pressed for them, and
   the output says so.
 - Tests run when you save a file, quietly, in the Testing view.
+- The status bar shows how many of the folder's tests pass; click it for the list of what is passing, failing, not run or not started.
 
 ![The Testing view listing test scripts with their results](docs/images/testing-view.png)
 

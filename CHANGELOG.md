@@ -8,6 +8,8 @@
 - The chip simulator shows the last test run: each row of the expected output is marked
   as matching, differing (with what your chip gave) or not reached, and a Run test button
   runs the chip's test from the panel.
+- Project progress in the status bar: how many of the folder's tests pass, with a list of
+  what is passing, failing, not run or not started.
 
 ## 0.2.0
 

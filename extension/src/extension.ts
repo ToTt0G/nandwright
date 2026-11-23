@@ -11,6 +11,7 @@ import {
 import { ChipPanels } from './chipPanel';
 import { ComputerPanels } from './computerPanel';
 import { Outputs } from './outputs';
+import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
 import { ScriptResult, TestExplorer } from './testing';
@@ -24,6 +25,7 @@ export interface NandwrightApi {
     chips: ChipPanels;
     computers: ComputerPanels;
     outputs: Outputs;
+    progress: Progress;
     runtime: Runtime;
     client: LanguageClient;
 }
@@ -240,8 +242,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const chips = new ChipPanels(context.extensionUri, runtime, tests);
     const computers = new ComputerPanels(context.extensionUri, runtime);
     const outputs = new Outputs(runtime);
+    const progress = new Progress(tests);
     registerDebugger(context, runtime);
-    context.subscriptions.push(runtime, tests, chips, computers, outputs);
+    context.subscriptions.push(runtime, tests, chips, computers, outputs, progress);
 
     context.subscriptions.push(
         vscode.commands.registerCommand('nandwright.runTest', async (argument?: unknown) => {
@@ -389,7 +392,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         void vscode.commands.executeCommand('nandwright.getStarted');
     }
 
-    return { tests, chips, computers, outputs, runtime, client };
+    return { tests, chips, computers, outputs, progress, runtime, client };
 }
 
 export function deactivate(): void {}

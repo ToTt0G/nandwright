@@ -437,6 +437,61 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('project progress', () => {
+        it('counts the tests of the folder in the status bar and lists how each stands', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('progress-', [
+                ...['Majority', 'Parity4'].flatMap((name) => ['hdl', 'tst', 'cmp'].map((ext) => `chips/${name}.${ext}`)),
+                'runtime/Stub.hdl',
+                'runtime/Stub.tst',
+                'runtime/Stub.cmp',
+                'runtime/InfiniteLoop.tst',
+            ]);
+            try {
+                // A deliberately broken copy: Or where an And belongs.
+                const majority = path.join(folder, 'Majority.hdl');
+                fs.writeFileSync(majority, fs.readFileSync(majority, 'utf8').replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
+                await vscode.window.showTextDocument(vscode.Uri.file(path.join(folder, 'Parity4.hdl')), { preview: false });
+                await until('the item for the folder', () => nandwright.progress.shown.visible && nandwright.progress.shown.folder === folder);
+                await nandwright.progress.runAll(folder);
+                await nandwright.progress.update();
+                const progress = await nandwright.progress.of(folder);
+                // InfiniteLoop.tst repeats forever: a demonstration, not counted.
+                assert.deepEqual([progress.passed, progress.failed, progress.notRun, progress.total], [1, 2, 0, 3]);
+                const expectedText = '$(beaker) 1 of 3 pass';
+                await until('the item to show the results', () => nandwright.progress.shown.text === expectedText, 20_000, () => nandwright.progress.shown.text);
+                assert.equal(
+                    nandwright.progress.shown.tooltip,
+                    `Nand2Tetris tests in ${path.basename(folder)}: 1 passing, 2 failing, 0 not run. Click for the list.`,
+                );
+                assert.deepEqual(
+                    progress.entries.map((entry) => [entry.label, entry.description]),
+                    [
+                        ['$(error) Majority', '2 of 8 rows differ'],
+                        ['$(dash) Stub', 'not started: the chip has no parts yet'],
+                        ['$(pass) Parity4', 'passes'],
+                        ['$(eye) InfiniteLoop', 'a demonstration to watch, not a test'],
+                    ],
+                );
+                await nandwright.progress.open(progress.entries[0]);
+                assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath, majority);
+                // A script without a chip of its own in the folder opens itself.
+                assert.equal(progress.entries[3].target.fsPath, path.join(folder, 'InfiniteLoop.tst'));
+                // An edit: that folder's results no longer count.
+                const editor = vscode.window.activeTextEditor!;
+                await replaceAll(editor, `${editor.document.getText()}\n`);
+                await until('the results to go stale', () => nandwright.progress.shown.text === '$(beaker) 0 of 3 pass', 20_000, () => nandwright.progress.shown.text);
+                // A file elsewhere, without tests beside it, hides the item.
+                await vscode.window.showTextDocument(file('jack', 'Main.jack'), { preview: false });
+                await until('the item to hide', () => !nandwright.progress.shown.visible);
+            } finally {
+                await discardEdits();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+    });
+
     describe('simulator panel', () => {
         it('shows a chip, takes inputs and builds the truth table', async () => {
             const nandwright = await api();

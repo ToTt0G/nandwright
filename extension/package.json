@@ -294,6 +294,11 @@
         "command": "nandwright.getStarted",
         "title": "Get Started",
         "category": "Nand2Tetris"
+      },
+      {
+        "command": "nandwright.showProgress",
+        "title": "Show Project Progress",
+        "category": "Nand2Tetris"
       }
     ],
     "menus": {
