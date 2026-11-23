@@ -1,0 +1,4 @@
+push constant 29
+push constant 70
+add
+pop temp 0

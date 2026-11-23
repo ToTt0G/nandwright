@@ -1,0 +1,15 @@
+single
+steps 1
+set line 1
+set sp 255
+set temp[8] 46
+set local 255
+set local[0] 71
+set that 24576
+set that[0] 91
+set RAM[2000] 65535
+ram 0 5
+ram 13 14
+ram 255 256
+ram 2000 2001
+ram 24576 24577

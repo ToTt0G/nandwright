@@ -1,0 +1,6 @@
+single
+steps 1
+ram 0 1
+ram 13 14
+ram 256 257
+fault

@@ -1,0 +1,35 @@
+java End of script
+java-dialog OK DIALOG:Program Halted: String is full
+ram 2050 3
+ram 2051 3
+ram 2052 49
+ram 2053 50
+ram 2054 51
+ram 8000 123
+screen 32 7999
+screen 33 3103
+screen 34 63
+screen 64 13107
+screen 65 3635
+screen 66 49
+screen 96 13091
+screen 97 3891
+screen 98 48
+screen 128 13067
+screen 129 3123
+screen 130 48
+screen 160 7951
+screen 161 3103
+screen 162 24
+screen 192 6923
+screen 193 3099
+screen 194 12
+screen 224 13091
+screen 225 3123
+screen 226 12
+screen 256 13107
+screen 257 3123
+screen 258 12
+screen 288 13119
+screen 289 16179
+screen 290 12

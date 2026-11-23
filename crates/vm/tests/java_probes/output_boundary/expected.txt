@@ -1,0 +1,11 @@
+java End of script
+java-dialog OK DIALOG:Program Halted: Main.main finished execution
+screen 7807 63
+screen 7839 51
+screen 7871 49
+screen 7903 24
+screen 7935 12
+screen 7967 6
+screen 7999 35
+screen 8031 51
+screen 8063 63

@@ -1,0 +1,39 @@
+function Main.main 0
+push constant 8000
+push constant 32767
+not
+push constant 1
+neg
+call Math.divide 2
+call Memory.poke 2
+pop temp 0
+push constant 8001
+push constant 32767
+push constant 32767
+call Math.multiply 2
+call Memory.poke 2
+pop temp 0
+push constant 8002
+push constant 32767
+neg
+push constant 2
+call Math.divide 2
+call Memory.poke 2
+pop temp 0
+push constant 8003
+push constant 32767
+call Math.sqrt 1
+call Memory.poke 2
+pop temp 0
+push constant 8004
+push constant 32760
+call Math.sqrt 1
+call Memory.poke 2
+pop temp 0
+push constant 8005
+push constant 32400
+call Math.sqrt 1
+call Memory.poke 2
+pop temp 0
+push constant 0
+return

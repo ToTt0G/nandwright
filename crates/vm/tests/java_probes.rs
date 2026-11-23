@@ -38,6 +38,7 @@ fn replay(name: &str) {
     let mut keys = Vec::new();
     let mut screen = None;
     let mut faults = false;
+    let mut observed_words = 0;
     for line in fs::read_to_string(dir.join("probe.txt")).unwrap().lines() {
         let parts: Vec<_> = line.split('#').next().unwrap().split_whitespace().collect();
         match parts.as_slice() {
@@ -46,6 +47,7 @@ fn replay(name: &str) {
                 keys = codes.iter().map(|code| number::<u16>(code)).collect();
             }
             ["screen"] => screen = Some(vec![0i16; 8192]),
+            ["observe", rows] => observed_words = number::<usize>(rows) * 32,
             ["set", variable, value] => {
                 let (name, index) = variable
                     .split_once('[')
@@ -59,9 +61,38 @@ fn replay(name: &str) {
             _ => panic!("Unexpected directive {line}"),
         }
     }
+    let expected = fs::read_to_string(dir.join("expected.txt")).unwrap();
+    let mut snapshots = Vec::new();
+    for line in expected.lines() {
+        let parts: Vec<_> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            ["snapshot", phase] => {
+                assert_eq!(snapshots.len(), number::<usize>(phase), "{name}");
+                snapshots.push(vec![0i16; observed_words]);
+            }
+            ["snap", phase, index, value] => {
+                snapshots[number::<usize>(phase)][number::<usize>(index)] = number(value);
+            }
+            _ => {}
+        }
+    }
+    if observed_words != 0 {
+        assert_eq!(snapshots.len(), 1 + 2 * keys.len(), "{name}");
+    }
+    let check_snapshot = |vm: &Vm, phase: usize| {
+        if let Some(expected) = snapshots.get(phase) {
+            let actual = &vm.screen_slice()[..observed_words];
+            let first_diff = actual.iter().zip(expected).position(|(a, b)| a != b);
+            assert!(
+                first_diff.is_none(),
+                "{name}: phase {phase} first mismatching screen word {first_diff:?}"
+            );
+        }
+    };
     let run = |vm: &mut Vm| vm.run(budget - vm.steps(), 0, &bp);
     let mut status = run(&mut vm);
-    for key in keys {
+    check_snapshot(&vm, 0);
+    for (i, key) in keys.into_iter().enumerate() {
         assert_eq!(status, RunStatus::WaitingForKey, "{name}: before key {key}");
         vm.set_key(key);
         assert_eq!(
@@ -69,10 +100,11 @@ fn replay(name: &str) {
             RunStatus::WaitingForKey,
             "{name}: held key {key}"
         );
+        check_snapshot(&vm, 2 * i + 1);
         vm.set_key(0);
         status = run(&mut vm);
+        check_snapshot(&vm, 2 * i + 2);
     }
-    let expected = fs::read_to_string(dir.join("expected.txt")).unwrap();
     let mut java_halted = false;
     let mut java_error = false;
     let mut java_status = "";
@@ -94,7 +126,7 @@ fn replay(name: &str) {
             }
             ["java-dialog", ..] if line.contains("Program Halted:") => java_error = true,
             ["java", ..] => java_status = line.strip_prefix("java ").unwrap(),
-            ["java-dialog", ..] => {}
+            ["java-dialog" | "snapshot" | "snap", ..] => {}
             _ => panic!("Unexpected golden line {line}"),
         }
     }
@@ -148,6 +180,7 @@ macro_rules! java_probes {
 }
 
 java_probes!(
+    heap_interleaving,
     kb_gui_mapping,
     kb_last_cell,
     kb_readchar_specials,
@@ -156,6 +189,8 @@ java_probes!(
     kb_readline_backspace_bounds,
     kb_readline_edit,
     kb_readline_long,
+    kb_readline_specials,
+    math_extremes,
     negative_circle_bottom,
     negative_circle_end_aligned,
     negative_circle_keyboard,
@@ -164,6 +199,13 @@ java_probes!(
     negative_circle_start_aligned,
     negative_circle_top,
     negative_circle_word_boundary,
+    output_boundary,
+    pointer_and_segments,
     screen_edge_details,
     screen_edges,
+    script_variables,
+    sqrt_negative,
+    stack_ceiling,
+    string_capacity,
+    temp_overflow,
 );

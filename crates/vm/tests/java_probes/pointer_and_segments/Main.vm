@@ -1,0 +1,8 @@
+push constant 88
+pop pointer 2
+push pointer 32767
+pop temp 7
+push local 0
+push argument 0
+push this 0
+push that 0
