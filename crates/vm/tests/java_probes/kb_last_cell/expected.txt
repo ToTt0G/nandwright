@@ -1,0 +1,31 @@
+java End of script
+java-dialog OK DIALOG:Program Halted: Main.main finished execution
+ram 8000 65
+ram 8001 3
+screen 32 15
+screen 64 27
+screen 96 51
+screen 128 51
+screen 160 51
+screen 192 51
+screen 224 51
+screen 256 27
+screen 288 15
+screen 384 63
+screen 416 51
+screen 448 49
+screen 480 24
+screen 512 12
+screen 544 6
+screen 576 35
+screen 608 51
+screen 640 63
+screen 7807 7199
+screen 7839 13875
+screen 7871 9011
+screen 7903 819
+screen 7935 799
+screen 7967 819
+screen 7999 9011
+screen 8031 13875
+screen 8063 7199

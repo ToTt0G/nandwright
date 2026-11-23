@@ -133,3 +133,34 @@ fn return_through_a_script_modified_argument_marks_screen_dirty() {
     assert!(vm.screen_dirty());
     assert_eq!(vm.screen_generation(), generation + 1);
 }
+
+#[test]
+fn keyboard_line_budget_is_bounded_and_reset_discards_input() {
+    let mut vm = make_vm(&[(
+        "Main",
+        "function Main.main 0\npush constant 0\ncall String.new 1\n\
+         call Keyboard.readLine 1\npop temp 0\npush constant 0\nreturn\n",
+    )]);
+    let bp = Breakpoints::new();
+    let key = |vm: &mut Vm, code| {
+        vm.set_key(code);
+        assert_eq!(vm.run(50, 0, &bp), RunStatus::WaitingForKey);
+        vm.set_key(0);
+        vm.run(50, 0, &bp)
+    };
+    assert_eq!(vm.run(50, 0, &bp), RunStatus::WaitingForKey);
+    assert_eq!(vm.ram(2052), 14330, "input does not allocate while waiting");
+    for _ in 0..15_000 {
+        assert_eq!(key(&mut vm, 65), RunStatus::WaitingForKey);
+    }
+    assert!(matches!(key(&mut vm, 128), RunStatus::Error(_)));
+    vm.reset();
+    assert_eq!(vm.run(50, 0, &bp), RunStatus::WaitingForKey);
+    assert_eq!(key(&mut vm, 65), RunStatus::WaitingForKey);
+    vm.reset();
+    assert_eq!(vm.run(50, 0, &bp), RunStatus::WaitingForKey);
+    assert_eq!(key(&mut vm, 90), RunStatus::WaitingForKey);
+    assert_eq!(key(&mut vm, 128), RunStatus::Halted);
+    let ptr = vm.ram(5) as u16;
+    assert_eq!(&vm.ram_slice()[ptr as usize..][..3], &[1, 1, 90]);
+}
