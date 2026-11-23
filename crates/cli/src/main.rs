@@ -40,7 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Check `.hdl` and `.tst` files for errors (directories are searched recursively).
+    /// Check `.hdl`, `.tst`, `.asm`, `.hack` and `.jack` files for errors
+    /// (directories are searched recursively).
     Check {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
@@ -221,7 +222,7 @@ fn read(file: &str) -> Result<n2t_core::host::TextFile, String> {
 // -------------------------------------------------------------------------
 
 fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
-    let files = collect(paths, &["hdl", "tst"])?;
+    let files = collect(paths, &["hdl", "tst", "asm", "hack", "jack"])?;
     let builtins = Arc::new(BuiltinLibrary::standard());
     let mut by_dir: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for file in files {
@@ -239,7 +240,8 @@ fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
             builtins.clone(),
             ElaboratorOptions::editor(),
         );
-        for file in files {
+        for file in &files {
+            let file = file.clone();
             checked += 1;
             let text = read(&file)?.text;
             let shown = display(&file);
@@ -256,10 +258,46 @@ fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
                 for d in &unit.diagnostics {
                     reporter.diagnostic(&shown, &source, d);
                 }
-            } else {
+            } else if path::has_extension(&file, "tst") {
                 let (parsed, analysis) = n2t_core::tst::check(&text, &mut elaborator);
                 for d in parsed.diagnostics.iter().chain(&analysis.diagnostics) {
                     reporter.diagnostic(&shown, &text, d);
+                }
+            } else if path::has_extension(&file, "asm") {
+                for d in &n2t_hack::assemble(&text).diagnostics {
+                    reporter.diagnostic(&shown, &text, d);
+                }
+            } else if path::has_extension(&file, "hack") {
+                if let Err(diagnostics) = n2t_hack::parse_hack(&text) {
+                    for d in &diagnostics {
+                        reporter.diagnostic(&shown, &text, d);
+                    }
+                }
+            }
+        }
+        // The Jack classes of a folder are one program: calls between them
+        // are checked together, as the official compiler does for a folder.
+        let jack: Vec<(String, String, String)> = files
+            .iter()
+            .filter(|f| path::has_extension(f, "jack"))
+            .filter_map(|f| Some((path::stem(f).to_string(), read(f).ok()?.text, display(f))))
+            .collect();
+        if !jack.is_empty() {
+            let sources: Vec<(&str, &str)> = jack
+                .iter()
+                .map(|(stem, text, _)| (stem.as_str(), text.as_str()))
+                .collect();
+            let program = n2t_jack::compile_program(&sources);
+            // Shown as an editor shows them: an unwritten subroutine is a
+            // hint (see `n2t_jack::editor`).
+            for (output, (_, text, shown)) in program.files.iter().zip(&jack) {
+                let diagnostics = n2t_jack::editor_diagnostics(
+                    &n2t_jack::parse(text),
+                    path::file_name(&dir),
+                    &output.compiled.diagnostics,
+                );
+                for d in &diagnostics {
+                    reporter.diagnostic(shown, text, d);
                 }
             }
         }

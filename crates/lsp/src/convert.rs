@@ -144,7 +144,7 @@ pub fn diagnostic(
         range,
         severity: Some(severity(d.severity)),
         code: Some(lsp::NumberOrString::String(d.code.as_str().to_string())),
-        source: Some("n2t".to_string()),
+        source: Some("nand2tetris".to_string()),
         message,
         related_information: (!related.is_empty()).then_some(related),
         tags: matches!(

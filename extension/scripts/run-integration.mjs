@@ -42,7 +42,8 @@ const workspace = join(scratch, 'My Projects', 'nand2tetris');
 mkdirSync(workspace, { recursive: true });
 cpSync(join(repo, 'tests', 'fixtures', 'chips'), join(workspace, 'chips'), { recursive: true });
 cpSync(join(repo, 'tests', 'fixtures', 'runtime'), join(workspace, 'runtime'), { recursive: true });
-cpSync(join(repo, 'tests', 'fixtures', 'programs'), join(workspace, 'programs'), { recursive: true, force: false, errorOnExist: false });
+cpSync(join(repo, 'tests', 'fixtures', 'programs'), join(workspace, 'programs'), { recursive: true });
+cpSync(join(repo, 'crates', 'jack', 'tests', 'fixtures', 'Counter'), join(workspace, 'jack'), { recursive: true });
 
 const userData = join(scratch, 'user-data');
 const extensionsDir = join(scratch, 'extensions');

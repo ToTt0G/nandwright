@@ -17,6 +17,7 @@
 pub mod ast;
 mod check;
 mod diag;
+pub mod editor;
 pub mod lexer;
 pub mod os;
 mod parser;
@@ -27,6 +28,7 @@ pub mod xml;
 use n2t_core::{Diagnostic, LineIndex, Severity, Span};
 
 pub use diag::codes;
+pub use editor::editor_diagnostics;
 pub use lexer::{Keyword, Token, TokenKind};
 pub use parser::MAX_DEPTH;
 pub use program::{FileOutput, ProgramOutput, compile_program, compile_program_with};

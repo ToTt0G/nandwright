@@ -311,6 +311,8 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "n2t-core",
+ "n2t-hack",
+ "n2t-jack",
  "n2t-lsp",
  "n2t-simulator",
  "serde_json",

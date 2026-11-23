@@ -215,6 +215,42 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('assembly and Jack', () => {
+        it('shows the machine code of an instruction and flags a mistake', async () => {
+            const editor = await open('programs', 'Countdown.asm');
+            const text = editor.document.getText();
+            const at = editor.document.positionAt(text.indexOf('D=A') + 1);
+            const hovers = await until('a hover', async () => {
+                const found = await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', editor.document.uri, at);
+                return found.length > 0 && found;
+            });
+            const hoverText = hovers.flatMap((h) => h.contents).map((c) => (typeof c === 'string' ? c : c.value)).join('\n');
+            assert.match(hoverText, /1110110000010000/);
+            await replaceAll(editor, text.replace('D;JLE', 'D;JXX'));
+            const diagnostic = await until('the assembly error', () =>
+                diagnosticsOf(editor.document.uri).find((d) => d.severity === vscode.DiagnosticSeverity.Error),
+            );
+            assert.equal(diagnostic.range.start.line, editor.document.positionAt(text.indexOf('D;JLE')).line);
+        });
+
+        it('checks a Jack class against the other classes of its folder', async () => {
+            const editor = await open('jack', 'Main.jack');
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            assert.deepEqual(
+                diagnosticsOf(editor.document.uri).filter((d) => d.severity <= vscode.DiagnosticSeverity.Warning),
+                [],
+            );
+            const text = editor.document.getText();
+            const call = /Counter\.(\w+)\(/.exec(text);
+            assert.ok(call, 'the fixture calls Counter');
+            await replaceAll(editor, text.replace(`Counter.${call[1]}(`, 'Counter.noSuchThing('));
+            const diagnostic = await until('the unknown-subroutine error', () =>
+                diagnosticsOf(editor.document.uri).find((d) => d.code === 'jack-unknown-subroutine'),
+            );
+            assert.equal(diagnostic.severity, vscode.DiagnosticSeverity.Error);
+        });
+    });
+
     describe('testing', () => {
         const run = async (...scripts: vscode.Uri[]): Promise<ScriptResult[]> => (await api()).tests.runScripts(scripts);
 

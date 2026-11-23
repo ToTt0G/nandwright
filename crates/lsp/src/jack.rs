@@ -183,12 +183,17 @@ pub fn diagnostics(ws: &mut Workspace, uri: &Url) -> Vec<n2t_core::Diagnostic> {
     let Some((folder, index)) = file_of(ws, uri) else {
         return Vec::new();
     };
-    folder
-        .program
-        .files
-        .get(index)
-        .map(|f| f.compiled.diagnostics.clone())
-        .unwrap_or_default()
+    let folder_name = ws
+        .docs
+        .get(uri)
+        .map(|doc| n2t_core::host::path::file_name(&doc.dir).to_string())
+        .unwrap_or_default();
+    match (folder.program.files.get(index), folder.files.get(index)) {
+        (Some(output), Some(file)) => {
+            n2t_jack::editor_diagnostics(&file.parsed, &folder_name, &output.compiled.diagnostics)
+        }
+        _ => Vec::new(),
+    }
 }
 
 // -------------------------------------------------------------------------
