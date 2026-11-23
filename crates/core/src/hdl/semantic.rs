@@ -841,6 +841,11 @@ impl<'a> Analyzer<'a> {
         span: Span,
     ) {
         let width = self.signals[signal].width.unwrap_or(0).max(bits.end());
+        // A width past the maximum is reported where it is declared; tracking
+        // it bit by bit would allocate in proportion to a number in the source.
+        if width > self.options.max_width {
+            return;
+        }
         let slots = self.drivers.entry(signal).or_default();
         if slots.len() < width as usize {
             slots.resize(width as usize, None);
@@ -898,6 +903,10 @@ impl<'a> Analyzer<'a> {
             .as_ref()
             .and_then(|i| i.inputs.get(formal.index))
             .map_or(formal.bits.end(), |p| p.width);
+        // See `record_driver`: over-wide pins are reported where declared.
+        if width.max(formal.bits.end()) > self.options.max_width {
+            return;
+        }
         let slots = assigned
             .entry(formal.index)
             .or_insert_with(|| vec![None; width as usize]);
