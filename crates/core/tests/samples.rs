@@ -150,7 +150,7 @@ fn folders(root: &Path) -> Vec<PathBuf> {
 fn projects_and_features_have_no_diagnostics() {
     let mut problems = String::new();
     let mut checked = 0;
-    for group in ["chips", "features"] {
+    for group in ["chips", "features", "programs"] {
         for dir in folders(&samples().join(group)) {
             for (path, rendered) in check_folder(&dir) {
                 checked += 1;

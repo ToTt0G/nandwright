@@ -8,3 +8,7 @@ out/
 !tests/fixtures/**/*.out
 .DS_Store
 /private/
+.vscode-test/
+dist-test/
+extension/dist/
+__pycache__/

@@ -1,0 +1,17 @@
+/**
+ * Majority vote of three bits:
+ * out = 1 when at least two of a, b, c are 1.
+ *
+ * This is a practice chip, not one of the course projects. Fill in PARTS,
+ * then press the play button at the top right of the editor to run its test.
+ *
+ * One way to think about it: the majority is 1 when a and b are both 1,
+ * or a and c are, or b and c are. The built-in chips And and Or are enough.
+ */
+CHIP Majority {
+    IN a, b, c;
+    OUT out;
+
+    PARTS:
+    // Put your code here:
+}

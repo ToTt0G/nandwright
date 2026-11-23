@@ -1,0 +1,9 @@
+{
+  "name": "nandwright-test-harness",
+  "displayName": "Nandwright test harness",
+  "description": "An empty extension. When the integration tests run against an installed VSIX, VS Code needs a development extension to host them; this is it.",
+  "version": "0.0.0",
+  "publisher": "nandwright",
+  "private": true,
+  "engines": { "vscode": "^1.91.0" }
+}

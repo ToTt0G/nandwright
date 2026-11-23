@@ -75,6 +75,7 @@ impl TestSession {
         json!({
             "dialect": self.runner.dialect().as_str(),
             "next": self.next_range(),
+            "runsForever": self.runner.runs_forever(),
         })
     }
 

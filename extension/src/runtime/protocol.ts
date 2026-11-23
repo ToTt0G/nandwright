@@ -63,6 +63,7 @@ export type TestOutcome =
       }
     | { kind: 'error'; message: string; range: Range | null }
     | { kind: 'limit'; echo: string | null; commands: number }
+    | { kind: 'skipped'; reason: string }
     | { kind: 'cancelled' };
 
 export interface TestStatus {
@@ -81,6 +82,8 @@ export interface TestOpened {
     session: number;
     dialect: 'hardware' | 'cpu' | 'vm';
     next: Range | null;
+    /** The script has a `repeat` without a count: it never ends by itself. */
+    runsForever: boolean;
 }
 
 export interface TestInspection {

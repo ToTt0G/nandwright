@@ -331,6 +331,16 @@ impl ScriptRunner {
         self.dialect
     }
 
+    /// Whether the script has a `repeat` without a count: it never ends on
+    /// its own. Such scripts are demonstrations to watch (the official
+    /// `Fill.tst` is one), not tests with a result.
+    pub fn runs_forever(&self) -> bool {
+        self.script
+            .statements
+            .iter()
+            .any(|s| matches!(s, Statement::Repeat(r) if r.count.is_none() && !r.body.is_empty()))
+    }
+
     pub fn machine(&self) -> &dyn Machine {
         self.machine.as_ref()
     }
@@ -392,12 +402,36 @@ impl ScriptRunner {
     }
 
     /// The span of the command that will execute next, if the script has not
-    /// ended.
+    /// ended. A loop that has just finished is looked past, and a `while`
+    /// about to be entered has its condition evaluated (which changes
+    /// nothing), so this is the command a debugger should highlight.
     pub fn next_span(&self) -> Option<Span> {
-        match self.script.statements.get(self.cursor.statement)? {
-            Statement::Simple(s) => Some(s.span),
-            Statement::Repeat(r) => r.body.get(self.cursor.body).map(|s| s.span),
-            Statement::While(w) => w.body.get(self.cursor.body).map(|s| s.span),
+        let mut cursor = self.cursor;
+        loop {
+            match self.script.statements.get(cursor.statement)? {
+                Statement::Simple(s) => return Some(s.span),
+                Statement::Repeat(r) => {
+                    let done = r.body.is_empty()
+                        || (cursor.body == 0
+                            && r.count.is_some_and(|c| cursor.iteration >= c.value));
+                    if !done {
+                        return r.body.get(cursor.body).map(|s| s.span);
+                    }
+                }
+                Statement::While(w) => {
+                    let entering = cursor.body == 0 && !cursor.condition_checked;
+                    // An error in the condition is reported when it runs.
+                    let done = w.body.is_empty()
+                        || (entering && matches!(self.condition(&w.condition), Ok(false)));
+                    if !done {
+                        return w.body.get(cursor.body).map(|s| s.span);
+                    }
+                }
+            }
+            cursor = Cursor {
+                statement: cursor.statement + 1,
+                ..Cursor::default()
+            };
         }
     }
 
@@ -837,8 +871,10 @@ impl ScriptRunner {
             text.push_str(line);
             text.push('\n');
             self.output_dirty = true;
-            self.events.push(Event::OutputLine(line.to_string()));
         }
+        // Reported even after the first failure (the output file is not
+        // written any more, but a front-end shows every row).
+        self.events.push(Event::OutputLine(line.to_string()));
         if let Some((_, comparator)) = &mut self.compare
             && let Err(mismatch) = comparator.compare(line)
         {

@@ -129,7 +129,7 @@ fn render(script: &Path, result: Result<(Outcome, Vec<String>), StartError>) -> 
 fn project_and_feature_scripts_pass() {
     let mut failures = Vec::new();
     let mut ran = 0;
-    for group in ["chips", "features"] {
+    for group in ["chips", "features", "programs"] {
         let mut dirs: Vec<PathBuf> = scripts(&samples().join(group))
             .iter()
             .map(|s| s.parent().unwrap().to_path_buf())

@@ -382,6 +382,50 @@ fn runs_to_an_editor_breakpoint() {
 }
 
 #[test]
+fn the_next_command_after_a_loop_is_the_one_after_it() {
+    let (mut engine, _) = engine();
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": format!("{DIR}/Accumulator.tst")}),
+    );
+    let session = &opened["session"];
+    // Line 22 (zero-based) is `set reset 1,`, right after `repeat 3 { … }`.
+    let status = call(
+        &mut engine,
+        json!({"op": "test.run", "session": session, "breakLines": [22]}),
+    );
+    assert_eq!(status["reason"], "breakpoint", "{status}");
+    assert_eq!(status["next"]["startLine"], 22);
+    // The loop body ran three times before it.
+    let rows = status["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "output")
+        .count();
+    assert_eq!(rows, 10);
+    // A breakpoint inside the loop is hit once per iteration.
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": format!("{DIR}/Accumulator.tst")}),
+    );
+    let session = &opened["session"];
+    let mut hits = 0;
+    loop {
+        let status = call(
+            &mut engine,
+            json!({"op": "test.run", "session": session, "breakLines": [19]}),
+        );
+        if status["state"] == "finished" {
+            break;
+        }
+        assert_eq!(status["next"]["startLine"], 19);
+        hits += 1;
+    }
+    assert_eq!(hits, 3);
+}
+
+#[test]
 fn a_chip_with_errors_explains_itself() {
     let (mut engine, host) = engine();
     host.insert(
