@@ -26,7 +26,7 @@ pub fn document(
     let formatted = match doc.kind {
         DocKind::Hdl => n2t_core::hdl::format_with_options(&doc.text, &opts)?,
         DocKind::Tst => n2t_core::tst::format_with_options(&doc.text, &opts)?,
-        DocKind::Other => return None,
+        _ => return None,
     };
     Some(minimal_edit(&doc.text, &doc.lines, &formatted))
 }
@@ -47,7 +47,7 @@ pub fn range(
     let formatted = match doc.kind {
         DocKind::Hdl => n2t_core::hdl::format_with_options(&doc.text, &opts)?,
         DocKind::Tst => n2t_core::tst::format_with_options(&doc.text, &opts)?,
-        DocKind::Other => return None,
+        _ => return None,
     };
     if formatted == *doc.text {
         return Some(Vec::new());

@@ -17,10 +17,13 @@ const PROPERTY: u32 = 1;
 const PARAMETER: u32 = 2;
 const VARIABLE: u32 = 3;
 const FUNCTION: u32 = 4;
+const CLASS: u32 = 5;
+const METHOD: u32 = 6;
 
 const DECLARATION: u32 = 1 << 0;
 const READONLY: u32 = 1 << 1;
 const DEFAULT_LIBRARY: u32 = 1 << 2;
+const STATIC: u32 = 1 << 3;
 
 pub fn legend() -> lsp::SemanticTokensLegend {
     lsp::SemanticTokensLegend {
@@ -30,11 +33,14 @@ pub fn legend() -> lsp::SemanticTokensLegend {
             lsp::SemanticTokenType::PARAMETER,
             lsp::SemanticTokenType::VARIABLE,
             lsp::SemanticTokenType::FUNCTION,
+            lsp::SemanticTokenType::CLASS,
+            lsp::SemanticTokenType::METHOD,
         ],
         token_modifiers: vec![
             lsp::SemanticTokenModifier::DECLARATION,
             lsp::SemanticTokenModifier::READONLY,
             lsp::SemanticTokenModifier::DEFAULT_LIBRARY,
+            lsp::SemanticTokenModifier::STATIC,
         ],
     }
 }
@@ -44,7 +50,8 @@ pub fn full(ws: &mut Workspace, uri: &Url) -> Option<lsp::SemanticTokens> {
     let tokens = match kind {
         DocKind::Hdl => hdl_tokens(ws, uri)?,
         DocKind::Tst => tst_tokens(ws, uri)?,
-        DocKind::Other => return None,
+        DocKind::Jack => jack_tokens(ws, uri)?,
+        _ => return None,
     };
     let doc = ws.docs.get(uri)?;
     Some(lsp::SemanticTokens {
@@ -114,6 +121,50 @@ fn tst_tokens(ws: &mut Workspace, uri: &Url) -> Option<Vec<(Span, u32, u32)>> {
                     }
                 };
                 (r.span, token_type, modifiers)
+            })
+            .collect(),
+    )
+}
+
+fn jack_tokens(ws: &mut Workspace, uri: &Url) -> Option<Vec<(Span, u32, u32)>> {
+    use n2t_jack::ast::SubroutineKind;
+    use n2t_jack::{Role, VarKind};
+    let symbols = crate::jack::semantic_symbols(ws, uri)?;
+    Some(
+        symbols
+            .iter()
+            .filter_map(|s| {
+                let declaration = if s.is_declaration { DECLARATION } else { 0 };
+                let (token_type, modifiers) = match &s.role {
+                    Role::Class => (
+                        CLASS,
+                        declaration
+                            | if n2t_jack::os::is_os_class(&s.name) {
+                                DEFAULT_LIBRARY
+                            } else {
+                                0
+                            },
+                    ),
+                    Role::Subroutine { class, kind } => {
+                        let library = if n2t_jack::os::is_os_class(class) {
+                            DEFAULT_LIBRARY
+                        } else {
+                            0
+                        };
+                        match kind {
+                            Some(SubroutineKind::Method) => (METHOD, declaration | library),
+                            _ => (FUNCTION, declaration | library | STATIC),
+                        }
+                    }
+                    Role::Variable { kind, .. } => match kind {
+                        VarKind::Argument => (PARAMETER, declaration),
+                        VarKind::Local => (VARIABLE, declaration),
+                        VarKind::Field => (PROPERTY, declaration),
+                        VarKind::Static => (VARIABLE, declaration | STATIC),
+                    },
+                    Role::Undefined => return None,
+                };
+                Some((s.span, token_type, modifiers))
             })
             .collect(),
     )

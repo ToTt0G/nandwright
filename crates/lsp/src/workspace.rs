@@ -21,7 +21,7 @@ pub type ProjectElaborator = Elaborator<OverlaySourceProvider<HostSourceProvider
 
 /// The folder that documents without a file (untitled buffers) live in.
 /// Nothing exists there, so their parts resolve to the built-in chips.
-const UNTITLED_DIR: &str = "/n2t-untitled";
+pub(crate) const UNTITLED_DIR: &str = "/n2t-untitled";
 
 /// All chips in one folder share a resolution context (the folder is the
 /// "project directory" of the specification).
@@ -89,7 +89,39 @@ impl Project {
 pub enum DocKind {
     Hdl,
     Tst,
+    /// Hack assembly.
+    Asm,
+    /// Hack machine code.
+    Hack,
+    Jack,
+    /// An expected-output file of a test script.
+    Cmp,
+    /// An output file written by a test script.
+    Out,
     Other,
+}
+
+impl DocKind {
+    /// The kind of a file, from its extension (case-insensitive). Editors'
+    /// language ids are not used: they differ between editors.
+    pub fn from_extension(extension: &str) -> Self {
+        match extension.to_ascii_lowercase().as_str() {
+            "hdl" => DocKind::Hdl,
+            "tst" => DocKind::Tst,
+            "asm" => DocKind::Asm,
+            "hack" => DocKind::Hack,
+            "jack" => DocKind::Jack,
+            "cmp" => DocKind::Cmp,
+            "out" => DocKind::Out,
+            _ => DocKind::Other,
+        }
+    }
+}
+
+/// Cached analysis of a Hack assembly document.
+pub struct AsmState {
+    pub parsed: n2t_hack::asm::ParsedAsm,
+    pub assembly: n2t_hack::Assembly,
 }
 
 pub struct Document {
@@ -105,6 +137,7 @@ pub struct Document {
     /// The file stem (the chip name for `.hdl` files).
     pub stem: String,
     pub tst: Option<(ParsedScript, ScriptAnalysis)>,
+    pub asm: Option<Arc<AsmState>>,
 }
 
 impl Document {
@@ -124,12 +157,15 @@ pub struct Workspace {
     pub projects: HashMap<String, Project>,
     pub builtins: Arc<BuiltinLibrary>,
     pub host: SharedHost,
+    /// Compiled Jack folders, by folder (dropped when a Jack file changes).
+    pub jack_folders: HashMap<String, Arc<crate::jack::JackFolder>>,
 }
 
 impl Workspace {
     pub fn new(host: SharedHost) -> Self {
         Self {
             docs: HashMap::new(),
+            jack_folders: HashMap::new(),
             projects: HashMap::new(),
             builtins: Arc::new(BuiltinLibrary::standard()),
             host,
@@ -163,11 +199,7 @@ impl Workspace {
             Some((s, e)) => (s.to_string(), e.to_ascii_lowercase()),
             None => (file_name.clone(), String::new()),
         };
-        let kind = match extension.as_str() {
-            "hdl" => DocKind::Hdl,
-            "tst" => DocKind::Tst,
-            _ => DocKind::Other,
-        };
+        let kind = DocKind::from_extension(&extension);
         let dir = match path.as_deref() {
             Some(p) => path::dir(p).to_string(),
             None => UNTITLED_DIR.to_string(),
@@ -183,7 +215,9 @@ impl Workspace {
             dir,
             stem,
             tst: None,
+            asm: None,
         };
+        self.jack_folders.remove(&doc.dir);
         self.docs.insert(uri.clone(), doc);
         self.sync_overlay(&uri);
     }
@@ -194,11 +228,18 @@ impl Workspace {
             doc.lines = LineIndex::new(&doc.text);
             doc.version = version;
             doc.tst = None;
+            doc.asm = None;
+            let dir = doc.dir.clone();
+            self.jack_folders.remove(&dir);
         }
         self.sync_overlay(uri);
     }
 
     pub fn close(&mut self, uri: &Url) {
+        if let Some(doc) = self.docs.get(uri) {
+            let dir = doc.dir.clone();
+            self.jack_folders.remove(&dir);
+        }
         if let Some(doc) = self.docs.remove(uri)
             && doc.is_overlay_chip()
         {
@@ -272,6 +313,20 @@ impl Workspace {
         self.docs.get(uri)?.tst.as_ref()
     }
 
+    /// The cached assembly of a Hack assembly document.
+    pub fn asm_state(&mut self, uri: &Url) -> Option<Arc<AsmState>> {
+        let doc = self.docs.get_mut(uri)?;
+        if doc.kind != DocKind::Asm {
+            return None;
+        }
+        if doc.asm.is_none() {
+            let parsed = n2t_hack::asm::parse(&doc.text);
+            let assembly = n2t_hack::assemble(&doc.text);
+            doc.asm = Some(Arc::new(AsmState { parsed, assembly }));
+        }
+        doc.asm.clone()
+    }
+
     /// Discards cached script analyses in a folder (after an HDL edit).
     pub fn invalidate_scripts(&mut self, dir: &str) {
         for doc in self.docs.values_mut() {
@@ -286,23 +341,44 @@ impl Workspace {
             return Vec::new();
         };
         let core: Vec<n2t_core::Diagnostic> = match kind {
-            DocKind::Hdl => self
-                .hdl_unit(uri)
-                .map(|u| u.diagnostics.clone())
+            DocKind::Hdl => {
+                let mut diagnostics = self
+                    .hdl_unit(uri)
+                    .map(|u| quiet_while_typing(&u.diagnostics))
+                    .unwrap_or_default();
+                diagnostics.extend(crate::hdl::extra_diagnostics(self, uri));
+                diagnostics
+            }
+            DocKind::Tst => {
+                let mut diagnostics: Vec<n2t_core::Diagnostic> = self
+                    .tst_state(uri)
+                    .map(|(p, a)| {
+                        p.diagnostics
+                            .iter()
+                            .chain(&a.diagnostics)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                diagnostics.extend(crate::tst::extra_diagnostics(self, uri));
+                diagnostics
+            }
+            DocKind::Asm => self
+                .asm_state(uri)
+                .map(|s| s.assembly.diagnostics.clone())
                 .unwrap_or_default(),
-            DocKind::Tst => self
-                .tst_state(uri)
-                .map(|(p, a)| {
-                    p.diagnostics
-                        .iter()
-                        .chain(&a.diagnostics)
-                        .cloned()
-                        .collect()
-                })
+            DocKind::Hack => self
+                .docs
+                .get(uri)
+                .and_then(|d| n2t_hack::parse_hack(&d.text).err())
                 .unwrap_or_default(),
-            DocKind::Other => Vec::new(),
+            DocKind::Jack => crate::jack::diagnostics(self, uri),
+            DocKind::Out => crate::compare::diagnostics(self, uri),
+            DocKind::Cmp | DocKind::Other => Vec::new(),
         };
-        let doc = &self.docs[uri];
+        let Some(doc) = self.docs.get(uri) else {
+            return Vec::new();
+        };
         let text = doc.text();
         let docs = &self.docs;
         let host = &self.host;
@@ -342,6 +418,31 @@ impl Workspace {
             convert::range_in(&chip.source, span),
         ))
     }
+}
+
+/// While a chip has a syntax error, warnings about connections and use are
+/// mostly about what has not been typed yet: they are left out until the
+/// syntax is fixed.
+fn quiet_while_typing(diagnostics: &[n2t_core::Diagnostic]) -> Vec<n2t_core::Diagnostic> {
+    use n2t_core::DiagnosticCode as C;
+    let syntax_error = diagnostics
+        .iter()
+        .any(|d| d.is_error() && d.code == C::UnexpectedToken);
+    diagnostics
+        .iter()
+        .filter(|d| {
+            !syntax_error
+                || !matches!(
+                    d.code,
+                    C::UnconnectedPartInput
+                        | C::UnusedInput
+                        | C::UnusedSignal
+                        | C::UndrivenOutput
+                        | C::UndrivenSignal
+                )
+        })
+        .cloned()
+        .collect()
 }
 
 fn source_by_id(

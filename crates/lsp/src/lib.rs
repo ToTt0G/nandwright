@@ -1,12 +1,16 @@
-//! Language server for Nand to Tetris `.hdl` and `.tst` files.
+//! Language server for Nand to Tetris files: `.hdl`, `.tst`, `.asm`,
+//! `.hack`, `.jack`, `.cmp` and `.out`.
 //!
 //! Every folder containing an open document is treated as a project
 //! directory: chips resolve against `.hdl` files in that folder (including
 //! unsaved editor buffers) and then the built-in chip library.
 
+mod asm;
+mod compare;
 mod convert;
 mod format;
 mod hdl;
+mod jack;
 mod semantic_tokens;
 mod tst;
 mod workspace;
@@ -175,12 +179,32 @@ pub fn capabilities() -> lsp::ServerCapabilities {
             work_done_progress_options: Default::default(),
         })),
         completion_provider: Some(lsp::CompletionOptions {
-            trigger_characters: Some(vec!["(".into(), ",".into(), "=".into(), " ".into()]),
+            trigger_characters: Some(vec![
+                "(".into(),
+                ",".into(),
+                "=".into(),
+                " ".into(),
+                "@".into(),
+                ";".into(),
+                ".".into(),
+            ]),
             ..Default::default()
         }),
         document_formatting_provider: Some(lsp::OneOf::Left(true)),
         document_range_formatting_provider: Some(lsp::OneOf::Left(true)),
         inlay_hint_provider: Some(lsp::OneOf::Left(true)),
+        folding_range_provider: Some(lsp::FoldingRangeProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp::CodeActionProviderCapability::Options(
+            lsp::CodeActionOptions {
+                code_action_kinds: Some(vec![lsp::CodeActionKind::QUICKFIX]),
+                ..Default::default()
+            },
+        )),
+        signature_help_provider: Some(lsp::SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into()]),
+            retrigger_characters: Some(vec![",".into()]),
+            work_done_progress_options: Default::default(),
+        }),
         semantic_tokens_provider: Some(
             lsp::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 lsp::SemanticTokensOptions {
@@ -278,6 +302,9 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::hover(ws, &uri, position),
                     Some(DocKind::Tst) => tst::hover(ws, &uri, position),
+                    Some(DocKind::Asm) => asm::hover(ws, &uri, position),
+                    Some(DocKind::Hack) => asm::hack_hover(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::hover(ws, &uri, position),
                     _ => None,
                 })
             }
@@ -288,6 +315,8 @@ impl Server {
                 let location = match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::definition(ws, &uri, position),
                     Some(DocKind::Tst) => tst::definition(ws, &uri, position),
+                    Some(DocKind::Asm) => asm::definition(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::definition(ws, &uri, position),
                     _ => None,
                 };
                 ok(location.map(lsp::GotoDefinitionResponse::Scalar))
@@ -300,6 +329,12 @@ impl Server {
                     Some(DocKind::Hdl) => {
                         hdl::references(ws, &uri, position, p.context.include_declaration)
                     }
+                    Some(DocKind::Asm) => {
+                        asm::references(ws, &uri, position, p.context.include_declaration)
+                    }
+                    Some(DocKind::Jack) => {
+                        jack::references(ws, &uri, position, p.context.include_declaration)
+                    }
                     _ => Vec::new(),
                 })
             }
@@ -309,6 +344,8 @@ impl Server {
                 let position = p.text_document_position_params.position;
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::highlights(ws, &uri, position),
+                    Some(DocKind::Asm) => asm::highlights(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::highlights(ws, &uri, position),
                     _ => Vec::new(),
                 })
             }
@@ -319,6 +356,12 @@ impl Server {
                     Some(DocKind::Hdl) => Some(lsp::DocumentSymbolResponse::Nested(
                         hdl::document_symbols(ws, &uri),
                     )),
+                    Some(DocKind::Asm) => Some(lsp::DocumentSymbolResponse::Nested(
+                        asm::document_symbols(ws, &uri),
+                    )),
+                    Some(DocKind::Jack) => Some(lsp::DocumentSymbolResponse::Nested(
+                        jack::document_symbols(ws, &uri),
+                    )),
                     _ => None,
                 })
             }
@@ -327,6 +370,8 @@ impl Server {
                 let uri = p.text_document.uri;
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::prepare_rename(ws, &uri, p.position),
+                    Some(DocKind::Asm) => asm::prepare_rename(ws, &uri, p.position),
+                    Some(DocKind::Jack) => jack::prepare_rename(ws, &uri, p.position),
                     _ => None,
                 })
             }
@@ -334,12 +379,15 @@ impl Server {
                 let p = params::<req::Rename>(request)?;
                 let uri = p.text_document_position.text_document.uri;
                 let position = p.text_document_position.position;
-                match kind(ws, &uri) {
-                    Some(DocKind::Hdl) => match hdl::rename(ws, &uri, position, &p.new_name) {
-                        Ok(edit) => ok(edit),
-                        Err(message) => Err((ErrorCode::RequestFailed, message)),
-                    },
-                    _ => ok(None::<lsp::WorkspaceEdit>),
+                let result = match kind(ws, &uri) {
+                    Some(DocKind::Hdl) => hdl::rename(ws, &uri, position, &p.new_name),
+                    Some(DocKind::Asm) => asm::rename(ws, &uri, position, &p.new_name),
+                    Some(DocKind::Jack) => jack::rename(ws, &uri, position, &p.new_name),
+                    _ => Ok(None),
+                };
+                match result {
+                    Ok(edit) => ok(edit),
+                    Err(message) => Err((ErrorCode::RequestFailed, message)),
                 }
             }
             req::Completion::METHOD => {
@@ -350,6 +398,8 @@ impl Server {
                 let items = match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::completion(ws, &uri, position, snippets),
                     Some(DocKind::Tst) => tst::completion(ws, &uri, position, snippets),
+                    Some(DocKind::Asm) => asm::completion(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::completion(ws, &uri, position),
                     _ => Vec::new(),
                 };
                 ok(lsp::CompletionResponse::Array(items))
@@ -368,6 +418,32 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::inlay_hints(ws, &uri, p.range),
                     _ => Vec::new(),
+                })
+            }
+            req::SignatureHelpRequest::METHOD => {
+                let p = params::<req::SignatureHelpRequest>(request)?;
+                let uri = p.text_document_position_params.text_document.uri;
+                let position = p.text_document_position_params.position;
+                ok(match kind(ws, &uri) {
+                    Some(DocKind::Jack) => jack::signature_help(ws, &uri, position),
+                    Some(DocKind::Hdl) => hdl::signature_help(ws, &uri, position),
+                    _ => None,
+                })
+            }
+            req::CodeActionRequest::METHOD => {
+                let p = params::<req::CodeActionRequest>(request)?;
+                let uri = p.text_document.uri;
+                ok(match kind(ws, &uri) {
+                    Some(DocKind::Hdl) => Some(hdl::code_actions(ws, &uri, p.range)),
+                    _ => None,
+                })
+            }
+            req::FoldingRangeRequest::METHOD => {
+                let p = params::<req::FoldingRangeRequest>(request)?;
+                let uri = p.text_document.uri;
+                ok(match kind(ws, &uri) {
+                    Some(DocKind::Asm) => Some(asm::folding_ranges(ws, &uri)),
+                    _ => None,
                 })
             }
             req::SemanticTokensFullRequest::METHOD => {
@@ -430,6 +506,7 @@ impl Server {
                 }
             }
             notif::DidChangeWatchedFiles::METHOD => {
+                self.workspace.jack_folders.clear();
                 let dirs: Vec<_> = self.workspace.projects.keys().cloned().collect();
                 for dir in dirs {
                     self.refresh_dir(&dir)?;

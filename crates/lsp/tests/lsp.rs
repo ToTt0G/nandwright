@@ -104,6 +104,11 @@ fn capabilities_advertise_formatting_and_intelligence() {
     assert!(caps.definition_provider.is_some());
     assert!(caps.inlay_hint_provider.is_some());
     assert!(caps.semantic_tokens_provider.is_some());
+    assert!(caps.signature_help_provider.is_some());
+    assert!(caps.code_action_provider.is_some());
+    assert!(caps.folding_range_provider.is_some());
+    assert!(caps.references_provider.is_some());
+    assert!(caps.rename_provider.is_some());
 }
 
 #[test]
