@@ -7,8 +7,9 @@
 //! diagnostics are more precise, and many surprising-but-accepted constructs
 //! get a warning. Behaviour established by experiment:
 //!
-//! - Spaces and tabs are deleted from a line before it is read, wherever they
-//!   are: `D = M` is fine, `@5 6` is `@56`, `@x y` is the symbol `xy`.
+//! - Spaces are deleted from a line before it is read, wherever they are:
+//!   `D = M` is fine, `@5 6` is `@56`, `@x y` is the symbol `xy`, `/ /` is a
+//!   comment. A tab, however, separates tokens: `@5<TAB>6` is an error.
 //! - Lines end at `\n`, `\r\n` or a lone `\r`. A missing final newline is fine.
 //! - A UTF-8 byte order mark at the start of the file is *rejected* (Java reads
 //!   it as part of the first line). Callers must therefore pass the text with

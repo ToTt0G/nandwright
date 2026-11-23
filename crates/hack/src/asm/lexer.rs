@@ -2,8 +2,10 @@
 //! official assembler:
 //!
 //! - Lines end at `\n`, `\r\n` or a lone `\r`.
-//! - Spaces and tabs are removed *before* anything else, wherever they are:
-//!   `@5 6` is `@56`, `D = M` is `D=M`, and `@a/ /b` is `@a` plus a comment.
+//! - Spaces are removed *before* anything else, wherever they are: `@5 6`
+//!   is `@56`, `D = M` is `D=M`, and `@a/ /b` is `@a` plus a comment.
+//! - A tab, in contrast, separates tokens: `@5\t6` is `@5` followed by a
+//!   stray `6` (an error) and `@a/\t/b` contains no comment.
 //!   No other character is whitespace (form feed, vertical tab, NBSP and NUL
 //!   are ordinary characters and make the line invalid).
 //! - `//` starts a comment that runs to the end of the line.
@@ -24,7 +26,7 @@ pub(crate) enum TokKind {
 #[derive(Debug, Clone)]
 pub(crate) struct Token {
     pub kind: TokKind,
-    /// The token text with any interior spaces and tabs removed.
+    /// The token text with any interior spaces removed.
     pub text: String,
     /// From the first to the last character of the token in the source.
     pub span: Span,
@@ -79,10 +81,10 @@ pub(crate) fn split_lines(source: &str) -> Vec<Span> {
 
 pub(crate) fn lex_line(source: &str, line: Span) -> LexedLine {
     let text = &source[line.start..line.end];
-    // Significant characters with their byte offsets in `source`.
+    // Characters other than spaces, with their byte offsets in `source`.
     let chars: Vec<(usize, char)> = text
         .char_indices()
-        .filter(|&(_, c)| c != ' ' && c != '\t')
+        .filter(|&(_, c)| c != ' ')
         .map(|(i, c)| (line.start + i, c))
         .collect();
     let mut end = chars.len();
@@ -98,7 +100,9 @@ pub(crate) fn lex_line(source: &str, line: Span) -> LexedLine {
     let mut i = 0;
     while i < end {
         let (start, c) = chars[i];
-        if is_word_char(c) {
+        if c == '\t' {
+            i += 1;
+        } else if is_word_char(c) {
             let mut text = String::new();
             let mut j = i;
             while j < end && is_word_char(chars[j].1) {
@@ -190,6 +194,9 @@ mod tests {
     #[test]
     fn removes_whitespace_first() {
         assert_eq!(words("@5 6"), ["@", "56"]);
+        assert_eq!(words("@5\t6"), ["@", "5", "6"]);
+        assert_eq!(words("@a/\t/b"), ["@", "a", "/", "/", "b"]);
+        assert_eq!(words("\tD\t=\tM\t"), ["D", "=", "M"]);
         assert_eq!(words(" D = M ; JMP "), ["D", "=", "M", ";", "JMP"]);
         assert_eq!(words("@a/ /b"), ["@", "a"]);
         assert_eq!(words("@1/2"), ["@", "1", "/", "2"]);

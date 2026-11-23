@@ -55,8 +55,8 @@ impl Item {
 }
 
 /// A name with its location. The span runs from the first to the last
-/// character of the name in the source; `text` has any spaces and tabs inside
-/// it removed (the official assembler ignores them).
+/// character of the name in the source; `text` has any spaces inside it
+/// removed (the official assembler ignores them).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Name {
     pub text: String,
@@ -580,6 +580,12 @@ mod tests {
             "( L )",
             "AMD=M",
             "D=M;JMP//c",
+            "D\t=\tM",
+            "D=M\t;JMP",
+            "(\tL\t)",
+            "@\t5",
+            "@a\t//b",
+            "\t\t@1\t\t",
         ] {
             assert_eq!(errors(ok), Vec::<&str>::new(), "{ok:?}");
         }
@@ -620,6 +626,12 @@ mod tests {
             "D=M;null",
             "JMP",
             "@x\0",
+            "@LOO\tP",
+            "@5\t6",
+            "@a/\t/b",
+            "AM\tD=M",
+            "D=M;J\tMP",
+            "(L\t1)",
         ] {
             assert!(!errors(bad).is_empty(), "{bad:?}");
         }
