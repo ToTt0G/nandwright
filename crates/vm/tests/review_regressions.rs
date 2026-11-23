@@ -34,6 +34,17 @@ fn static_slice_of_a_file_placed_past_ram_is_empty_not_a_panic() {
 }
 
 #[test]
+fn linking_a_forged_command_scope_cannot_overflow() {
+    let first = parse("First", "push constant 1");
+    let mut second = parse("Second", "push constant 2");
+    second.commands[0].function = Some(u32::MAX);
+    let (program, _) = Program::link(vec![first, second]);
+    let mut vm = Vm::new(program);
+    assert_eq!(vm.run(5, 0, &Breakpoints::new()), RunStatus::Halted);
+    assert_eq!(vm.stack(), &[1, 2]);
+}
+
+#[test]
 fn endless_recursion_with_flat_sp_keeps_the_shadow_call_stack_bounded() {
     // Main.f pops its own frame and calls itself again: SP never grows, so
     // the program runs forever without a stack overflow.
