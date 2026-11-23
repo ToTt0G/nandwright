@@ -12,7 +12,7 @@ tracked file (or, with --history, any file in any commit on any branch):
     (the course distribution or a folder of private solutions).
 
 Usage:
-  python3 scripts/check-no-course-material.py [--history] [--course DIR]...
+  python3 scripts/check-no-course-material.py [--history [--ref REF]...] [--course DIR]...
 """
 
 import argparse
@@ -112,10 +112,10 @@ def tracked():
                 yield path, "the working tree", handle.read()
 
 
-def history():
-    """Every (path, blob) in every commit reachable from any ref."""
+def history(refs):
+    """Every (path, blob) in every commit reachable from `refs` (or from any ref)."""
     seen = set()
-    for commit in git("rev-list", "--all").decode().split():
+    for commit in git("rev-list", *(refs or ["--all"])).decode().split():
         for line in git("ls-tree", "-r", "-z", commit).decode().split("\0"):
             if not line:
                 continue
@@ -130,6 +130,7 @@ def history():
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--history", action="store_true", help="check every commit on every branch, not only the working tree")
+    parser.add_argument("--ref", action="append", default=[], metavar="REF", help="with --history: check only commits reachable from REF (repeatable); default: every ref")
     parser.add_argument("--course", action="append", default=[], metavar="DIR", help="a course tree or solutions folder to compare contents with")
     options = parser.parse_args()
     os.chdir(git("rev-parse", "--show-toplevel").decode().strip())
@@ -137,7 +138,7 @@ def main():
     known = course_hashes(options.course)
     found = []
     checked = 0
-    for path, where, data in (history() if options.history else tracked()):
+    for path, where, data in (history(options.ref) if options.history else tracked()):
         checked += 1
         for problem in problems_in(path, data):
             found.append(f"{path} ({where}) {problem}")
@@ -146,7 +147,9 @@ def main():
             found.append(f"{path} ({where}) has the same content as {known[digest]}")
     for line in sorted(set(found)):
         print(f"course material: {line}")
-    scope = "every commit on every branch" if options.history else "the working tree"
+    scope = "the working tree"
+    if options.history:
+        scope = f"every commit reachable from {', '.join(options.ref)}" if options.ref else "every commit on every ref"
     compared = f", compared with {len(known)} course/solution files" if known else ""
     print(f"checked {checked} files in {scope}{compared}: {len(set(found))} problem(s)")
     return 1 if found else 0

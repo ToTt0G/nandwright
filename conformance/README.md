@@ -93,3 +93,23 @@ All invocations of `n2t` go through `run_n2t(...)`. It checks once whether
   `out_file`).
 - **Human mode (fallback)**: parses human-readable output and exit code from
   `n2t test <script.tst>`.
+
+## The other comparisons
+
+`run.py` covers test scripts of every dialect. Three more scripts compare one tool each
+with its Java counterpart; they take the same `N2T_COURSE_DIR` and skip in the same way
+when it is missing:
+
+| Script | Compares |
+|---|---|
+| `hack/run.py` | the assembler (`.hack` bytes, error lines) and the CPU emulator (state after every instruction) |
+| `jack/run.py` | the Jack compiler (`.vm` bytes, accept or reject, error lines) and the project 10 XML |
+| `vm/diff.py` | the VM emulator and its built-in OS (memory and all screen words); it drives the Java VM Emulator's window under Xvfb, because only there does Java offer its built-in OS |
+
+And one check needs no Java: the course tree as shipped must have no false errors.
+
+```sh
+target/release/n2t check "$N2T_COURSE_DIR/projects"    # expect: 0 errors, 0 warnings
+```
+
+`docs/VERIFICATION.md` has the numbers from the last full run.
