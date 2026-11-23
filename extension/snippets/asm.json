@@ -1,0 +1,43 @@
+{
+  "Goto label": {
+    "prefix": "goto",
+    "body": [
+      "@${1:LABEL}",
+      "0;JMP"
+    ],
+    "description": "Unconditional jump"
+  },
+  "If D jump": {
+    "prefix": "ifd",
+    "body": [
+      "@${1:LABEL}",
+      "D;${2|JEQ,JNE,JGT,JGE,JLT,JLE|}"
+    ],
+    "description": "Jump depending on D"
+  },
+  "Load into D": {
+    "prefix": "ld",
+    "body": [
+      "@${1:R0}",
+      "D=M"
+    ],
+    "description": "D = RAM[symbol]"
+  },
+  "Store D": {
+    "prefix": "st",
+    "body": [
+      "@${1:R0}",
+      "M=D"
+    ],
+    "description": "RAM[symbol] = D"
+  },
+  "Program end": {
+    "prefix": "end",
+    "body": [
+      "(END)",
+      "    @END",
+      "    0;JMP"
+    ],
+    "description": "Infinite loop that ends a program"
+  }
+}

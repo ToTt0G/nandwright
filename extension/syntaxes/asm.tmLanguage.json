@@ -1,0 +1,92 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Hack Assembly",
+  "scopeName": "source.asm.hack",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.hack-asm",
+      "match": "//.*$"
+    },
+    {
+      "match": "^\\s*(\\()([A-Za-z_.$:][A-Za-z0-9_.$:]*)(\\))",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.label.hack-asm"
+        },
+        "2": {
+          "name": "entity.name.label.hack-asm"
+        },
+        "3": {
+          "name": "punctuation.definition.label.hack-asm"
+        }
+      }
+    },
+    {
+      "match": "(@)(R(?:1[0-5]|[0-9])|SP|LCL|ARG|THIS|THAT|SCREEN|KBD)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.address.hack-asm"
+        },
+        "2": {
+          "name": "support.constant.hack-asm"
+        }
+      }
+    },
+    {
+      "match": "(@)(\\d+)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.address.hack-asm"
+        },
+        "2": {
+          "name": "constant.numeric.hack-asm"
+        }
+      }
+    },
+    {
+      "match": "(@)([A-Za-z_.$:][A-Za-z0-9_.$:]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.address.hack-asm"
+        },
+        "2": {
+          "name": "variable.other.hack-asm"
+        }
+      }
+    },
+    {
+      "match": "(;)\\s*(JGT|JEQ|JGE|JLT|JNE|JLE|JMP)\\b",
+      "captures": {
+        "1": {
+          "name": "punctuation.separator.hack-asm"
+        },
+        "2": {
+          "name": "keyword.control.jump.hack-asm"
+        }
+      }
+    },
+    {
+      "match": "\\b([AMD]{1,3})\\s*(=)",
+      "captures": {
+        "1": {
+          "name": "variable.language.register.hack-asm"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.hack-asm"
+        }
+      }
+    },
+    {
+      "name": "variable.language.register.hack-asm",
+      "match": "\\b[AMD]\\b"
+    },
+    {
+      "name": "constant.numeric.hack-asm",
+      "match": "\\b[01]\\b"
+    },
+    {
+      "name": "keyword.operator.hack-asm",
+      "match": "[-+&|!]"
+    }
+  ]
+}

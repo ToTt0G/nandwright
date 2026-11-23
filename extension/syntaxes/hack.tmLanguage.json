@@ -1,0 +1,41 @@
+{
+  "name": "Hack Machine Code",
+  "scopeName": "source.hack",
+  "patterns": [
+    {
+      "match": "^\\s*(0)([01]{15})\\s*$",
+      "captures": {
+        "1": {
+          "name": "keyword.control.a-instruction.hack"
+        },
+        "2": {
+          "name": "constant.numeric.hack"
+        }
+      }
+    },
+    {
+      "match": "^\\s*(111)([01])([01]{6})([01]{3})([01]{3})\\s*$",
+      "captures": {
+        "1": {
+          "name": "keyword.control.c-instruction.hack"
+        },
+        "2": {
+          "name": "storage.modifier.hack"
+        },
+        "3": {
+          "name": "keyword.operator.comp.hack"
+        },
+        "4": {
+          "name": "variable.language.dest.hack"
+        },
+        "5": {
+          "name": "keyword.control.jump.hack"
+        }
+      }
+    },
+    {
+      "name": "invalid.illegal.hack",
+      "match": "^.*[^01\\s].*$"
+    }
+  ]
+}

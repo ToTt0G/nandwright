@@ -1,0 +1,73 @@
+{
+  "name": "Nand2Tetris VM",
+  "scopeName": "source.vm.nand2tetris",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.vm",
+      "match": "//.*$"
+    },
+    {
+      "match": "\\b(push|pop)\\s+(argument|local|static|constant|this|that|pointer|temp)\\s+(\\d+)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.memory.vm"
+        },
+        "2": {
+          "name": "storage.type.segment.vm"
+        },
+        "3": {
+          "name": "constant.numeric.vm"
+        }
+      }
+    },
+    {
+      "match": "\\b(function|call)\\s+([A-Za-z_.:][A-Za-z0-9_.:]*)\\s+(\\d+)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.function.vm"
+        },
+        "2": {
+          "name": "entity.name.function.vm"
+        },
+        "3": {
+          "name": "constant.numeric.vm"
+        }
+      }
+    },
+    {
+      "match": "\\b(label|goto|if-goto)\\s+([A-Za-z_.:][A-Za-z0-9_.:]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.flow.vm"
+        },
+        "2": {
+          "name": "entity.name.label.vm"
+        }
+      }
+    },
+    {
+      "name": "keyword.control.return.vm",
+      "match": "\\breturn\\b"
+    },
+    {
+      "name": "keyword.operator.arithmetic.vm",
+      "match": "\\b(add|sub|neg|eq|gt|lt|and|or|not)\\b"
+    },
+    {
+      "name": "keyword.other.memory.vm",
+      "match": "\\b(push|pop)\\b"
+    },
+    {
+      "name": "keyword.control.vm",
+      "match": "\\b(function|call|label|goto|if-goto)\\b"
+    },
+    {
+      "name": "storage.type.segment.vm",
+      "match": "\\b(argument|local|static|constant|this|that|pointer|temp)\\b"
+    },
+    {
+      "name": "constant.numeric.vm",
+      "match": "\\b\\d+\\b"
+    }
+  ]
+}

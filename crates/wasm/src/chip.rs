@@ -79,6 +79,7 @@ impl ChipSession {
                 let code = request["code"].as_u64().unwrap_or(0) as u16;
                 return Ok(json!({ "accepted": self.machine.set_key(code) }));
             }
+            "chip.table" => return self.table(),
             other => return Err(format!("`{other}` is not an operation of a chip")),
         }
         Ok(self.state())
@@ -102,6 +103,73 @@ impl ChipSession {
         let bits = parse_value(value, width)?;
         circuit.set(pin, bits);
         Ok(())
+    }
+
+    /// The truth table of a small combinational chip: every combination of
+    /// its inputs with the outputs it produces. The chip's current inputs
+    /// are put back afterwards.
+    fn table(&mut self) -> Reply {
+        const MAX_INPUT_BITS: u32 = 6;
+        let circuit = self.circuit()?;
+        let definition = circuit.definition().clone();
+        let inputs: Vec<(String, u32)> = definition
+            .interface
+            .inputs
+            .iter()
+            .map(|p| (p.name.clone(), p.width))
+            .collect();
+        let outputs: Vec<(String, u32)> = definition
+            .interface
+            .outputs
+            .iter()
+            .map(|p| (p.name.clone(), p.width))
+            .collect();
+        let bits: u32 = inputs.iter().map(|(_, w)| *w).sum();
+        if definition.sequential {
+            return Err("a clocked chip has no truth table: its outputs depend on time".into());
+        }
+        if bits > MAX_INPUT_BITS {
+            return Err(format!(
+                "the chip has {bits} input bits; a truth table is shown for up to {MAX_INPUT_BITS}"
+            ));
+        }
+        let saved: Vec<u64> = inputs
+            .iter()
+            .map(|(name, _)| circuit.get(name).unwrap_or(0))
+            .collect();
+        let mut rows = Vec::new();
+        for combination in 0u64..(1 << bits) {
+            // The first input is the most significant, as truth tables are
+            // usually written.
+            let mut shift = bits;
+            let mut row_inputs = Vec::new();
+            for (name, width) in &inputs {
+                shift -= width;
+                let value = (combination >> shift) & ((1 << width) - 1);
+                circuit.set(name, value);
+                row_inputs.push(value);
+            }
+            circuit.eval();
+            let row_outputs: Vec<u64> = outputs
+                .iter()
+                .map(|(name, _)| circuit.get(name).unwrap_or(0))
+                .collect();
+            rows.push(json!({ "inputs": row_inputs, "outputs": row_outputs }));
+        }
+        for ((name, _), value) in inputs.iter().zip(saved) {
+            circuit.set(name, value);
+        }
+        circuit.eval();
+        let columns = |pins: &[(String, u32)]| -> Vec<Value> {
+            pins.iter()
+                .map(|(name, width)| json!({ "name": name, "width": width }))
+                .collect()
+        };
+        Ok(json!({
+            "inputs": columns(&inputs),
+            "outputs": columns(&outputs),
+            "rows": rows,
+        }))
     }
 
     pub fn state(&self) -> Value {

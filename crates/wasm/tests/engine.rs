@@ -300,6 +300,88 @@ fn an_interactive_chip_can_be_poked_and_clocked() {
 }
 
 #[test]
+fn a_small_combinational_chip_has_a_truth_table() {
+    let (mut engine, _) = engine();
+    let chip = call(
+        &mut engine,
+        json!({"op": "chip.open", "path": format!("{DIR}/Majority.hdl")}),
+    );
+    let session = &chip["session"];
+    call(
+        &mut engine,
+        json!({"op": "chip.set", "session": session, "pin": "b", "value": 1, "eval": true}),
+    );
+    let table = call(&mut engine, json!({"op": "chip.table", "session": session}));
+    let rows = table["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 8);
+    assert_eq!(table["inputs"][0]["name"], "a");
+    let outputs: Vec<u64> = rows
+        .iter()
+        .map(|r| r["outputs"][0].as_u64().unwrap())
+        .collect();
+    assert_eq!(outputs, [0, 0, 0, 1, 0, 1, 1, 1]);
+    assert_eq!(rows[3]["inputs"], json!([0, 1, 1]));
+    // The inputs the student had set are untouched.
+    let state = call(&mut engine, json!({"op": "chip.state", "session": session}));
+    let b = state["pins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "b")
+        .unwrap();
+    assert_eq!(b["bits"], 1);
+
+    let clocked = call(
+        &mut engine,
+        json!({"op": "chip.open", "path": format!("{DIR}/Accumulator.hdl")}),
+    );
+    let table = call(
+        &mut engine,
+        json!({"op": "chip.table", "session": clocked["session"]}),
+    );
+    assert!(
+        table["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("clocked")
+    );
+}
+
+#[test]
+fn runs_to_an_editor_breakpoint() {
+    let (mut engine, _) = engine();
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": format!("{DIR}/Majority.tst")}),
+    );
+    let session = &opened["session"];
+    // Line 10 (zero-based) is the fourth row, `set a 0, set b 1, set c 1, …`.
+    let status = call(
+        &mut engine,
+        json!({"op": "test.run", "session": session, "breakLines": [10]}),
+    );
+    assert_eq!(status["state"], "suspended", "{status}");
+    assert_eq!(status["reason"], "breakpoint");
+    assert_eq!(status["next"]["startLine"], 10);
+    let outputs = status["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "output")
+        .count();
+    assert_eq!(
+        outputs, 4,
+        "the header and three rows come before the breakpoint"
+    );
+    let status = call(
+        &mut engine,
+        json!({"op": "test.run", "session": session, "breakLines": [10]}),
+    );
+    assert_eq!(status["state"], "finished", "{status}");
+    assert_eq!(status["outcome"]["kind"], "passed");
+}
+
+#[test]
 fn a_chip_with_errors_explains_itself() {
     let (mut engine, host) = engine();
     host.insert(

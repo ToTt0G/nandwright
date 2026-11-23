@@ -1,0 +1,111 @@
+{
+  "Class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "    $0",
+      "}"
+    ],
+    "description": "Class declaration"
+  },
+  "Main": {
+    "prefix": "main",
+    "body": [
+      "class Main {",
+      "    function void main() {",
+      "        $0",
+      "        return;",
+      "    }",
+      "}"
+    ],
+    "description": "Main class with main function"
+  },
+  "Constructor": {
+    "prefix": "constructor",
+    "body": [
+      "constructor ${1:Name} new(${2}) {",
+      "    $0",
+      "    return this;",
+      "}"
+    ],
+    "description": "Constructor"
+  },
+  "Function": {
+    "prefix": "function",
+    "body": [
+      "function ${1:void} ${2:name}(${3}) {",
+      "    $0",
+      "    return;",
+      "}"
+    ],
+    "description": "Static function"
+  },
+  "Method": {
+    "prefix": "method",
+    "body": [
+      "method ${1:void} ${2:name}(${3}) {",
+      "    $0",
+      "    return;",
+      "}"
+    ],
+    "description": "Method"
+  },
+  "If": {
+    "prefix": "if",
+    "body": [
+      "if (${1:condition}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "If statement"
+  },
+  "If else": {
+    "prefix": "ifelse",
+    "body": [
+      "if (${1:condition}) {",
+      "    $2",
+      "} else {",
+      "    $0",
+      "}"
+    ],
+    "description": "If/else statement"
+  },
+  "While": {
+    "prefix": "while",
+    "body": [
+      "while (${1:condition}) {",
+      "    $0",
+      "}"
+    ],
+    "description": "While loop"
+  },
+  "Let": {
+    "prefix": "let",
+    "body": [
+      "let ${1:x} = ${2:0};"
+    ],
+    "description": "Assignment"
+  },
+  "Do": {
+    "prefix": "do",
+    "body": [
+      "do ${1:Output}.${2:printString}(${3});"
+    ],
+    "description": "Call a subroutine"
+  },
+  "Var": {
+    "prefix": "var",
+    "body": [
+      "var ${1:int} ${2:x};"
+    ],
+    "description": "Local variable"
+  },
+  "Print string": {
+    "prefix": "print",
+    "body": [
+      "do Output.printString(\"${1}\");",
+      "do Output.println();"
+    ],
+    "description": "Print a line"
+  }
+}

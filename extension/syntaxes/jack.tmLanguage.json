@@ -1,0 +1,134 @@
+{
+  "name": "Jack",
+  "scopeName": "source.jack",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "match": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "storage.type.class.jack"
+        },
+        "2": {
+          "name": "entity.name.type.class.jack"
+        }
+      }
+    },
+    {
+      "match": "\\b(constructor|function|method)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "storage.type.function.jack"
+        },
+        "2": {
+          "name": "storage.type.jack"
+        },
+        "3": {
+          "name": "entity.name.function.jack"
+        }
+      }
+    },
+    {
+      "name": "storage.modifier.jack",
+      "match": "\\b(static|field|var)\\b"
+    },
+    {
+      "name": "storage.type.jack",
+      "match": "\\b(int|char|boolean|void)\\b"
+    },
+    {
+      "name": "storage.type.function.jack",
+      "match": "\\b(constructor|function|method|class)\\b"
+    },
+    {
+      "name": "keyword.control.jack",
+      "match": "\\b(let|do|if|else|while|return)\\b"
+    },
+    {
+      "name": "constant.language.jack",
+      "match": "\\b(true|false|null)\\b"
+    },
+    {
+      "name": "variable.language.this.jack",
+      "match": "\\bthis\\b"
+    },
+    {
+      "name": "constant.numeric.jack",
+      "match": "\\b\\d+\\b"
+    },
+    {
+      "match": "\\b(Math|String|Array|Output|Screen|Keyboard|Memory|Sys)\\b(?=\\s*\\.)",
+      "name": "support.class.jack"
+    },
+    {
+      "match": "\\b([A-Z][A-Za-z0-9_]*)\\s*(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.type.jack"
+        },
+        "2": {
+          "name": "punctuation.accessor.jack"
+        },
+        "3": {
+          "name": "entity.name.function.jack"
+        }
+      }
+    },
+    {
+      "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(\\.)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "variable.other.jack"
+        },
+        "2": {
+          "name": "punctuation.accessor.jack"
+        },
+        "3": {
+          "name": "entity.name.function.jack"
+        }
+      }
+    },
+    {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "name": "entity.name.function.jack"
+    },
+    {
+      "name": "entity.name.type.jack",
+      "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+    },
+    {
+      "name": "keyword.operator.jack",
+      "match": "[-+*/&|<>=~]"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.jack",
+          "begin": "/\\*\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.block.jack",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.line.double-slash.jack",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.jack",
+      "begin": "\"",
+      "end": "\"|$"
+    }
+  }
+}

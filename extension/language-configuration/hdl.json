@@ -1,24 +1,61 @@
 {
   "comments": {
     "lineComment": "//",
-    "blockComment": ["/*", "*/"]
+    "blockComment": [
+      "/*",
+      "*/"
+    ]
   },
   "brackets": [
-    ["{", "}"],
-    ["(", ")"],
-    ["[", "]"]
+    [
+      "{",
+      "}"
+    ],
+    [
+      "(",
+      ")"
+    ],
+    [
+      "[",
+      "]"
+    ]
   ],
   "autoClosingPairs": [
-    { "open": "{", "close": "}" },
-    { "open": "(", "close": ")" },
-    { "open": "[", "close": "]" },
-    { "open": "/**", "close": " */", "notIn": ["string", "comment"] }
+    {
+      "open": "{",
+      "close": "}"
+    },
+    {
+      "open": "(",
+      "close": ")"
+    },
+    {
+      "open": "[",
+      "close": "]"
+    },
+    {
+      "open": "/**",
+      "close": " */",
+      "notIn": [
+        "string",
+        "comment"
+      ]
+    }
   ],
   "autoCloseBefore": ";:.,=}])> \n\t",
   "surroundingPairs": [
-    ["{", "}"],
-    ["(", ")"],
-    ["[", "]"]
+    [
+      "{",
+      "}"
+    ],
+    [
+      "(",
+      ")"
+    ],
+    [
+      "[",
+      "]"
+    ]
   ],
   "folding": {
     "markers": {
@@ -28,26 +65,38 @@
   },
   "wordPattern": "[A-Za-z_][A-Za-z0-9_]*|\\d+",
   "indentationRules": {
-    "increaseIndentPattern": "^.*(\\{[^}]*|\\([^)]*|PARTS\\s*:\\s*)$",
+    "increaseIndentPattern": "^.*(\\{[^}]*|\\([^)]*)$",
     "decreaseIndentPattern": "^\\s*[})]"
   },
   "onEnterRules": [
     {
       "beforeText": "^\\s*/\\*\\*(?!/)([^*]|\\*(?!/))*$",
       "afterText": "^\\s*\\*/$",
-      "action": { "indent": "indentOutdent", "appendText": " * " }
+      "action": {
+        "indent": "indentOutdent",
+        "appendText": " * "
+      }
     },
     {
       "beforeText": "^\\s*/\\*\\*(?!/)([^*]|\\*(?!/))*$",
-      "action": { "indent": "none", "appendText": " * " }
+      "action": {
+        "indent": "none",
+        "appendText": " * "
+      }
     },
     {
       "beforeText": "^(\\t|[ ])*[ ]\\*([ ]([^*]|\\*(?!/))*)?$",
-      "action": { "indent": "none", "appendText": "* " }
+      "action": {
+        "indent": "none",
+        "appendText": "* "
+      }
     },
     {
       "beforeText": "^(\\t|[ ])*[ ]\\*/\\s*$",
-      "action": { "indent": "none", "removeText": 1 }
+      "action": {
+        "indent": "none",
+        "removeText": 1
+      }
     }
   ]
 }

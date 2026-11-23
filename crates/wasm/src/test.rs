@@ -82,7 +82,13 @@ impl TestSession {
         match op {
             "test.run" => {
                 let budget = request["budget"].as_u64().unwrap_or(DEFAULT_BUDGET);
-                let outcome = self.runner.run_for(budget);
+                let outcome = match request["breakLines"].as_array() {
+                    Some(lines) if !lines.is_empty() => {
+                        let lines: Vec<u64> = lines.iter().filter_map(Value::as_u64).collect();
+                        self.run_to_line(budget, &lines)
+                    }
+                    _ => self.runner.run_for(budget),
+                };
                 Ok(self.status(outcome))
             }
             "test.step" => {
@@ -98,6 +104,53 @@ impl TestSession {
                 Ok(json!({ "accepted": self.runner.machine_mut().set_key(code) }))
             }
             other => Err(format!("`{other}` is not an operation of a test run")),
+        }
+    }
+
+    /// Runs until the next command starts on one of `lines` (zero-based), as
+    /// an editor breakpoint asks, or until the run stops for another reason.
+    fn run_to_line(&mut self, budget: u64, lines: &[u64]) -> Outcome {
+        for _ in 0..budget {
+            let outcome = self.runner.step_command();
+            let at_step_end = matches!(
+                outcome,
+                Outcome::Suspended {
+                    reason: SuspendReason::StepEnd,
+                    ..
+                }
+            );
+            if !at_step_end {
+                return outcome;
+            }
+            let executed = match &outcome {
+                Outcome::Suspended { span, .. } => *span,
+                _ => Span::default(),
+            };
+            let line_of =
+                |offset: usize| u64::from(self.lines.position_utf16(&self.source, offset).line);
+            // A breakpoint is hit on arriving at its line: from another line,
+            // or by a loop coming back around to an earlier command on it.
+            // The remaining commands of the line just left do not re-trigger.
+            let next_line = self.runner.next_span().and_then(|next| {
+                let line = line_of(next.start);
+                (line != line_of(executed.start) || next.start <= executed.start).then_some(line)
+            });
+            if next_line.is_some_and(|line| lines.contains(&line)) {
+                return match outcome {
+                    Outcome::Suspended { span, .. } => Outcome::Suspended {
+                        reason: SuspendReason::Breakpoint,
+                        span,
+                    },
+                    other => other,
+                };
+            }
+        }
+        match self.runner.next_span() {
+            Some(span) => Outcome::Suspended {
+                reason: SuspendReason::Budget,
+                span,
+            },
+            None => self.runner.run_for(0),
         }
     }
 

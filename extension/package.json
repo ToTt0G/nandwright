@@ -1,0 +1,327 @@
+{
+  "name": "nandwright",
+  "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
+  "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
+  "version": "0.1.0",
+  "publisher": "nandwright",
+  "license": "MPL-2.0",
+  "private": true,
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1f2430",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ToTt0G/nandwright"
+  },
+  "bugs": {
+    "url": "https://github.com/ToTt0G/nandwright/issues"
+  },
+  "homepage": "https://github.com/ToTt0G/nandwright#readme",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Testing",
+    "Debuggers",
+    "Education",
+    "Formatters",
+    "Snippets"
+  ],
+  "keywords": [
+    "nand2tetris",
+    "nand to tetris",
+    "hdl",
+    "hardware simulator",
+    "hack assembly",
+    "cpu emulator",
+    "vm emulator",
+    "jack",
+    "tst",
+    "elements of computing systems"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/*.hdl",
+    "workspaceContains:**/*.tst",
+    "workspaceContains:**/*.jack",
+    "onDebugResolve:nandwright"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "hdl",
+        "aliases": ["Nand2Tetris HDL", "HDL"],
+        "extensions": [".hdl"],
+        "configuration": "./language-configuration/hdl.json"
+      },
+      {
+        "id": "tst",
+        "aliases": ["Nand2Tetris Test Script", "TST"],
+        "extensions": [".tst"],
+        "configuration": "./language-configuration/tst.json"
+      },
+      {
+        "id": "cmp",
+        "aliases": ["Nand2Tetris Compare/Output Table"],
+        "extensions": [".cmp", ".out"],
+        "configuration": "./language-configuration/cmp.json"
+      },
+      {
+        "id": "hack-asm",
+        "aliases": ["Hack Assembly"],
+        "extensions": [".asm"],
+        "configuration": "./language-configuration/asm.json"
+      },
+      {
+        "id": "hack",
+        "aliases": ["Hack Machine Code"],
+        "extensions": [".hack"]
+      },
+      {
+        "id": "vm",
+        "aliases": ["Nand2Tetris VM"],
+        "extensions": [".vm"],
+        "configuration": "./language-configuration/vm.json"
+      },
+      {
+        "id": "jack",
+        "aliases": ["Jack"],
+        "extensions": [".jack"],
+        "configuration": "./language-configuration/jack.json"
+      }
+    ],
+    "grammars": [
+      { "language": "hdl", "scopeName": "source.hdl.nand2tetris", "path": "./syntaxes/hdl.tmLanguage.json" },
+      { "language": "tst", "scopeName": "source.tst.nand2tetris", "path": "./syntaxes/tst.tmLanguage.json" },
+      { "language": "cmp", "scopeName": "text.cmp.nand2tetris", "path": "./syntaxes/cmp.tmLanguage.json" },
+      { "language": "hack-asm", "scopeName": "source.asm.hack", "path": "./syntaxes/asm.tmLanguage.json" },
+      { "language": "hack", "scopeName": "source.hack", "path": "./syntaxes/hack.tmLanguage.json" },
+      { "language": "vm", "scopeName": "source.vm.nand2tetris", "path": "./syntaxes/vm.tmLanguage.json" },
+      { "language": "jack", "scopeName": "source.jack", "path": "./syntaxes/jack.tmLanguage.json" }
+    ],
+    "snippets": [
+      { "language": "hdl", "path": "./snippets/hdl.json" },
+      { "language": "tst", "path": "./snippets/tst.json" },
+      { "language": "hack-asm", "path": "./snippets/asm.json" },
+      { "language": "vm", "path": "./snippets/vm.json" },
+      { "language": "jack", "path": "./snippets/jack.json" }
+    ],
+    "configurationDefaults": {
+      "[hdl]": { "editor.semanticHighlighting.enabled": true },
+      "[cmp]": { "editor.wordWrap": "off", "editor.renderWhitespace": "none" }
+    },
+    "configuration": {
+      "title": "Nandwright",
+      "properties": {
+        "nandwright.test.pressKeys": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When a test script waits for a key (the official project 5 `Memory.tst` asks you to hold down `K`), press that key for it. Turn this off to press the keys yourself in the chip panel, as you would in the official Hardware Simulator."
+        },
+        "nandwright.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace the communication with the language server in the Output panel. For reporting bugs."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "nandwright.runTest",
+        "title": "Run Test",
+        "category": "Nand2Tetris",
+        "icon": "$(play)"
+      },
+      {
+        "command": "nandwright.debugTest",
+        "title": "Debug Test (Step Through the Script)",
+        "category": "Nand2Tetris",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "nandwright.openChip",
+        "title": "Open Chip in Simulator",
+        "category": "Nand2Tetris",
+        "icon": "$(circuit-board)"
+      },
+      {
+        "command": "nandwright.compareOutput",
+        "title": "Compare Output with Expected (.out ↔ .cmp)",
+        "category": "Nand2Tetris",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "nandwright.getStarted",
+        "title": "Get Started",
+        "category": "Nand2Tetris"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "nandwright.runTest",
+          "when": "resourceLangId == hdl || resourceLangId == tst",
+          "group": "navigation@1"
+        },
+        {
+          "command": "nandwright.debugTest",
+          "when": "resourceLangId == hdl || resourceLangId == tst",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "nandwright.openChip",
+          "when": "resourceLangId == hdl",
+          "group": "navigation@10"
+        },
+        {
+          "command": "nandwright.compareOutput",
+          "when": "resourceLangId == cmp || resourceLangId == tst",
+          "group": "navigation@11"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "nandwright.runTest",
+          "when": "resourceExtname == .tst || resourceExtname == .hdl",
+          "group": "nandwright@1"
+        },
+        {
+          "command": "nandwright.openChip",
+          "when": "resourceExtname == .hdl",
+          "group": "nandwright@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "nandwright.runTest",
+          "when": "editorLangId == hdl || editorLangId == tst"
+        },
+        {
+          "command": "nandwright.debugTest",
+          "when": "editorLangId == hdl || editorLangId == tst"
+        },
+        {
+          "command": "nandwright.openChip",
+          "when": "editorLangId == hdl"
+        },
+        {
+          "command": "nandwright.compareOutput",
+          "when": "editorLangId == cmp || editorLangId == tst || editorLangId == hdl"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "nandwright.runTest",
+        "key": "ctrl+alt+t",
+        "mac": "cmd+alt+t",
+        "when": "editorLangId == hdl || editorLangId == tst"
+      }
+    ],
+    "breakpoints": [
+      { "language": "tst" }
+    ],
+    "debuggers": [
+      {
+        "type": "nandwright",
+        "label": "Nand2Tetris",
+        "languages": ["tst"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["script"],
+            "properties": {
+              "script": {
+                "type": "string",
+                "description": "The .tst test script to step through.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause before the first command.",
+                "default": true
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "nandwright",
+            "request": "launch",
+            "name": "Step through a test script",
+            "script": "${file}"
+          }
+        ]
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "nandwright.start",
+        "title": "Nand2Tetris in VS Code",
+        "description": "From an empty chip to a passing test, without leaving the editor.",
+        "steps": [
+          {
+            "id": "open",
+            "title": "Open your nand2tetris folder",
+            "description": "Open the folder that holds the course's ``projects`` folder (or any folder with ``.hdl`` and ``.tst`` files). You do not need the ``tools`` folder or Java.\n[Open Folder](command:workbench.action.files.openFolder)\n[Try the example chip instead](command:nandwright.openExample)",
+            "media": { "markdown": "media/walkthrough/open.md" },
+            "completionEvents": ["onContext:nandwright.hasChips"]
+          },
+          {
+            "id": "write",
+            "title": "Write a chip",
+            "description": "Open a ``.hdl`` file and fill in its ``PARTS:`` section. Completion suggests chips and their pins, hover shows each chip's interface, and mistakes are underlined as you type. An empty chip is not an error: it is where every project starts.",
+            "media": { "markdown": "media/walkthrough/write.md" }
+          },
+          {
+            "id": "run",
+            "title": "Run its test",
+            "description": "Press the play button at the top right of the editor, or use the Testing view to run a whole project. The result matches the official Hardware Simulator.\n[Run the test of the open chip](command:nandwright.runTest)",
+            "media": { "markdown": "media/walkthrough/run.md" },
+            "completionEvents": ["onCommand:nandwright.runTest"]
+          },
+          {
+            "id": "debug",
+            "title": "See why a test fails",
+            "description": "A failing test shows the expected and actual rows side by side, with the value of every internal pin at that step. Open the chip in the simulator to try inputs yourself, or step through the test script line by line.\n[Open the chip in the simulator](command:nandwright.openChip)",
+            "media": { "markdown": "media/walkthrough/debug.md" },
+            "completionEvents": ["onCommand:nandwright.openChip"]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "test:unit": "node --test dist-test/unit",
+    "test:integration": "node scripts/run-integration.mjs",
+    "package": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.0",
+    "@types/vscode": "~1.91.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.1",
+    "esbuild": "^0.28.2",
+    "mocha": "^12.0.3",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^11.0.1"
+  }
+}

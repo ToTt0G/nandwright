@@ -1,0 +1,11 @@
+{
+  "Function": {
+    "prefix": "function",
+    "body": [
+      "function ${1:Class.name} ${2:0}",
+      "    $0",
+      "    return"
+    ],
+    "description": "Function definition"
+  }
+}
