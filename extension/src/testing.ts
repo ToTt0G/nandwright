@@ -372,9 +372,22 @@ function groupPins(pins: Pin[]): string {
         .join('\n');
 }
 
+/** The names of the columns in which two rows of an output table differ. */
+export function differingColumns(header: string | undefined, expected: string | null, actual: string | null): string[] {
+    if (!header || expected === null || actual === null) {
+        return [];
+    }
+    const cells = (row: string) => row.split('|').slice(1, -1);
+    const [names, want, got] = [cells(header), cells(expected), cells(actual)];
+    if (want.length !== got.length || want.length !== names.length) {
+        return [];
+    }
+    return names.filter((_, i) => want[i] !== got[i]).map((name) => name.trim());
+}
+
 /**
- * One message with the whole expected/actual table as a diff, then one per
- * failing row at the script line that produced it, with the pin values.
+ * One message per failing row, at the script line that produced it, with the
+ * pin values at that step; then the whole expected and actual tables as a diff.
  */
 function failureMessages(
     uri: vscode.Uri,
@@ -384,31 +397,30 @@ function failureMessages(
     produced: string[],
 ): vscode.TestMessage[] {
     const compareName = inspection.comparePath ? path.basename(inspection.comparePath) : 'the compare file';
-    const summary =
-        failures.length > 1
-            ? `${failures.length} lines differ from ${compareName}; the first is line ${outcome.line}.`
-            : `Line ${outcome.line} differs from ${compareName}.`;
-    const overview = vscode.TestMessage.diff(
-        summary,
-        (inspection.expected ?? []).join('\n'),
-        produced.join('\n'),
-    );
-    if (outcome.range) {
-        overview.location = new vscode.Location(uri, toRange(outcome.range));
-    }
-    const messages = [overview];
+    const header = inspection.expected?.[0];
+    const messages: vscode.TestMessage[] = [];
     for (const failure of failures.slice(0, MAX_FAILURE_MESSAGES)) {
+        const columns = differingColumns(header, failure.expected, failure.actual);
+        const where = columns.length > 0 ? `: ${columns.join(', ')} ${columns.length === 1 ? 'differs' : 'differ'}` : ' differs';
         const text = [
-            `Line ${failure.line} of ${compareName}:`,
+            `Line ${failure.line} of ${compareName}${where}`,
+            '',
             `expected  ${failure.expected ?? '(the compare file ended here)'}`,
             `actual    ${failure.actual ?? '(nothing)'}`,
             '',
-            'Values at this step:',
+            'Values at this step',
             groupPins(failure.state),
         ].join('\n');
         const message = new vscode.TestMessage(text);
         message.location = new vscode.Location(uri, toRange(failure.range));
         messages.push(message);
     }
+    const summary =
+        failures.length > 1
+            ? `${failures.length} lines differ from ${compareName}; the first is line ${outcome.line}.`
+            : `Line ${outcome.line} differs from ${compareName}.`;
+    // No location: in the editor the rows above speak for themselves, and
+    // this one is the full table in the Test Results panel.
+    messages.push(vscode.TestMessage.diff(summary, (inspection.expected ?? []).join('\n'), produced.join('\n')));
     return messages;
 }

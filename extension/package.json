@@ -238,7 +238,7 @@
       },
       {
         "command": "nandwright.compareOutput",
-        "title": "Compare Output with Expected (.out \u2194 .cmp)",
+        "title": "Compare Output with Expected (.out ↔ .cmp)",
         "category": "Nand2Tetris",
         "icon": "$(diff)"
       },
@@ -421,6 +421,7 @@
     "@vscode/vsce": "^4.1.1",
     "esbuild": "^0.28.2",
     "mocha": "^12.0.3",
+    "playwright-core": "^1.65.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {

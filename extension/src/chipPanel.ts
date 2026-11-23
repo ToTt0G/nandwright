@@ -313,7 +313,7 @@ button:focus-visible, input:focus-visible, tr:focus-visible { outline: 1px solid
 .bit { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, var(--vscode-descriptionForeground))); background: transparent; color: var(--vscode-foreground); }
 .bit.on { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border-color: var(--vscode-button-border, var(--vscode-contrastBorder, var(--vscode-button-background))); font-weight: 600; }
 button.bit:hover { border-color: var(--vscode-focusBorder); }
-.bit.readonly { border-style: dashed; cursor: default; }
+.bit.readonly { border-style: dashed; border-radius: 4px; cursor: default; }
 .bit.readonly.on { border-style: solid; }
 .bus-cell { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .bus { width: 100%; max-width: 260px; padding: 3px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent)); border-radius: 2px; }
