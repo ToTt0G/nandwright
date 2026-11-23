@@ -80,7 +80,25 @@ repository's fixtures and 1,140 generated valid and invalid programs are compile
 
 ## 5. VM emulator and built-in OS: `conformance/vm/diff.py`
 
-VM_NUMBERS
+The built-in Jack OS of the Java VM Emulator exists only in its graphical program, so the
+script drives that program on a virtual display. Each program runs for the same number of
+VM steps in the Java emulator and in the engine; then selected RAM cells, all 8,192 screen
+words and, for the error probes, the way the program stopped are compared.
+
+| Group | Programs | Same as Java |
+|---|---|---|
+| The VM programs of projects 7 and 8, set up as their test scripts set them up | 11 | 11 |
+| Jack programs of projects 9, 11 and 12, compiled with the Java compiler and run on the built-in OS of each emulator, with scripted key presses where a program waits for input | 16 | 16 |
+| Original probe programs for every function of the built-in OS and every run-time error | 25 | 25 |
+| **Total** | **52** | **52** |
+
+In all: 85,904 VM steps, 1,028 RAM cells and 114,688 screen words.
+
+The captured Java results of the probe programs are also kept as tests of the `n2t-vm`
+crate (`crates/vm/tests/java_probes`), so they run in CI without Java. A seeded fuzzer
+(generated programs; the count is set with `N2T_VM_FUZZ_ITERS`, and the crate's reviewer
+ran 20,000) and a sweep of every built-in function with hostile arguments check that
+nothing a program does can make the emulator panic; they compare nothing with Java.
 
 ## 6. The extension itself
 
@@ -91,8 +109,8 @@ VM_NUMBERS
 - `npm run test:integration -- --vsix <file>`: the packaged VSIX installed into a real
   VS Code and driven through its API: editing features, the Testing view, the chip
   simulator, the CPU and VM emulator panel, Jack compilation, reference comparison and the
-  script debugger. CI builds one VSIX on Linux and runs this suite against that same file
-  on Linux, Windows and macOS.
+  script debugger (including pausing a step that never ends). CI builds one VSIX on Linux
+  and runs this suite against that same file on Linux, Windows and macOS.
 
 ## What has not been checked
 
@@ -102,3 +120,10 @@ VM_NUMBERS
 - The newer project files of the web IDE and the book's second edition have not been run
   through the harness.
 - Error *messages* are not compared with Java's, only whether there is an error and where.
+- VM emulator: keyboard lines longer than 14,332 characters, the exact length of `Sys.wait`
+  in real time, key codes the comparison did not press, and programs that corrupt their
+  own call frames or the heap's bookkeeping have not been compared with Java (the fuzzer
+  only checks that they are handled safely).
+- The "already exists with different content" question of Assemble and Compile is not
+  clicked in the integration tests; the rule behind it (a file is replaced only as it was
+  when you were asked) is tested through the engine.
