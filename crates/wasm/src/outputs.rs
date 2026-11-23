@@ -5,11 +5,15 @@
 //! In projects 6, 10 and 11 the student writes an assembler, a syntax
 //! analyzer and a compiler. The `.hack`, `.xml` and `.vm` files in those
 //! folders are then *their* tool's output. So nothing here overwrites a file
-//! without being asked to: each operation reports whether the file it would
-//! write already exists with different content, and writes only with
-//! `"write": true`.
+//! without being asked to. Each operation reports, for every file it would
+//! write, whether that file exists on disk with other content, and a `state`
+//! token for what is there now. It writes only with `"write": true`, and it
+//! replaces a file with other content only if the request hands back the
+//! token it was given for that file (`"expect": {path: state}`): what gets
+//! replaced is what the student was asked about, not whatever is there by
+//! the time they have answered.
 
-use n2t_core::host::{HostError, SharedHost, path, read_text};
+use n2t_core::host::{HostError, SharedHost, decode_text, path, read_text};
 use n2t_core::source::LineIndex;
 use serde_json::{Value, json};
 
@@ -27,25 +31,96 @@ fn same_lines(a: &str, b: &str) -> bool {
         .eq(b.lines().map(str::trim_end))
 }
 
-/// `"missing"`, `"same"` or `"different"`: the file now on disk compared
-/// with `text`, ignoring line endings.
-fn existing(host: &SharedHost, file: &str, text: &str) -> Result<&'static str, Failure> {
-    match read_text(host.as_ref(), file) {
-        Ok(current) if same_lines(&current.text, text) => Ok("same"),
-        Ok(_) => Ok("different"),
-        Err(HostError::NotFound) => Ok("missing"),
-        Err(e) => Err(format!("cannot read `{}`: {e}", path::file_name(file))),
-    }
+/// One file an operation produces, and what is in its place now.
+struct Planned {
+    path: String,
+    text: String,
+    /// `"missing"`, `"same"` or `"different"`: the file on disk compared
+    /// with `text`, ignoring line endings.
+    existing: &'static str,
+    /// Identifies the bytes on disk now: `"missing"`, or a digest.
+    state: String,
 }
 
-fn write(host: &SharedHost, file: &str, text: &str, crlf: bool) -> Result<(), Failure> {
-    let data = if crlf {
-        text.replace('\n', "\r\n")
-    } else {
-        text.to_string()
+/// FNV-1a over the bytes, with their length: enough to notice that a file
+/// is no longer the one that was asked about.
+fn digest(data: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in data {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{}-{hash:016x}", data.len())
+}
+
+/// Looks at `path` on `disk`: the files themselves, not the editor's unsaved
+/// buffers. A buffer that happens to match says nothing about the file a
+/// write would replace.
+fn plan(disk: &SharedHost, path: String, text: String) -> Result<Planned, Failure> {
+    let (existing, state) = match disk.read(&path) {
+        Ok(bytes) => {
+            let state = digest(&bytes);
+            let existing = if same_lines(&decode_text(bytes).text, &text) {
+                "same"
+            } else {
+                "different"
+            };
+            (existing, state)
+        }
+        Err(HostError::NotFound) => ("missing", "missing".to_string()),
+        Err(e) => return Err(format!("cannot read `{}`: {e}", path::file_name(&path))),
     };
-    host.write(file, data.as_bytes())
-        .map_err(|e| format!("cannot write `{}`: {e}", path::file_name(file)))
+    Ok(Planned {
+        path,
+        text,
+        existing,
+        state,
+    })
+}
+
+/// Writes the planned files if the request asks for it and allows every
+/// replacement, and reports what happened. Either every file that needs
+/// writing is written or none is.
+fn finish(disk: &SharedHost, planned: Vec<Planned>, request: &Value) -> Reply {
+    let wanted = request["write"].as_bool().unwrap_or(false);
+    let crlf = request["crlf"].as_bool().unwrap_or(false);
+    // A file with other content is replaced only if it is still the file
+    // the caller was told about.
+    let conflicts: Vec<&str> = planned
+        .iter()
+        .filter(|p| p.existing == "different")
+        .filter(|p| request["expect"][p.path.as_str()].as_str() != Some(p.state.as_str()))
+        .map(|p| p.path.as_str())
+        .collect();
+    let write = wanted && conflicts.is_empty();
+    let mut outputs = Vec::new();
+    for p in &planned {
+        // A file that already says the same is left alone, line endings
+        // and all.
+        let written = write && p.existing != "same";
+        if written {
+            let data = if crlf {
+                p.text.replace('\n', "\r\n")
+            } else {
+                p.text.clone()
+            };
+            disk.write(&p.path, data.as_bytes())
+                .map_err(|e| format!("cannot write `{}`: {e}", path::file_name(&p.path)))?;
+        }
+        outputs.push(json!({
+            "path": p.path,
+            "text": p.text,
+            "existing": p.existing,
+            "state": p.state,
+            "written": written,
+        }));
+    }
+    Ok(json!({
+        "outputs": outputs,
+        "problems": [],
+        "written": write,
+        "conflicts": if wanted { json!(conflicts) } else { json!([]) },
+    }))
 }
 
 fn with_extension(file: &str, extension: &str) -> String {
@@ -53,8 +128,10 @@ fn with_extension(file: &str, extension: &str) -> String {
     path::join(dir, &format!("{}.{extension}", path::stem(file)))
 }
 
-/// `{"op":"asm.assemble","path": X.asm, "write": bool, "crlf": bool}`.
-pub fn assemble(host: &SharedHost, request: &Value) -> Reply {
+/// `{"op":"asm.assemble","path": X.asm, "write": bool, "crlf": bool,
+/// "expect": {path: state}}`. The source is read as the editor shows it;
+/// the `.hack` file is compared and written on disk.
+pub fn assemble(host: &SharedHost, disk: &SharedHost, request: &Value) -> Reply {
     let file = path::normalize(text(request, "path")?);
     let source = read(host, &file)?;
     let assembly = n2t_hack::assemble(&source);
@@ -71,26 +148,14 @@ pub fn assemble(host: &SharedHost, request: &Value) -> Reply {
             })
         })
         .collect();
-    let out = with_extension(&file, "hack");
     if !problems.is_empty() {
-        return Ok(json!({ "outputs": [], "problems": problems, "written": false }));
+        return Ok(
+            json!({ "outputs": [], "problems": problems, "written": false, "conflicts": [] }),
+        );
     }
     let hack = n2t_hack::hack_text(&assembly.words);
-    let state = existing(host, &out, &hack)?;
-    let wanted = request["write"].as_bool().unwrap_or(false);
-    if wanted {
-        write(
-            host,
-            &out,
-            &hack,
-            request["crlf"].as_bool().unwrap_or(false),
-        )?;
-    }
-    Ok(json!({
-        "outputs": [{ "path": out, "text": hack, "existing": state }],
-        "problems": [],
-        "written": wanted,
-    }))
+    let planned = plan(disk, with_extension(&file, "hack"), hack)?;
+    finish(disk, vec![planned], request)
 }
 
 fn jack_folder(host: &SharedHost, target: &str) -> Result<Vec<(String, String, String)>, Failure> {
@@ -119,10 +184,11 @@ fn jack_folder(host: &SharedHost, target: &str) -> Result<Vec<(String, String, S
         .collect()
 }
 
-/// `{"op":"jack.compile","path": folder or X.jack, "write": bool, "crlf": bool}`:
-/// compiles the Jack classes of a folder, as the official JackCompiler does
-/// for a folder. Nothing is written unless every class compiles.
-pub fn jack_compile(host: &SharedHost, request: &Value) -> Reply {
+/// `{"op":"jack.compile","path": folder or X.jack, "write": bool, "crlf": bool,
+/// "expect": {path: state}}`: compiles the Jack classes of a folder, as the
+/// official JackCompiler does for a folder. Nothing is written unless every
+/// class compiles and every replacement is allowed.
+pub fn jack_compile(host: &SharedHost, disk: &SharedHost, request: &Value) -> Reply {
     let target = path::normalize(text(request, "path")?);
     let classes = jack_folder(host, &target)?;
     let inputs: Vec<(&str, &str)> = classes
@@ -142,23 +208,17 @@ pub fn jack_compile(host: &SharedHost, request: &Value) -> Reply {
         }
     }
     if !problems.is_empty() {
-        return Ok(json!({ "outputs": [], "problems": problems, "written": false }));
+        return Ok(
+            json!({ "outputs": [], "problems": problems, "written": false, "conflicts": [] }),
+        );
     }
-    let mut outputs = Vec::new();
-    let wanted = request["write"].as_bool().unwrap_or(false);
-    let crlf = request["crlf"].as_bool().unwrap_or(false);
+    let mut planned = Vec::new();
     for (output, (_, _, file)) in program.files.iter().zip(&classes) {
-        let Some(vm) = &output.compiled.vm else {
-            continue;
-        };
-        let out = with_extension(file, "vm");
-        let state = existing(host, &out, vm)?;
-        if wanted {
-            write(host, &out, vm, crlf)?;
+        if let Some(vm) = &output.compiled.vm {
+            planned.push(plan(disk, with_extension(file, "vm"), vm.clone())?);
         }
-        outputs.push(json!({ "path": out, "text": vm, "existing": state }));
     }
-    Ok(json!({ "outputs": outputs, "problems": [], "written": wanted }))
+    finish(disk, planned, request)
 }
 
 /// `{"op":"reference","path": file}`: what the official tools would have

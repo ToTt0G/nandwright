@@ -10,7 +10,8 @@
 //! | op | does |
 //! |---|---|
 //! | `lsp` | feeds one JSON-RPC message to the language server |
-//! | `overlay.set`, `overlay.clear` | unsaved editor buffers that shadow files |
+//! | `start` | sets the first session number of a fresh engine, so that numbers are never reused after a restart |
+//! | `overlay.set`, `overlay.clear`, `overlay.replace` | unsaved editor buffers that shadow files |
 //! | `test.open`, `test.run`, `test.step`, `test.inspect` | a `.tst` script run |
 //! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.reset`, `chip.state` | an interactive chip |
 //! | `cpu.open`, `cpu.run`, `cpu.step`, `cpu.reset`, `cpu.restart`, `cpu.set`, `cpu.state` | a Hack computer running a program |
@@ -40,7 +41,7 @@ use serde_json::{Value, json};
 
 use crate::chip::ChipSession;
 use crate::computer::ComputerSession;
-use crate::overlay::OverlayHost;
+use crate::overlay::{Buffer, OverlayHost};
 use crate::test::TestSession;
 use crate::vmsession::VmSession;
 
@@ -96,20 +97,40 @@ impl Engine {
                 let message = text(request, "message")?;
                 Ok(json!({ "messages": self.lsp.handle(message) }))
             }
+            "start" => {
+                // Sessions of an engine that was replaced after a crash must
+                // not be mistaken for sessions of this one.
+                if self.sessions.is_empty() && self.next_session == 1 {
+                    self.next_session = request["firstSession"]
+                        .as_u64()
+                        .filter(|first| (1..=MAX_FIRST_SESSION).contains(first))
+                        .ok_or("`firstSession` must be a positive whole number")?;
+                }
+                Ok(json!({}))
+            }
             "overlay.set" => {
-                self.overlay
-                    .set(text(request, "path")?, text(request, "text")?);
+                self.overlay.set(buffer(request)?);
+                Ok(json!({}))
+            }
+            "overlay.replace" => {
+                let files = request["files"]
+                    .as_array()
+                    .ok_or("the request needs a `files` list")?;
+                let buffers = files.iter().map(buffer).collect::<Result<Vec<_>, _>>()?;
+                self.overlay.replace(buffers);
                 Ok(json!({}))
             }
             "overlay.clear" => {
                 match request["path"].as_str() {
                     Some(path) => self.overlay.clear(path),
-                    None => self.overlay.clear_all(),
+                    None => self.overlay.replace(Vec::new()),
                 }
                 Ok(json!({}))
             }
             "test.open" => {
-                let session = TestSession::open(&self.host, request)?;
+                // A run sees the editor as it was when the run began.
+                let frozen: SharedHost = Arc::new(self.overlay.snapshot());
+                let session = TestSession::open(&frozen, request)?;
                 let mut reply = session.describe();
                 reply["session"] = json!(self.add(Session::Test(Box::new(session))));
                 Ok(reply)
@@ -132,8 +153,8 @@ impl Engine {
                 reply["session"] = json!(self.add(Session::Vm(Box::new(session))));
                 Ok(reply)
             }
-            "jack.compile" => outputs::jack_compile(&self.host, request),
-            "asm.assemble" => outputs::assemble(&self.host, request),
+            "jack.compile" => outputs::jack_compile(&self.host, self.overlay.disk(), request),
+            "asm.assemble" => outputs::assemble(&self.host, self.overlay.disk(), request),
             "reference" => outputs::reference(&self.host, request),
             "close" => {
                 self.sessions
@@ -171,6 +192,35 @@ impl Engine {
     }
 }
 
+/// The most commands or instructions one request may run. A caller that
+/// wants more asks again; nothing a request says can make a call endless.
+pub(crate) const MAX_BUDGET: u64 = 50_000_000;
+
+/// Session numbers stay exact as JSON numbers (doubles).
+const MAX_FIRST_SESSION: u64 = 1 << 52;
+
+/// A `budget` or `count` field, capped at [`MAX_BUDGET`].
+pub(crate) fn budget(request: &Value, field: &str, default: u64) -> u64 {
+    request[field].as_u64().unwrap_or(default).min(MAX_BUDGET)
+}
+
+/// The `code` of a key: 0 (no key) to 65535, as the keyboard's memory cell
+/// holds it. Anything else is a mistake in the request, not a key.
+pub(crate) fn key_code(request: &Value) -> Result<u16, Failure> {
+    request["code"]
+        .as_u64()
+        .and_then(|code| u16::try_from(code).ok())
+        .ok_or_else(|| "a key `code` must be a whole number from 0 to 65535".to_string())
+}
+
+fn buffer(request: &Value) -> Result<Buffer, Failure> {
+    Ok(Buffer::new(
+        text(request, "path")?,
+        text(request, "text")?,
+        request["ignoreCase"].as_bool(),
+    ))
+}
+
 pub(crate) fn text<'a>(request: &'a Value, field: &str) -> Result<&'a str, Failure> {
     request[field]
         .as_str()
@@ -205,4 +255,29 @@ pub(crate) fn observed(values: &[n2t_simulator::Observed]) -> Value {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_request_does_a_bounded_amount_of_work() {
+        assert_eq!(
+            budget(&json!({"budget": u64::MAX}), "budget", 7),
+            MAX_BUDGET
+        );
+        assert_eq!(budget(&json!({"count": 12}), "count", 1), 12);
+        assert_eq!(budget(&json!({}), "count", 1), 1);
+        assert_eq!(budget(&json!({"count": -3}), "count", 1), 1);
+    }
+
+    #[test]
+    fn key_codes_are_checked_not_truncated() {
+        assert_eq!(key_code(&json!({"code": 0})), Ok(0));
+        assert_eq!(key_code(&json!({"code": 65535})), Ok(65535));
+        assert!(key_code(&json!({"code": 65536})).is_err());
+        assert!(key_code(&json!({"code": 65611})).is_err());
+        assert!(key_code(&json!({})).is_err());
+    }
 }

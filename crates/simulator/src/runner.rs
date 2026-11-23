@@ -467,6 +467,14 @@ impl ScriptRunner {
         self.execute(Mode::Step, u64::MAX)
     }
 
+    /// Like [`ScriptRunner::step`], but gives up after `budget` commands with
+    /// [`SuspendReason::Budget`]: a step can be a loop that never ends
+    /// (`while out <> 75 { eval, }`), and the caller must be able to stop it.
+    /// Calling it again carries on with the same step.
+    pub fn step_for(&mut self, budget: u64) -> Outcome {
+        self.execute(Mode::Step, budget)
+    }
+
     /// Executes a single simple command, suspending with [`SuspendReason::StepEnd`]
     /// even if the command is comma-terminated (e.g. `while out <> 75 { eval, }`).
     pub fn step_command(&mut self) -> Outcome {
@@ -478,11 +486,18 @@ impl ScriptRunner {
             return outcome.clone();
         }
         let mut outcome = self.execute_inner(mode, budget);
-        if let Some(e) = self.flush_output()
-            && outcome.is_terminal()
-            && outcome.is_success()
-        {
-            outcome = Outcome::FailedError(e);
+        if let Some(e) = self.flush_output() {
+            if matches!(&outcome, Outcome::FailedError(known) if known.message == e.message) {
+                // Already the result.
+            } else if outcome.is_terminal() && !outcome.is_success() {
+                // The run has already failed for another reason; that is
+                // the result, but the lost file is still worth a word.
+                self.events.push(Event::Note(e.message));
+            } else {
+                // A run whose output file cannot be written has no result
+                // to trust, whether it had finished or only paused.
+                outcome = Outcome::FailedError(e);
+            }
         }
         if outcome.is_terminal() {
             self.finished = Some(outcome.clone());
@@ -495,19 +510,25 @@ impl ScriptRunner {
         if !self.output_dirty {
             return None;
         }
-        self.output_dirty = false;
-        let (path, text) = self.output.as_ref()?;
+        let Some((path, text)) = self.output.as_ref() else {
+            self.output_dirty = false;
+            return None;
+        };
         let data = match self.options.newline {
             Newline::Lf => text.clone(),
             Newline::CrLf => text.replace('\n', "\r\n"),
         };
-        self.host
-            .write(path, data.as_bytes())
-            .err()
-            .map(|e| RunError {
+        match self.host.write(path, data.as_bytes()) {
+            // Only a write that happened makes the file up to date.
+            Ok(()) => {
+                self.output_dirty = false;
+                None
+            }
+            Err(e) => Some(RunError {
                 message: format!("cannot write `{}`: {e}", path::file_name(path)),
                 span: None,
-            })
+            }),
+        }
     }
 
     fn execute_inner(&mut self, mode: Mode, budget: u64) -> Outcome {
@@ -656,17 +677,23 @@ impl ScriptRunner {
         }
     }
 
-    /// If the loop is waiting for a value that only the keyboard can
-    /// produce (`while out <> 75 { … }`), presses that key.
+    /// If the loop is waiting for the keyboard to hold a value
+    /// (`while out <> 75 { … }` on a chip with a keyboard, or
+    /// `while RAM[24576] <> 75 { … }`), presses that key.
     fn press_awaited_key(&mut self, condition: &Condition) {
         if !self.options.auto_keyboard || condition.relation != Relation::NotEqual {
             return;
         }
-        let constant = match (&condition.left, &condition.right) {
-            (Operand::Variable(_), Operand::Scalar(Scalar::Integer(i)))
-            | (Operand::Scalar(Scalar::Integer(i)), Operand::Variable(_)) => i,
+        let (variable, constant) = match (&condition.left, &condition.right) {
+            (Operand::Variable(v), Operand::Scalar(Scalar::Integer(i)))
+            | (Operand::Scalar(Scalar::Integer(i)), Operand::Variable(v)) => (v, i),
             _ => return,
         };
+        // `while A <> 75 { ticktock; }` waits for a register, not for a key:
+        // pressing one would change what the program reads from the keyboard.
+        if !self.machine.reads_keyboard(variable) {
+            return;
+        }
         let Ok(code) = constant.constant_value() else {
             return;
         };
@@ -853,6 +880,12 @@ impl ScriptRunner {
                 ),
                 file.span,
             ));
+        }
+        if self.first_failure.is_some() {
+            // The official tools stopped at the first failure. The run goes
+            // on only to list the other failing rows, and must not create
+            // or empty any more files.
+            return Ok(());
         }
         if let Some(e) = self.flush_output() {
             return Err(e);

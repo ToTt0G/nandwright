@@ -6,7 +6,7 @@ use n2t_simulator::runner::{Event, standard_machine};
 use n2t_simulator::{Newline, Outcome, RunnerOptions, ScriptRunner, StartError, SuspendReason};
 use serde_json::{Value, json};
 
-use crate::{Failure, Reply, observed, range, text};
+use crate::{Failure, Reply, budget, key_code, observed, range, text};
 
 /// Commands per `test.run` when the caller does not say.
 const DEFAULT_BUDGET: u64 = 200_000;
@@ -82,7 +82,7 @@ impl TestSession {
     pub fn call(&mut self, op: &str, request: &Value) -> Reply {
         match op {
             "test.run" => {
-                let budget = request["budget"].as_u64().unwrap_or(DEFAULT_BUDGET);
+                let budget = budget(request, "budget", DEFAULT_BUDGET);
                 let outcome = match request["breakLines"].as_array() {
                     Some(lines) if !lines.is_empty() => {
                         let lines: Vec<u64> = lines.iter().filter_map(Value::as_u64).collect();
@@ -93,15 +93,20 @@ impl TestSession {
                 Ok(self.status(outcome))
             }
             "test.step" => {
+                // A step to the next `;` can be a loop that never ends; it
+                // stops at the budget (reason `budget`), and the same
+                // request carries on with it.
                 let outcome = match request["unit"].as_str() {
                     Some("command") => self.runner.step_command(),
-                    _ => self.runner.step(),
+                    _ => self
+                        .runner
+                        .step_for(budget(request, "budget", DEFAULT_BUDGET)),
                 };
                 Ok(self.status(outcome))
             }
             "test.inspect" => Ok(self.inspect()),
             "key" => {
-                let code = request["code"].as_u64().unwrap_or(0) as u16;
+                let code = key_code(request)?;
                 Ok(json!({ "accepted": self.runner.machine_mut().set_key(code) }))
             }
             other => Err(format!("`{other}` is not an operation of a test run")),

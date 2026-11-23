@@ -298,6 +298,10 @@ impl Machine for CpuMachine {
         true
     }
 
+    fn reads_keyboard(&self, variable: &Variable) -> bool {
+        crate::machine::is_keyboard_cell(variable)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

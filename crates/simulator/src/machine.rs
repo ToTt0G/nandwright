@@ -87,6 +87,14 @@ pub trait Machine {
     /// Returns `false` if the machine has no keyboard.
     fn set_key(&mut self, code: u16) -> bool;
 
+    /// Whether `variable` shows what the keyboard holds: the keyboard's
+    /// memory cell, or an output pin of a chip that contains a keyboard. A
+    /// loop that waits for such a variable to take a value is waiting for a
+    /// key; a loop that waits for anything else is not.
+    fn reads_keyboard(&self, _variable: &Variable) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -136,6 +144,16 @@ impl HardwareMachine {
         self.circuit = Some(circuit);
         self.loaded = Some(name.to_string());
         Ok(())
+    }
+
+    /// Whether the loaded chip contains a keyboard.
+    fn has_keyboard(&self) -> bool {
+        self.circuit.as_ref().is_some_and(|circuit| {
+            circuit
+                .primitives()
+                .iter()
+                .any(|p| matches!(p.symbol.as_str(), "Keyboard" | "Memory"))
+        })
     }
 
     fn circuit_or_error(&mut self, span: Span) -> Result<&mut Circuit, RunError> {
@@ -308,6 +326,18 @@ impl HardwareMachine {
     }
 }
 
+/// The address of the keyboard's memory cell.
+pub(crate) const KEYBOARD_ADDRESS: u64 = 24576;
+
+/// `RAM[24576]`, as the CPU Emulator and VM Emulator scripts name it.
+pub(crate) fn is_keyboard_cell(variable: &Variable) -> bool {
+    variable.name.name.eq_ignore_ascii_case("RAM")
+        && variable
+            .index
+            .and_then(|i| i.value)
+            .is_some_and(|i| i == KEYBOARD_ADDRESS)
+}
+
 #[derive(Debug, Clone)]
 enum Handle {
     Time,
@@ -450,17 +480,22 @@ impl Machine for HardwareMachine {
     }
 
     fn set_key(&mut self, code: u16) -> bool {
-        let Some(circuit) = &mut self.circuit else {
-            return false;
-        };
-        let has_keyboard = circuit
-            .primitives()
-            .iter()
-            .any(|p| matches!(p.symbol.as_str(), "Keyboard" | "Memory"));
-        if has_keyboard {
+        let has_keyboard = self.has_keyboard();
+        if has_keyboard && let Some(circuit) = &mut self.circuit {
             circuit.set_key(code);
         }
         has_keyboard
+    }
+
+    fn reads_keyboard(&self, variable: &Variable) -> bool {
+        if !self.has_keyboard() {
+            return false;
+        }
+        match self.resolve(variable) {
+            Ok(Handle::Pin(pin)) => matches!(pin.kind, NetKind::Output(_)),
+            Ok(Handle::State { chip, .. }) => chip == "Keyboard",
+            _ => false,
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -724,11 +724,14 @@ fn a_students_own_tool_output_is_compared_with_the_reference_not_overwritten() {
             .nth(3),
         Some("1111111111111111")
     );
-    // Only an explicit write replaces it.
-    call(
+    // Only an explicit write that names what it replaces does so.
+    let hack = format!("{dir}/Countdown.hack");
+    let written = call(
         &mut engine,
-        json!({"op": "asm.assemble", "path": format!("{dir}/Countdown.asm"), "write": true}),
+        json!({"op": "asm.assemble", "path": format!("{dir}/Countdown.asm"), "write": true,
+               "expect": {hack.as_str(): reply["outputs"][0]["state"]}}),
     );
+    assert_eq!(written["written"], true, "{written}");
     assert_eq!(
         host.get_text(&format!("{dir}/Countdown.hack")).unwrap(),
         golden_hack.replace("\r\n", "\n")

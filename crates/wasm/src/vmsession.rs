@@ -302,13 +302,37 @@ impl VmSession {
                     return Err(format!("{message} Reset the program to run it again."));
                 }
                 let run_status = if op == "vm.run" {
-                    let budget = request["budget"].as_u64().unwrap_or(DEFAULT_BUDGET);
+                    let budget = crate::budget(request, "budget", DEFAULT_BUDGET);
                     let breakpoints = self.breakpoints(request);
-                    self.vm.run(budget, now, &breakpoints)
+                    // The program is shown paused on the command it will
+                    // execute next. Pressing Run there executes it, even if
+                    // it has a breakpoint: a breakpoint stops a run that
+                    // arrives at it, and a loop arrives again next time
+                    // round. Only the first slice of a run says `resume`.
+                    let resuming = request["resume"].as_bool().unwrap_or(false)
+                        && budget > 0
+                        && !breakpoints.is_empty();
+                    let first = if resuming {
+                        match self.vm.step(now) {
+                            StepStatus::Stepped => None,
+                            StepStatus::Halted => Some(RunStatus::Halted),
+                            StepStatus::WaitingForKey => Some(RunStatus::WaitingForKey),
+                            StepStatus::Sleeping { until_ms } => {
+                                Some(RunStatus::Sleeping { until_ms })
+                            }
+                            StepStatus::Error(e) => Some(RunStatus::Error(e)),
+                        }
+                    } else {
+                        None
+                    };
+                    match first {
+                        Some(stopped) => stopped,
+                        None => self.vm.run(budget - u64::from(resuming), now, &breakpoints),
+                    }
                 } else if request["unit"].as_str() == Some("line") {
                     self.step_line(now)
                 } else {
-                    let count = request["count"].as_u64().unwrap_or(1);
+                    let count = crate::budget(request, "count", 1);
                     let mut last = RunStatus::Budget;
                     for _ in 0..count {
                         last = match self.vm.step(now) {
@@ -358,7 +382,7 @@ impl VmSession {
                 self.set(&target, request["address"].as_u64(), value)?;
             }
             "key" => {
-                let code = request["code"].as_u64().unwrap_or(0) as u16;
+                let code = crate::key_code(request)?;
                 self.vm.set_key(code);
                 return Ok(json!({ "accepted": true }));
             }

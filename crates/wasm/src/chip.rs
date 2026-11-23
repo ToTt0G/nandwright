@@ -76,7 +76,7 @@ impl ChipSession {
                 }
             }
             "key" => {
-                let code = request["code"].as_u64().unwrap_or(0) as u16;
+                let code = crate::key_code(request)?;
                 return Ok(json!({ "accepted": self.machine.set_key(code) }));
             }
             "chip.table" => return self.table(),

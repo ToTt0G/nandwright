@@ -65,9 +65,9 @@ impl ComputerSession {
                     return Err(format!("{message} Reset the program to run it again."));
                 }
                 let budget = if op == "cpu.step" {
-                    request["count"].as_u64().unwrap_or(1)
+                    crate::budget(request, "count", 1)
                 } else {
-                    request["budget"].as_u64().unwrap_or(DEFAULT_BUDGET)
+                    crate::budget(request, "budget", DEFAULT_BUDGET)
                 };
                 let breakpoints = self.breakpoint_addresses(request);
                 match self.cpu().run(budget, &breakpoints) {
@@ -106,7 +106,7 @@ impl ComputerSession {
                 self.set(&target, request["address"].as_u64(), value)?;
             }
             "key" => {
-                let code = request["code"].as_u64().unwrap_or(0) as u16;
+                let code = crate::key_code(request)?;
                 self.cpu().set_key(code);
                 return Ok(json!({ "accepted": true }));
             }
