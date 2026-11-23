@@ -73,7 +73,10 @@ fn parse(tokens: &[String], i: &mut usize) -> Result<Vec<Cmd>, String> {
             "}" => return Ok(cmds),
             "," | ";" => continue,
             "repeat" => {
-                let n = tokens.get(*i).and_then(|s| s.parse().ok()).ok_or("repeat count")?;
+                let n = tokens
+                    .get(*i)
+                    .and_then(|s| s.parse().ok())
+                    .ok_or("repeat count")?;
                 *i += 1;
                 if tokens.get(*i).map(String::as_str) != Some("{") {
                     return Err("expected {".into());
@@ -95,7 +98,10 @@ fn parse(tokens: &[String], i: &mut usize) -> Result<Vec<Cmd>, String> {
                     ),
                     "set" => {
                         let name = args.first().cloned().ok_or("set what?")?;
-                        let v = args.get(1).and_then(|s| s.parse().ok()).ok_or("set value")?;
+                        let v = args
+                            .get(1)
+                            .and_then(|s| s.parse().ok())
+                            .ok_or("set value")?;
                         Cmd::Set(name, v)
                     }
                     "ticktock" => Cmd::Ticktock,
@@ -183,8 +189,11 @@ impl Runner {
                     }
                 }
                 Cmd::Output => {
-                    let row: Vec<String> =
-                        self.list.iter().map(|n| self.value(n).to_string()).collect();
+                    let row: Vec<String> = self
+                        .list
+                        .iter()
+                        .map(|n| self.value(n).to_string())
+                        .collect();
                     self.out.push_str(&row.join(" "));
                     self.out.push('\n');
                 }

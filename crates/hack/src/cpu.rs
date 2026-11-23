@@ -6,8 +6,12 @@
 //! (`tools/CPUEmulator.sh`), including its departures from the hardware of
 //! chapter 5. Established by experiment:
 //!
-//! - **Undocumented comp codes** compute what the nearest lower documented
-//!   code computes ([`crate::isa::EFFECTIVE_COMP`]), not what the chip-level ALU would.
+//! - **Undocumented comp codes** (100 of the 128 `a cccccc` combinations) reuse
+//!   the ALU function (`cccccc`) of the most recently executed *documented*
+//!   C-instruction, with the a-bit of the current instruction selecting A or
+//!   M. A new emulator starts with `D&A`; A-instructions, failed instructions
+//!   and `load` leave this "ALU latch" unchanged. (The chip-level ALU of
+//!   chapter 2 would compute something else.) See [`Cpu::alu_latch`].
 //! - **`dest` with both A and M** (`AM=M+1`): M is written at the *old* A.
 //! - **Jumps go to the *new* A**: `A=D;JMP` jumps to D, not to the previous A
 //!   (the hardware CPU would jump to the previous A).
@@ -35,7 +39,7 @@
 
 use std::fmt;
 
-use crate::isa::{ALU_OPS, EMPTY_WORD, KBD, SCREEN, SCREEN_WORDS};
+use crate::isa::{ALU_OPS, AluOp, EMPTY_WORD, KBD, SCREEN, SCREEN_WORDS};
 
 /// Words of ROM.
 pub const ROM_SIZE: usize = 32768;
@@ -131,6 +135,8 @@ pub struct Cpu {
     a: u16,
     d: u16,
     pc: u16,
+    /// The ALU function of the last documented C-instruction executed.
+    latch: AluOp,
     /// 32K so that any 15-bit index is in bounds; only 0..=24576 is reachable.
     ram: Box<[u16; ROM_SIZE]>,
     rom: Box<[u16; ROM_SIZE]>,
@@ -180,6 +186,7 @@ impl Cpu {
             a: 0,
             d: 0,
             pc: 0,
+            latch: AluOp::DAndY,
             ram: boxed_array(0),
             rom: boxed_array(EMPTY_WORD),
             rom_len: 0,
@@ -292,7 +299,11 @@ impl Cpu {
         } else {
             a
         };
-        let out = ALU_OPS[((ins >> 6) & 0x7F) as usize].apply(self.d, y);
+        let op = match ALU_OPS[((ins >> 6) & 0x7F) as usize] {
+            Some(op) => op,
+            None => self.latch,
+        };
+        let out = op.apply(self.d, y);
         let write_m = ins & 0x0008 != 0;
         if write_m && a > KBD {
             return Err(CpuError::IllegalWrite { pc, address: a });
@@ -323,6 +334,7 @@ impl Cpu {
                 self.screen_generation += 1;
             }
         }
+        self.latch = op;
         self.a = new_a;
         if ins & 0x0010 != 0 {
             self.d = out;
@@ -433,15 +445,21 @@ impl Cpu {
         dirty
     }
 
+    /// The ALU function an undocumented comp code would use right now: that of
+    /// the last documented C-instruction executed (`D&A`/`D&M` initially).
+    pub fn alu_latch(&self) -> AluOp {
+        self.latch
+    }
+
+    /// Sets the ALU latch (see [`Cpu::alu_latch`]).
+    pub fn set_alu_latch(&mut self, op: AluOp) {
+        self.latch = op;
+    }
+
     /// Instructions executed since this `Cpu` was created.
     pub fn cycles(&self) -> u64 {
         self.cycles
     }
-}
-
-/// Convenience used by tests and tools: the effective operation for a comp code.
-pub fn alu(comp: u8, d: u16, a_or_m: u16) -> u16 {
-    ALU_OPS[(comp & 0x7F) as usize].apply(d, a_or_m)
 }
 
 #[cfg(test)]

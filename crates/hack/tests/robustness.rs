@@ -27,7 +27,10 @@ fn check(text: &str) {
         }
     }
     let a = assemble(text);
-    assert_eq!(a.words.is_empty() && !a.source_map.is_empty(), !a.is_ok() && !a.source_map.is_empty());
+    assert_eq!(
+        a.words.is_empty() && !a.source_map.is_empty(),
+        !a.is_ok() && !a.source_map.is_empty()
+    );
     if a.is_ok() {
         assert_eq!(a.words.len(), a.source_map.len());
     }

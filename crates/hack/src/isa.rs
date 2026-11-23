@@ -134,8 +134,8 @@ pub fn jump_code(mnemonic: &str) -> Option<u8> {
         .map(|i| i as u8 + 1)
 }
 
-/// The ALU operation a C-instruction performs, after the official CPU
-/// emulator's treatment of undocumented comp codes (see [`effective_comp`]).
+/// An ALU operation: one of the 18 functions of the `c` bits, applied to D and
+/// Y (A or M, selected by the a-bit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AluOp {
@@ -241,58 +241,40 @@ const fn documented(code: u8) -> bool {
     )
 }
 
-const fn build_effective() -> [u8; 128] {
-    let mut table = [0u8; 128];
+const fn build_ops() -> [Option<AluOp>; 128] {
+    let mut ops = [None; 128];
     let mut code = 0usize;
-    let mut last = 0u8; // code 0 (D&A) is documented
     while code < 128 {
         if documented(code as u8) {
-            last = code as u8;
+            ops[code] = AluOp::from_c_bits(code as u8 & 0x3F);
         }
-        table[code] = last;
-        code += 1;
-    }
-    table
-}
-
-/// For each of the 128 comp codes, the documented code the official CPU
-/// emulator actually executes.
-///
-/// Observed behaviour: an undocumented comp code computes exactly what the
-/// nearest *lower* documented code computes (for example `1001101`, which no
-/// mnemonic produces, behaves like `1000111`, `M-D`). This was verified for
-/// all 128 codes against the Java emulator; it is not what the hardware ALU
-/// of chapter 2 would compute.
-pub const EFFECTIVE_COMP: [u8; 128] = build_effective();
-
-/// The documented comp code the official CPU emulator executes for `code`.
-pub fn effective_comp(code: u8) -> u8 {
-    EFFECTIVE_COMP[(code & 0x7F) as usize]
-}
-
-const fn build_ops() -> [AluOp; 128] {
-    let mut ops = [AluOp::Zero; 128];
-    let mut code = 0usize;
-    while code < 128 {
-        let eff = EFFECTIVE_COMP[code];
-        ops[code] = match AluOp::from_c_bits(eff & 0x3F) {
-            Some(op) => op,
-            None => AluOp::Zero, // unreachable: EFFECTIVE_COMP holds documented codes
-        };
         code += 1;
     }
     ops
 }
 
-/// The ALU operation executed for each comp code (after [`EFFECTIVE_COMP`]).
-pub const ALU_OPS: [AluOp; 128] = build_ops();
+/// The ALU operation of each of the 128 comp codes, `None` for the 100
+/// undocumented ones.
+///
+/// The official CPU emulator executes an undocumented comp code with the ALU
+/// function (the six `c` bits) of the most recent *documented* C-instruction
+/// it executed, while the a-bit of the current instruction still selects A or
+/// M (see [`crate::cpu`]). Before any documented C-instruction has run, that
+/// function is `D&A` / `D&M`. This is not what the chip-level ALU of chapter 2
+/// would compute.
+pub const ALU_OPS: [Option<AluOp>; 128] = build_ops();
+
+/// The operation of a documented comp code.
+pub fn alu_op(code: u8) -> Option<AluOp> {
+    ALU_OPS[(code & 0x7F) as usize]
+}
 
 /// A decoded instruction word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Instruction {
     /// `0vvv vvvv vvvv vvvv`: load the 15-bit constant into A.
     A(u16),
-    /// `111a cccc ccdd djjj`. `comp` may be undocumented; see [`effective_comp`].
+    /// `111a cccc ccdd djjj`. `comp` may be undocumented; see [`ALU_OPS`].
     C { comp: u8, dest: u8, jump: u8 },
     /// [`EMPTY_WORD`]: an unloaded ROM cell, executed as a no-op.
     Empty,
@@ -330,7 +312,7 @@ pub fn encode_c(comp: u8, dest: u8, jump: u8) -> u16 {
 /// [`EMPTY_WORD`] (unloaded ROM), illegal words (`100…`, `101…`, `110…`) and
 /// C-instructions with an undocumented comp code. The `?` form is deliberately
 /// not valid assembly, so a disassembly can never silently re-assemble to
-/// different bits. Use [`decode`] and [`effective_comp`] for a structured view.
+/// different bits. Use [`decode`] and [`alu_op`] for a structured view.
 pub fn disassemble(word: u16) -> String {
     match decode(word) {
         Instruction::A(v) => format!("@{v}"),
@@ -362,19 +344,14 @@ mod tests {
     fn tables_are_consistent() {
         for &(m, c) in &COMPS {
             assert!(is_documented_comp(c), "{m}");
-            assert_eq!(effective_comp(c), c);
+            assert!(alu_op(c).is_some(), "{m}");
             assert_eq!(comp_code(m), Some(c));
         }
         let documented_count = (0u8..128).filter(|&c| is_documented_comp(c)).count();
         assert_eq!(documented_count, 28);
-        for c in 0u8..128 {
-            assert!(effective_comp(c) <= c);
-            assert!(is_documented_comp(effective_comp(c)));
-        }
-        // Examples observed in the Java emulator.
-        assert_eq!(effective_comp(0b1001101), 0b1000111);
-        assert_eq!(effective_comp(0b0000001), 0b0000000);
-        assert_eq!(effective_comp(0b1111111), 0b1110111);
+        assert_eq!(ALU_OPS.iter().filter(|o| o.is_some()).count(), 28);
+        assert_eq!(alu_op(0b1001101), None);
+        assert_eq!(alu_op(0b1101010), None, "\"0\" with a=1 is undocumented");
         assert_eq!(dest_code("AMD"), Some(7));
         assert_eq!(dest_code("DM"), None);
         assert_eq!(dest_code(""), None);

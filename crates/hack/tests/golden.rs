@@ -18,7 +18,9 @@ fn fixtures() -> Vec<PathBuf> {
 }
 
 fn load(name: &str) -> Cpu {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     let a = assemble(&std::fs::read_to_string(path).unwrap());
     assert!(a.is_ok(), "{name}: {:?}", a.diagnostics);
     let mut cpu = Cpu::new();
@@ -32,7 +34,9 @@ fn run_to(cpu: &mut Cpu, halt: u16, max: u64) {
 }
 
 fn label(name: &str, label: &str) -> u16 {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
     let a = assemble(&std::fs::read_to_string(path).unwrap());
     a.symbols.iter().find(|s| s.name == label).unwrap().address
 }
@@ -43,7 +47,12 @@ fn golden_hack_files() {
     for asm in fixtures() {
         let source = String::from_utf8_lossy(&std::fs::read(&asm).unwrap()).into_owned();
         let assembly = assemble(&source);
-        assert!(assembly.is_ok(), "{}: {:?}", asm.display(), assembly.diagnostics);
+        assert!(
+            assembly.is_ok(),
+            "{}: {:?}",
+            asm.display(),
+            assembly.diagnostics
+        );
         let text = hack_text(&assembly.words);
         let golden = asm.with_extension("hack");
         if update {
@@ -143,7 +152,10 @@ fn bubble_sort() {
         cpu.set_ram(0, n as u16);
         run_to(&mut cpu, label("BubbleSort.asm", "END"), 10_000_000);
         values.sort();
-        let got: Vec<i16> = cpu.ram_slice()[100..100 + n].iter().map(|&v| v as i16).collect();
+        let got: Vec<i16> = cpu.ram_slice()[100..100 + n]
+            .iter()
+            .map(|&v| v as i16)
+            .collect();
         assert_eq!(got, values);
     }
 }

@@ -29,14 +29,34 @@ fn jumps_go_to_the_new_a() {
 }
 
 #[test]
-fn undocumented_comps_follow_the_java_table() {
+fn undocumented_comps_reuse_the_last_documented_alu_function() {
+    let c = |comp: u8| crate::isa::encode_c(comp, 0b010, 0);
+    let (u0, u1) = (0b0000001, 0b1000001); // undocumented, a = 0 and a = 1
     let mut cpu = Cpu::new();
-    // 1001101 behaves as M-D.
-    cpu.load_rom(&[100, 0xE000 | (0b1001101 << 6) | (0b010 << 3)]);
-    cpu.set_ram(100, 50);
-    cpu.set_d(8);
-    cpu.run(2, &[]);
-    assert_eq!(cpu.d(), 42);
+    // Rows observed in the Java emulator with A=100, D=12, RAM[100]=10.
+    let run = |cpu: &mut Cpu, word: u16| {
+        cpu.set_rom(0, word);
+        cpu.set_pc(0);
+        cpu.set_a(100);
+        cpu.set_d(12);
+        cpu.set_ram(100, 10);
+        cpu.step().unwrap();
+        cpu.d() as i16
+    };
+    assert_eq!(run(&mut cpu, c(u0)), 4, "fresh: D&A");
+    assert_eq!(run(&mut cpu, c(u1)), 8, "fresh: D&M");
+    assert_eq!(run(&mut cpu, c(0b1000111)), -2, "M-D");
+    assert_eq!(run(&mut cpu, c(u0)), 88, "latched c-bits with a = 0: A-D");
+    assert_eq!(run(&mut cpu, c(u1)), -2, "latched c-bits with a = 1: M-D");
+    assert_eq!(run(&mut cpu, 5), 12, "A-instructions keep the latch");
+    assert_eq!(run(&mut cpu, c(u0)), 88);
+    assert_eq!(
+        run(&mut cpu, crate::isa::encode_c(0b0111010, 0, 0)),
+        12,
+        "-1, no dest"
+    );
+    cpu.load_rom(&[]);
+    assert_eq!(run(&mut cpu, c(u0)), -1, "load keeps the latch");
 }
 
 #[test]

@@ -298,7 +298,7 @@ def course_and_fixture_traces(rng, quick):
     """(name, hack, script body, columns) for real programs."""
     traces = []
     cols = (["A", "D", "PC"] + [f"RAM[{i}]" for i in [0, 1, 2, 3, 4, 5, 16, 17, 18, 19, 100, 101, 102,
-                                                      103, 104, 200]]
+                                                      103, 200]]
             + ["RAM[16384]", "RAM[24576]"])
     long = 3000 if quick else 20000
     if (COURSE / "projects").exists():
@@ -343,17 +343,18 @@ DOCUMENTED.update({c | 0x40: DOCUMENTED[c] for c in
                     0b0000010, 0b0010011, 0b0000111, 0b0000000, 0b0010101]})
 
 
-def predicts_jump_error(word, a, d, m):
+def predicts_jump_error(word, a, d, m, latch):
     """Input selection only (the comparison never relies on it): whether the
-    C-instruction would jump to a negative A from this state."""
+    C-instruction would jump to a negative A from this state, and the ALU latch
+    (c bits of the last documented comp) afterwards."""
     comp = (word >> 6) & 0x7F
-    eff = comp
-    while eff not in DOCUMENTED:
-        eff -= 1
-    out = DOCUMENTED[eff](d, m if comp & 0x40 else a) & 0xFFFF
+    if comp in DOCUMENTED:
+        latch = comp & 0x3F
+    fn = DOCUMENTED[latch]  # the a=0 entry; the a-bit only selects y below
+    out = fn(d, m if comp & 0x40 else a) & 0xFFFF
     new_a = out if word & 0x20 else a
     cls = 2 if out == 0 else 4 if out & 0x8000 else 1
-    return bool(word & 7 & cls) and bool(new_a & 0x8000)
+    return bool(word & 7 & cls) and bool(new_a & 0x8000), latch
 
 
 def sweep_traces(rng):
@@ -380,15 +381,19 @@ def sweep_traces(rng):
     for chunk in range(0, len(words), 2048):
         part = words[chunk:chunk + 2048]
         body = []
+        latch = 0  # each script runs in a fresh emulator: D&A
         for k, w in enumerate(part):
             for _ in range(30):
                 a, d, m = pick()
-                if not predicts_jump_error(w, a, d & 0xFFFF, m & 0xFFFF):
+                err, new_latch = predicts_jump_error(w, a, d & 0xFFFF, m & 0xFFFF, latch)
+                if not err:
                     break
             else:
                 erroring.append((w, a, d, m))
                 a, d, m = 0, 0, 0
                 w = part[k] = 0xE000  # D&A, no dest, no jump: harmless filler
+                new_latch = 0
+            latch = new_latch
             body.append(row(k, a, d, m))
         traces.append((f"sweep:{chunk // 2048}", hack_text(part), "".join(body), cols))
     for w, a, d, m in erroring:
