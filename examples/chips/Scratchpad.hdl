@@ -1,0 +1,12 @@
+/**
+ * Eight words of memory with a doubled read-out:
+ * out = RAM[address], twice = out + out.
+ */
+CHIP Scratchpad {
+    IN in[16], load, address[3];
+    OUT out[16], twice[16];
+
+    PARTS:
+    RAM8(in=in, load=load, address=address, out=word, out=out);
+    Add16(a=word, b=word, out=twice);
+}

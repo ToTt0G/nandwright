@@ -1,0 +1,16 @@
+/**
+ * A running total. On each clock cycle:
+ *   if reset      out(t+1) = 0
+ *   else if add   out(t+1) = out(t) + in
+ *   else          out(t+1) = out(t)
+ */
+CHIP Accumulator {
+    IN in[16], add, reset;
+    OUT out[16];
+
+    PARTS:
+    Add16(a=total, b=in, out=sum);
+    Mux16(a=total, b=sum, sel=add, out=next);
+    Mux16(a=next, b=false, sel=reset, out=stored);
+    Register(in=stored, load=true, out=total, out=out);
+}

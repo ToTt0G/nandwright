@@ -1,0 +1,37 @@
+/** A small boat that sails along the horizon. */
+class Boat {
+    field int x;
+
+    constructor Boat new(int startX) {
+        let x = startX;
+        do draw(true);
+        return this;
+    }
+
+    method void dispose() {
+        do Memory.deAlloc(this);
+        return;
+    }
+
+    /** Moves the boat by `dx` pixels, staying on the screen. */
+    method void move(int dx) {
+        do draw(false);
+        let x = Math.min(Math.max(x + dx, 4), 470);
+        do draw(true);
+        return;
+    }
+
+    method void draw(boolean visible) {
+        do Screen.setColor(visible);
+        // Hull.
+        do Screen.drawRectangle(x, 200, x + 36, 204);
+        do Screen.drawLine(x + 4, 205, x + 32, 205);
+        do Screen.drawLine(x + 8, 206, x + 28, 206);
+        // Mast and sail.
+        do Screen.drawLine(x + 18, 176, x + 18, 199);
+        do Screen.drawLine(x + 19, 178, x + 32, 197);
+        do Screen.drawLine(x + 19, 197, x + 32, 197);
+        do Screen.setColor(true);
+        return;
+    }
+}

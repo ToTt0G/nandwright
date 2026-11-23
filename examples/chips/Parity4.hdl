@@ -1,0 +1,12 @@
+/**
+ * Odd parity of a 4-bit bus: out = 1 when an odd number of bits are 1.
+ */
+CHIP Parity4 {
+    IN in[4];
+    OUT out;
+
+    PARTS:
+    Xor(a=in[0], b=in[1], out=low);
+    Xor(a=in[2], b=in[3], out=high);
+    Xor(a=low, b=high, out=out);
+}

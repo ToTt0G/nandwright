@@ -1,0 +1,66 @@
+/**
+ * Draws a sun rising over a horizon, then lets you move a small boat
+ * with the left and right arrow keys. Press Q to end the program.
+ *
+ * An example for Nandwright, not a course project: open this file and
+ * choose "Run Program" to see it on the Hack screen.
+ */
+class Main {
+    function void main() {
+        var Boat boat;
+        var char key;
+        var boolean running;
+
+        do Main.drawSky();
+        do Output.moveCursor(1, 2);
+        do Output.printString("Arrows move the boat. Q ends.");
+
+        let boat = Boat.new(240);
+        let running = true;
+        while (running) {
+            let key = Keyboard.keyPressed();
+            if (key = 130) { do boat.move(-2); }
+            if (key = 132) { do boat.move(2); }
+            if (key = 81) { let running = false; }
+            do Sys.wait(15);
+        }
+        do boat.dispose();
+        do Output.moveCursor(3, 2);
+        do Output.printString("Goodbye.");
+        return;
+    }
+
+    /** The sun, its rays and the sea. */
+    function void drawSky() {
+        var int i, x;
+        // The horizon.
+        do Screen.drawLine(0, 170, 511, 170);
+        // Half a sun on the horizon.
+        do Screen.drawCircle(256, 170, 46);
+        do Screen.setColor(false);
+        do Screen.drawRectangle(200, 171, 312, 220);
+        do Screen.setColor(true);
+        // Rays.
+        let i = 0;
+        while (i < 9) {
+            let x = 76 + (i * 45);
+            do Screen.drawLine(256 + ((x - 256) / 3), 170 - Main.rise(i, 22), x, 170 - Main.rise(i, 60));
+            let i = i + 1;
+        }
+        // Waves.
+        let i = 0;
+        while (i < 16) {
+            do Screen.drawLine(i * 32 + 4, 190 + (i - ((i / 2) * 2) * 4), i * 32 + 20, 190 + (i - ((i / 2) * 2) * 4));
+            do Screen.drawLine(i * 32 + 14, 214, i * 32 + 30, 214);
+            let i = i + 1;
+        }
+        return;
+    }
+
+    /** How high ray `i` of nine reaches, for a ray `length` long at its longest. */
+    function int rise(int i, int length) {
+        var int fromMiddle;
+        let fromMiddle = Math.abs(i - 4);
+        return length - ((fromMiddle * fromMiddle * length) / 20);
+    }
+}
