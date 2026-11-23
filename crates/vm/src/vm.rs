@@ -963,7 +963,7 @@ impl Vm {
                             location: self.format_location(pc),
                         });
                     }
-                    self.ram[arg as usize] = retval;
+                    self.set_ram(arg as u16, retval);
                     self.ram[4] = saved_that;
                     self.ram[3] = saved_this;
                     self.ram[2] = saved_arg;

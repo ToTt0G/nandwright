@@ -108,3 +108,17 @@ fn suspended_call_rejects_reposition_and_reset_discards_its_frame() {
     assert_eq!(vm.key(), 0);
     assert_eq!(vm.run(20, 100, &bp), RunStatus::Sleeping { until_ms: 102 });
 }
+
+#[test]
+fn return_through_a_script_modified_argument_marks_screen_dirty() {
+    let mut vm = make_vm(&[("Main", "function Main.main 0\npush constant 9\nreturn\n")]);
+    let bp = Breakpoints::new();
+    assert_eq!(vm.run(3, 0, &bp), RunStatus::Budget);
+    vm.set_var("argument", None, 16384).unwrap();
+    vm.clear_screen_dirty();
+    let generation = vm.screen_generation();
+    assert_eq!(vm.step(0), StepStatus::Halted);
+    assert_eq!(vm.screen_slice()[0], 9);
+    assert!(vm.screen_dirty());
+    assert_eq!(vm.screen_generation(), generation + 1);
+}
