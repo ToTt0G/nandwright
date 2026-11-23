@@ -100,14 +100,25 @@ def compare_dir(label, java_dir, ours_dir, stems, tool, jackc, results):
         jvm = read_vm(os.path.join(java_dir, stem + ".vm"))
         ovm = read_vm(os.path.join(ours_dir, stem + ".vm"))
         problems = []
-        if java_rejects != ours_rejects:
+        known = None
+        if (not java_rejects and ours_rejects and jvm is not None
+                and all("silently writes an incomplete" in d[3] for d in oerrors)
+                and not jvm.rstrip().endswith(b"return")):
+            # Deliberate deviation: beyond 100 nested expressions the official
+            # compiler prints nothing and writes a truncated .vm file.
+            known = "java writes a truncated .vm without a message (expressions nested > 100)"
+        if known:
+            pass
+        elif java_rejects != ours_rejects:
             problems.append(
                 "accept/reject differs: java %s, ours %s"
                 % ("rejects" if java_rejects else "accepts", "rejects" if ours_rejects else "accepts")
             )
-        if (jvm is None) != (ovm is None):
+        if known:
+            pass
+        elif (jvm is None) != (ovm is None):
             problems.append("vm written by %s only" % ("java" if jvm is not None else "ours"))
-        elif jvm is not None and jvm != ovm:
+        elif jvm is not None and jvm != ovm and not known:
             jl, ol = jvm.split(b"\n"), ovm.split(b"\n")
             i = next((k for k in range(min(len(jl), len(ol))) if jl[k] != ol[k]), min(len(jl), len(ol)))
             problems.append(
@@ -122,7 +133,7 @@ def compare_dir(label, java_dir, ours_dir, stems, tool, jackc, results):
                     "first error line differs: java %d (%s), ours %s (%s)"
                     % (jfirst, jerrors[0][1], ofirst, oerrors[0][3][:100])
                 )
-        results.append((label, stem, java_rejects, jvm is not None, problems, jerrors, oerrors))
+        results.append((label, stem, java_rejects, jvm is not None, problems, jerrors, oerrors, known))
 
 
 def collect_dirs(root):
@@ -210,7 +221,9 @@ def main():
         if VERBOSE or bad or label != "course" or True:
             print("%-44s %6d %6d %8d %9d %6d" % ((label + ":" + rel)[-44:], n, n - bad, bad, rej, vm))
     print("%-44s %6d %6d %8d %9d %6d" % ("TOTAL", total, same, differ, rejected, vms))
-    for label, stem, jrej, jvm, problems, jerr, oerr in results:
+    for label, stem, jrej, jvm, problems, jerr, oerr, known in results:
+        if known:
+            print("KNOWN %s %s: %s" % (label, stem, known))
         if problems:
             print("DIFF %s %s:" % (label, stem))
             for p in problems:
@@ -218,10 +231,12 @@ def main():
             if VERBOSE:
                 print("    java:", jerr[:3])
                 print("    ours:", [(d[1], d[3][:80]) for d in oerr[:3]])
-    vm_compared = sum(1 for r in results if r[3])
+    vm_compared = sum(1 for r in results if r[3] and not r[7])
+    known_n = sum(1 for r in results if r[7])
     invalid = sum(1 for r in results if r[2])
     print()
-    print("files compared: %d, identical behaviour: %d, different: %d" % (total, same, differ))
+    print("files compared: %d, identical behaviour: %d (of which %d documented deviations), different: %d"
+          % (total, same, known_n, differ))
     print(".vm files byte-compared: %d; files rejected by the official compiler: %d" % (vm_compared, invalid))
     return 1 if differ else 0
 

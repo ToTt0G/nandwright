@@ -152,7 +152,13 @@ struct Checker<'a> {
     if_count: u32,
     while_count: u32,
     returned: bool,
+    expr_depth: u32,
+    depth_reported: bool,
 }
+
+/// The official compiler silently produces a truncated `.vm` file when
+/// expressions nest deeper than this.
+const MAX_OFFICIAL_EXPR_DEPTH: u32 = 100;
 
 pub(crate) fn analyze(class: &Class, lines: &JavaLines) -> Analysis {
     let class_name = class
@@ -178,6 +184,8 @@ pub(crate) fn analyze(class: &Class, lines: &JavaLines) -> Analysis {
         if_count: 0,
         while_count: 0,
         returned: false,
+        expr_depth: 0,
+        depth_reported: false,
     };
     if let Some(n) = &class.name {
         c.symbols.push(Symbol {
@@ -741,6 +749,27 @@ impl Checker<'_> {
     // ------------------------------------------------------------ expressions
 
     fn expr(&mut self, e: &Expr, seed: JType) -> JType {
+        self.expr_depth += 1;
+        if self.expr_depth > MAX_OFFICIAL_EXPR_DEPTH && !self.depth_reported {
+            self.depth_reported = true;
+            self.diags.push(error(
+                codes::TOO_DEEP,
+                format!(
+                    "Expressions are nested more than {MAX_OFFICIAL_EXPR_DEPTH} deep here (through \
+                     parentheses, array indexes or call arguments). The official compiler \
+                     silently writes an incomplete .vm file for this; use a local variable to \
+                     split the expression."
+                ),
+                e.span,
+                0,
+            ));
+        }
+        let t = self.expr_inner(e, seed);
+        self.expr_depth -= 1;
+        t
+    }
+
+    fn expr_inner(&mut self, e: &Expr, seed: JType) -> JType {
         let first = self.term(&e.first);
         let mut t = self.combine(seed, first, None);
         for (op, op_span, term) in &e.rest {

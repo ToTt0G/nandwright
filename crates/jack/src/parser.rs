@@ -349,11 +349,22 @@ impl<'a> Parser<'a> {
         }
         let class = self.parse_class();
         if !self.at_eof() {
+            // The official compiler reports this on the line of the token
+            // before (the class's closing brace).
+            let prev_line = self
+                .pos
+                .checked_sub(1)
+                .and_then(|i| self.toks.get(i))
+                .map(|t| t.java_line);
+            let n = self.diags.len();
             self.error_here(format!(
                 "Expected the end of the file after the class's closing `}}`, found {}. A file \
                  holds exactly one class.",
                 self.describe_current()
             ));
+            if let (Some(l), Some(d)) = (prev_line, self.diags.get_mut(n)) {
+                d.java_line = l;
+            }
         }
         Some(class)
     }
