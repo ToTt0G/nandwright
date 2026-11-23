@@ -9,6 +9,7 @@
 //!   files ([`format`]).
 
 pub mod circuit;
+pub mod cpu_machine;
 pub mod format;
 pub mod machine;
 pub mod primitives;
@@ -16,6 +17,7 @@ pub mod program;
 pub mod runner;
 
 pub use circuit::{Circuit, SimError, Time};
+pub use cpu_machine::CpuMachine;
 pub use machine::{HardwareMachine, Machine, Observed, Role};
 pub use primitives::{BuiltinRegistry, Primitive};
 pub use runner::{

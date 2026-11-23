@@ -225,11 +225,14 @@ pub fn standard_machine(dialect: Dialect, host: &SharedHost, dir: &str) -> Box<d
 
 /// The standard machines, with chip sources from `provider` (an editor
 /// passes one that sees unsaved buffers).
-pub fn hardware_machine(_dialect: Dialect, provider: Box<dyn SourceProvider>) -> Box<dyn Machine> {
-    Box::new(HardwareMachine::new(
-        provider,
-        Arc::new(BuiltinLibrary::standard()),
-    ))
+pub fn hardware_machine(dialect: Dialect, provider: Box<dyn SourceProvider>) -> Box<dyn Machine> {
+    match dialect {
+        Dialect::Cpu => Box::new(crate::cpu_machine::CpuMachine::new()),
+        _ => Box::new(HardwareMachine::new(
+            provider,
+            Arc::new(BuiltinLibrary::standard()),
+        )),
+    }
 }
 
 /// Runs one script. A runner is single-use: create a new one for a fresh run.

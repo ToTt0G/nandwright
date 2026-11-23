@@ -344,6 +344,7 @@ name = "n2t-simulator"
 version = "0.1.0"
 dependencies = [
  "n2t-core",
+ "n2t-hack",
 ]
 
 [[package]]

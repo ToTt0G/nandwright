@@ -1,6 +1,7 @@
 //! Loading Hack programs from files.
 
 use n2t_core::host::{SharedHost, path, read_text};
+use n2t_core::source::LineIndex;
 
 /// Loads a program as machine words: a `.hack` file as it is, a `.asm` file
 /// through the assembler. Errors are sentences for the student.
@@ -18,10 +19,21 @@ pub fn load_program(host: &SharedHost, file: &str) -> Result<Vec<u16>, String> {
     ))
 }
 
-fn assemble(name: &str, _source: &str) -> Result<Vec<u16>, String> {
-    Err(format!(
-        "`{name}`: assembling is not available in this build; load the `.hack` file"
-    ))
+fn assemble(name: &str, source: &str) -> Result<Vec<u16>, String> {
+    let assembly = n2t_hack::assemble(source);
+    match assembly.diagnostics.iter().find(|d| d.is_error()) {
+        None => Ok(assembly.words),
+        Some(d) => {
+            let at = d.span.map_or(String::new(), |span| {
+                let (line, column) = LineIndex::new(source).line_col_one_based(source, span.start);
+                format!(":{line}:{column}")
+            });
+            Err(format!(
+                "`{name}` does not assemble:\n  {name}{at}: {}",
+                d.message
+            ))
+        }
+    }
 }
 
 /// Parses a `.hack` program: one 16-digit binary word per non-empty line.
