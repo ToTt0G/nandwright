@@ -379,6 +379,47 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('panels that are closed while they open', () => {
+        it('leave nothing behind, and the next panel works', async () => {
+            const nandwright = await api();
+            const rejections: unknown[] = [];
+            const onRejection = (reason: unknown) => rejections.push(reason);
+            process.on('unhandledRejection', onRejection);
+            try {
+                const chip = file('chips', 'Majority.hdl');
+                const program = file('programs', 'Countdown.asm');
+                for (let i = 0; i < 5; i++) {
+                    // The panel exists as soon as `open` is called; the load is still queued.
+                    const opening = nandwright.chips.open(chip);
+                    nandwright.chips.get(chip)!.panel.dispose();
+                    await opening;
+                    const starting = nandwright.computers.open(program);
+                    nandwright.computers.get(program)!.panel.dispose();
+                    await starting;
+                }
+                assert.equal(nandwright.chips.get(chip), undefined);
+                const panel = await nandwright.chips.open(chip);
+                const { state, table, problem } = panel.snapshot();
+                assert.equal(problem, null);
+                assert.equal(state?.chip, 'Majority');
+                assert.equal(table?.rows.length, 8);
+                await panel.simulate({ type: 'set', pin: 'a', value: 1 });
+                await panel.simulate({ type: 'set', pin: 'b', value: 1 });
+                assert.equal(panel.snapshot().state?.pins.find((pin) => pin.name === 'out')?.bits, 1);
+                panel.panel.dispose();
+                const computer = await nandwright.computers.open(program);
+                assert.equal(computer.snapshot().problem, null);
+                assert.equal(computer.snapshot().state?.steps, 0);
+                computer.panel.dispose();
+                // Give a late reply time to turn into a rejection if it is going to.
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                assert.deepEqual(rejections, []);
+            } finally {
+                process.off('unhandledRejection', onRejection);
+            }
+        });
+    });
+
     describe('Hack computer', () => {
         it('steps, runs, draws on the screen, pauses and resets', async () => {
             const nandwright = await api();
@@ -472,6 +513,56 @@ describe('Nandwright', function () {
             }
         });
 
+        it('runs on from a breakpoint inside a loop and stops at it again', async function () {
+            this.timeout(90_000);
+            const nandwright = await api();
+            const dir = file('jackloop');
+            fs.mkdirSync(dir.fsPath, { recursive: true });
+            const uri = file('jackloop', 'Main.jack');
+            fs.writeFileSync(
+                uri.fsPath,
+                [
+                    '// Counts up in a loop that runs long enough to stop in it several times.',
+                    'class Main {',
+                    '    function void main() {',
+                    '        var int i;',
+                    '        let i = 0;',
+                    '        while (i < 20000) {',
+                    '            let i = i + 1;',
+                    '        }',
+                    '        return;',
+                    '    }',
+                    '}',
+                    '',
+                ].join('\n'),
+            );
+            const document = await vscode.workspace.openTextDocument(uri);
+            const line = document.getText().split(/\r?\n/).findIndex((text) => text.includes('let i = i + 1;'));
+            vscode.debug.addBreakpoints([new vscode.SourceBreakpoint(new vscode.Location(uri, new vscode.Position(line, 0)))]);
+            try {
+                const computer = await nandwright.computers.open(uri);
+                assert.equal(computer.snapshot().problem, null);
+                const steps: number[] = [];
+                for (let press = 0; press < 3; press++) {
+                    // Run again without taking the breakpoint away.
+                    await computer.simulate({ type: 'run' });
+                    await until(`the breakpoint, press ${press + 1}`, () => {
+                        const { state, running } = computer.snapshot();
+                        return !running && state?.status === 'breakpoint' && (press === 0 || state.steps > steps[press - 1]);
+                    });
+                    const { state } = computer.snapshot();
+                    assert.equal(state?.line, line);
+                    steps.push(state!.steps);
+                }
+                assert.ok(steps[0] < steps[1] && steps[1] < steps[2], `steps did not advance: ${steps.join(', ')}`);
+                computer.panel.dispose();
+            } finally {
+                vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+                await closeAll();
+                fs.rmSync(dir.fsPath, { recursive: true, force: true });
+            }
+        });
+
         it('compiles Jack to the .vm files the official compiler writes, and runs them', async () => {
             const nandwright = await api();
             for (const name of ['Main.vm', 'Counter.vm']) {
@@ -516,6 +607,87 @@ describe('Nandwright', function () {
             fs.writeFileSync(orphan.fsPath, '0000000000000000\n');
             assert.equal(await nandwright.outputs.compareWithReference(orphan, { quiet: true }), undefined);
         });
+    });
+
+    describe('writing the files the official tools write', () => {
+        type Plan = { outputs: { path: string; existing: string; state: string; written: boolean }[]; conflicts: string[]; written: boolean };
+        const assemble = async (source: vscode.Uri, extra: Record<string, unknown>): Promise<Plan> =>
+            (await api()).runtime.call<Plan>({ op: 'asm.assemble', path: source.fsPath, crlf: false, ...extra });
+
+        let source: vscode.Uri;
+        let hack: vscode.Uri;
+        beforeEach(() => {
+            source = file('programs', 'Overwrite.asm');
+            hack = file('programs', 'Overwrite.hack');
+            fs.copyFileSync(file('programs', 'Countdown.asm').fsPath, source.fsPath);
+            fs.rmSync(hack.fsPath, { force: true });
+        });
+        afterEach(() => {
+            fs.rmSync(source.fsPath, { force: true });
+            fs.rmSync(hack.fsPath, { force: true });
+        });
+
+        it('writes the .hack file when there is none', async () => {
+            await open('programs', 'Overwrite.asm');
+            const produced = await vscode.commands.executeCommand<Plan>('nandwright.assemble');
+            assert.equal(produced.written, true);
+            assert.deepEqual(produced.outputs.map((o) => [o.existing, o.written]), [['missing', true]]);
+            assert.equal(fs.readFileSync(hack.fsPath, 'utf8').split(/\r?\n/)[0].length, 16);
+        });
+
+        it('leaves an identical .hack file alone, down to its line endings', async () => {
+            await open('programs', 'Overwrite.asm');
+            await vscode.commands.executeCommand('nandwright.assemble');
+            // The same words with the other platform's line endings, as an
+            // editor or the student's own assembler may have written them.
+            const other = os.EOL === '\r\n' ? '\n' : '\r\n';
+            const bytes = Buffer.from(fs.readFileSync(hack.fsPath, 'utf8').replace(/\r?\n/g, other));
+            fs.writeFileSync(hack.fsPath, bytes);
+            const before = fs.statSync(hack.fsPath).mtimeMs;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const produced = await vscode.commands.executeCommand<Plan>('nandwright.assemble');
+            assert.deepEqual(produced.outputs.map((o) => [o.existing, o.written]), [['same', false]]);
+            assert.ok(fs.readFileSync(hack.fsPath).equals(bytes), 'the file was rewritten');
+            assert.equal(fs.statSync(hack.fsPath).mtimeMs, before);
+        });
+
+        it('judges the file on disk, not the unsaved text of an editor', async () => {
+            await open('programs', 'Overwrite.asm');
+            await vscode.commands.executeCommand('nandwright.assemble');
+            const bytes = fs.readFileSync(hack.fsPath);
+            const editor = await open('programs', 'Overwrite.hack');
+            await replaceAll(editor, '1111111111111111\n');
+            assert.ok(editor.document.isDirty);
+            const plan = await assemble(source, { write: false });
+            assert.equal(plan.outputs[0].existing, 'same');
+            assert.ok(fs.readFileSync(hack.fsPath).equals(bytes));
+        });
+
+        it('replaces a different file only as it was when the replacement was agreed', async () => {
+            const wrong = '1111111111111111\n';
+            fs.writeFileSync(hack.fsPath, wrong);
+            const plan = await assemble(source, { write: false });
+            assert.equal(plan.outputs[0].existing, 'different');
+            const key = plan.outputs[0].path;
+            // Nothing is replaced without being asked to.
+            let reply = await assemble(source, { write: true, expect: {} });
+            assert.deepEqual([reply.written, reply.conflicts.length], [false, 1]);
+            assert.equal(fs.readFileSync(hack.fsPath, 'utf8'), wrong);
+            // The file changes after the question was answered.
+            fs.writeFileSync(hack.fsPath, '0000000000000000\n');
+            reply = await assemble(source, { write: true, expect: { [key]: plan.outputs[0].state } });
+            assert.deepEqual([reply.written, reply.conflicts.length], [false, 1]);
+            assert.equal(fs.readFileSync(hack.fsPath, 'utf8'), '0000000000000000\n');
+            // Asked about again, the agreement holds.
+            const again = await assemble(source, { write: false });
+            reply = await assemble(source, { write: true, expect: { [key]: again.outputs[0].state } });
+            assert.deepEqual([reply.written, reply.conflicts.length], [true, 0]);
+            assert.notEqual(fs.readFileSync(hack.fsPath, 'utf8'), '0000000000000000\n');
+            assert.equal((await assemble(source, { write: false })).outputs[0].existing, 'same');
+        });
+
+        // Not covered: the modal "already exists with different content" dialog
+        // that `nandwright.assemble` shows, which a test cannot click.
     });
 
     describe('stepping through a script', () => {
@@ -570,6 +742,86 @@ describe('Nandwright', function () {
             } finally {
                 vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
                 tracker.dispose();
+            }
+        });
+
+        it('pauses a step that never ends, and stops without blocking the engine', async function () {
+            this.timeout(90_000);
+            // With every input at 0 the chip's output stays 0 and the loop never ends.
+            const script = file('chips', 'Endless.tst');
+            fs.writeFileSync(script.fsPath, 'load Majority.hdl;\nwhile out <> 1 {\n    eval,\n}\n');
+            const stops: string[] = [];
+            const log: string[] = [];
+            const received: { seq: number; command: string }[] = [];
+            const responses = new Map<number, number>();
+            let disconnected = false;
+            let stopsAfterDisconnect = 0;
+            const tracker = vscode.debug.registerDebugAdapterTrackerFactory('nandwright', {
+                createDebugAdapterTracker: () => ({
+                    onWillReceiveMessage: (message: any) => {
+                        log.push(`> ${message.command}`);
+                        received.push({ seq: message.seq, command: message.command });
+                    },
+                    onDidSendMessage: (message: any) => {
+                        log.push(`< ${message.type} ${message.event ?? message.command}`);
+                        if (message.type === 'response') {
+                            responses.set(message.request_seq, (responses.get(message.request_seq) ?? 0) + 1);
+                            disconnected ||= message.command === 'disconnect';
+                        }
+                        if (message.type === 'event' && message.event === 'stopped') {
+                            stops.push(message.body.reason);
+                            if (disconnected) {
+                                stopsAfterDisconnect++;
+                            }
+                        }
+                    },
+                }),
+            });
+            const ended = new Promise<void>((resolve) => {
+                const subscription = vscode.debug.onDidTerminateDebugSession(() => {
+                    subscription.dispose();
+                    resolve();
+                });
+            });
+            try {
+                assert.ok(await vscode.debug.startDebugging(undefined, { type: 'nandwright', request: 'launch', name: 'test', script: script.fsPath }));
+                await until('the stop on entry', () => stops.length === 1);
+                const session = vscode.debug.activeDebugSession!;
+                // The first step is the `load`; the next one enters the loop and never comes back.
+                await session.customRequest('next', { threadId: 1 });
+                await until('the first step', () => stops.length === 2);
+                await session.customRequest('next', { threadId: 1 });
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+                assert.equal(stops.length, 2, 'the endless step stopped by itself');
+                await session.customRequest('pause', { threadId: 1 });
+                await until('the pause', () => stops.length === 3, 5_000).catch((error) => {
+                    throw new Error(`${error.message}\n${log.join('\n')}`);
+                });
+                assert.equal(stops[2], 'pause');
+                // Run it again and stop at once.
+                await session.customRequest('continue', { threadId: 1 });
+                await vscode.debug.stopDebugging(session);
+                await Promise.race([
+                    ended,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error(`the session did not end\n${log.join('\n')}`)), 10_000)),
+                ]);
+                // The engine is free: another script runs to the end.
+                const [result] = await (await api()).tests.runScripts([file('chips', 'Majority.tst')]);
+                assert.equal(result.outcome.kind, 'passed', JSON.stringify(result.outcome));
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                assert.equal(stopsAfterDisconnect, 0, `a stop came after the disconnect\n${log.join('\n')}`);
+                for (const { seq, command } of received) {
+                    assert.ok((responses.get(seq) ?? 0) <= 1, `${command} (${seq}) was answered ${responses.get(seq)} times\n${log.join('\n')}`);
+                }
+                const disconnect = received.find((r) => r.command === 'disconnect');
+                assert.equal(responses.get(disconnect!.seq), 1, 'the disconnect was not answered exactly once');
+            } finally {
+                vscode.debug.removeBreakpoints(vscode.debug.breakpoints);
+                tracker.dispose();
+                if (vscode.debug.activeDebugSession) {
+                    await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
+                }
+                fs.rmSync(script.fsPath, { force: true });
             }
         });
     });

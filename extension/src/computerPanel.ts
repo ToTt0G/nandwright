@@ -391,6 +391,10 @@ export class ComputerPanels implements vscode.Disposable {
         return computer;
     }
 
+    get(uri: vscode.Uri): ComputerPanel | undefined {
+        return this.panels.get(uri.toString());
+    }
+
     dispose(): void {
         for (const panel of [...this.panels.values()]) {
             panel.panel.dispose();
