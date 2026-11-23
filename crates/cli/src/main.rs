@@ -267,11 +267,11 @@ fn check(paths: &[PathBuf], deny_warnings: bool) -> Result<bool, String> {
                 for d in &n2t_hack::assemble(&text).diagnostics {
                     reporter.diagnostic(&shown, &text, d);
                 }
-            } else if path::has_extension(&file, "hack") {
-                if let Err(diagnostics) = n2t_hack::parse_hack(&text) {
-                    for d in &diagnostics {
-                        reporter.diagnostic(&shown, &text, d);
-                    }
+            } else if path::has_extension(&file, "hack")
+                && let Err(diagnostics) = n2t_hack::parse_hack(&text)
+            {
+                for d in &diagnostics {
+                    reporter.diagnostic(&shown, &text, d);
                 }
             }
         }
