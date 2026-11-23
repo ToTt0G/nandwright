@@ -1,1 +1,1 @@
-Stub.hdl:5:5: error[hdl-empty-implementation]: chip `Stub` has no parts; it is an unimplemented stub
+Stub.hdl:5:5: hint[hdl-empty-implementation]: chip `Stub` has no parts yet; until it does, its outputs are 0

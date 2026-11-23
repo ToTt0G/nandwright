@@ -150,6 +150,20 @@ impl ScriptAnalysis {
     }
 }
 
+/// Whether the chip or any chip it is built from has an empty `PARTS:`.
+fn has_unimplemented_chip(definition: &ChipDefinition) -> bool {
+    match definition.as_composite() {
+        Some(composite) => {
+            composite.parts.is_empty()
+                || composite
+                    .parts
+                    .iter()
+                    .any(|part| has_unimplemented_chip(&part.chip))
+        }
+        None => false,
+    }
+}
+
 pub fn analyze(script: &Script, loader: &mut dyn ChipLoader) -> ScriptAnalysis {
     let dialect = script.dialect();
     if dialect != Dialect::Hardware {
@@ -669,6 +683,17 @@ impl Analyzer<'_> {
                     .collect(),
             };
         match matching.as_slice() {
+            // A chip that is not written yet has no parts to look in. The
+            // official project 5 scripts address `ROM32K` and `RAM16K` inside
+            // `Computer` long before the student builds it; that is not a
+            // mistake in the script.
+            [] if current
+                .definition
+                .as_deref()
+                .is_some_and(has_unimplemented_chip) =>
+            {
+                Ok(None)
+            }
             [] => Err(Diagnostic::error(
                 DiagnosticCode::UnknownBuiltinChip,
                 format!(

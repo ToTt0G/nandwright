@@ -1,0 +1,11 @@
+/**
+ * A chip that is still to be written. Its test script already talks to the
+ * memory it will contain, as the official project 5 scripts do.
+ */
+CHIP Unbuilt {
+    IN in[16], load;
+    OUT out[16];
+
+    PARTS:
+    // Put your code here:
+}

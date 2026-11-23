@@ -25,8 +25,9 @@ pub struct AnalysisOptions {
     pub expected_name: Option<String>,
     /// Maximum declared bus width.
     pub max_width: u32,
-    /// Severity for a composite chip with an empty `PARTS:` section (a stub).
-    /// The baseline runner treats stubs as failures; editors may prefer a warning.
+    /// Severity for a composite chip with an empty `PARTS:` section. Every
+    /// course project starts as one, and the official simulator runs it with
+    /// its outputs at zero, so by default it is a hint and never an error.
     pub empty_implementation: Severity,
 }
 
@@ -35,7 +36,7 @@ impl Default for AnalysisOptions {
         Self {
             expected_name: None,
             max_width: DEFAULT_MAX_WIDTH,
-            empty_implementation: Severity::Error,
+            empty_implementation: Severity::Hint,
         }
     }
 }
@@ -303,7 +304,7 @@ impl<'a> Analyzer<'a> {
                         self.options.empty_implementation,
                         DiagnosticCode::EmptyImplementation,
                         format!(
-                            "chip `{}` has no parts; it is an unimplemented stub",
+                            "chip `{}` has no parts yet; until it does, its outputs are 0",
                             self.decl.name.name
                         ),
                         Some(*keyword_span),
