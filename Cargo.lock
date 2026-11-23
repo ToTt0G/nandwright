@@ -320,6 +320,13 @@ name = "n2t-core"
 version = "0.1.0"
 
 [[package]]
+name = "n2t-hack"
+version = "0.1.0"
+dependencies = [
+ "n2t-core",
+]
+
+[[package]]
 name = "n2t-lsp"
 version = "0.1.0"
 dependencies = [
