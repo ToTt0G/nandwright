@@ -41,7 +41,7 @@ impl ScreenState {
     }
 
     #[inline]
-    pub fn draw_pixel_unchecked(&self, ram: &mut [i16], x: i16, y: i16) {
+    fn draw_pixel_unchecked(&self, ram: &mut [i16], x: i16, y: i16) {
         let addr = SCREEN_START as usize + (y as usize) * 32 + ((x as usize) >> 4);
         let mask = 1u16 << (x & 15);
         let word = ram[addr] as u16;
@@ -142,7 +142,7 @@ impl ScreenState {
         Ok(())
     }
 
-    pub fn draw_horizontal(&self, ram: &mut [i16], x1: i16, x2: i16, y: i16) {
+    fn draw_horizontal(&self, ram: &mut [i16], x1: i16, x2: i16, y: i16) {
         let mut x = x1;
         while x <= x2 && (x & 15) != 0 {
             self.draw_pixel_unchecked(ram, x, y);
