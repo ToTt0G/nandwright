@@ -314,13 +314,14 @@ export class TestExplorer implements vscode.Disposable {
                     break;
                 case 'failed': {
                     const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
-                    run.failed(item, failureMessages(uri, outcome, failures, inspection, lines, notes), duration);
+                    run.failed(item, failureMessages(uri, failures, inspection, notes), duration);
                     say(`✗ ${name}: comparison failure at line ${outcome.line}`);
                     say(`    expected: ${outcome.expected ?? '(the compare file ended here)'}`);
                     say(`    actual:   ${outcome.actual ?? '(the script produced no more lines)'}`);
                     if (failures.length > 1) {
                         say(`    ${failures.length} lines differ in all.`);
                     }
+                    say(comparisonTable(inspection.expected ?? [], lines));
                     break;
                 }
                 case 'error':
@@ -376,6 +377,26 @@ function groupPins(pins: Pin[]): string {
         .join('\n');
 }
 
+/**
+ * The compare file and the produced output side by side, with a mark on each
+ * line that differs: the whole picture, for the Test Results panel.
+ */
+export function comparisonTable(expected: string[], produced: string[]): string {
+    const width = Math.max(8, ...expected.map((line) => line.length));
+    const rows = [`      ${'expected'.padEnd(width)}   actual`];
+    for (let i = 0; i < Math.max(expected.length, produced.length); i++) {
+        const want = expected[i];
+        const got = produced[i];
+        if (got === undefined) {
+            // The script stopped producing output here (or never got this far).
+            break;
+        }
+        const same = want !== undefined && want.length === got.length && [...want].every((c, k) => c === '*' || c === got[k]);
+        rows.push(`${String(i + 1).padStart(3)} ${same ? ' ' : '≠'} ${(want ?? '').padEnd(width)}   ${got}`);
+    }
+    return rows.join('\n');
+}
+
 /** The names of the columns in which two rows of an output table differ. */
 export function differingColumns(header: string | undefined, expected: string | null, actual: string | null): string[] {
     if (!header || expected === null || actual === null) {
@@ -391,14 +412,12 @@ export function differingColumns(header: string | undefined, expected: string | 
 
 /**
  * One message per failing row, at the script line that produced it, with the
- * pin values at that step; then the whole expected and actual tables as a diff.
+ * pin values at that step.
  */
 function failureMessages(
     uri: vscode.Uri,
-    outcome: Extract<TestOutcome, { kind: 'failed' }>,
     failures: TestFailure[],
     inspection: TestInspection,
-    produced: string[],
     notes: string[],
 ): vscode.TestMessage[] {
     const compareName = inspection.comparePath ? path.basename(inspection.comparePath) : 'the compare file';
@@ -421,12 +440,5 @@ function failureMessages(
         message.location = new vscode.Location(uri, toRange(failure.range));
         messages.push(message);
     }
-    const summary =
-        failures.length > 1
-            ? `${failures.length} lines differ from ${compareName}; the first is line ${outcome.line}.`
-            : `Line ${outcome.line} differs from ${compareName}.`;
-    // No location: in the editor the rows above speak for themselves, and
-    // this one is the full table in the Test Results panel.
-    messages.push(vscode.TestMessage.diff(summary, (inspection.expected ?? []).join('\n'), produced.join('\n')));
     return messages;
 }

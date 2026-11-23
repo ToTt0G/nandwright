@@ -25,8 +25,7 @@ const themeKey = option('theme', 'dark');
 const only = option('only', '');
 const outDir = resolve(option('out', join(repo, 'docs', 'images')));
 const scale = Number(option('scale', '2'));
-const WIDTH = 1280;
-const HEIGHT = 800;
+const [WIDTH, HEIGHT] = option('size', '1280x800').split('x').map(Number);
 
 const THEMES = {
     dark: 'Default Dark Modern',
@@ -36,17 +35,13 @@ const THEMES = {
 };
 
 const scratch = mkdtempSync(join(tmpdir(), 'nandwright-shots-'));
-const workspace = join(scratch, 'practice-chips');
-mkdirSync(workspace, { recursive: true });
-for (const name of ['Majority', 'Parity4', 'SwapBytes', 'Accumulator', 'Scratchpad']) {
-    for (const ext of ['hdl', 'tst', 'cmp']) {
-        cpSync(join(repo, 'tests', 'fixtures', 'chips', `${name}.${ext}`), join(workspace, `${name}.${ext}`));
-    }
-}
-for (const ext of ['asm', 'tst', 'cmp']) {
-    cpSync(join(repo, 'tests', 'fixtures', 'programs', `Countdown.${ext}`), join(workspace, `Countdown.${ext}`));
-}
-cpSync(join(repo, 'crates', 'hack', 'tests', 'fixtures', 'Diagonal.asm'), join(workspace, 'Diagonal.asm'));
+// The repository's examples folder, plus the unwritten practice chip that
+// "Try the example chip" opens (for the animated capture).
+const workspace = join(scratch, 'nandwright-examples');
+cpSync(join(repo, 'examples'), workspace, { recursive: true });
+mkdirSync(join(workspace, 'practice'), { recursive: true });
+cpSync(join(extension, 'media', 'example'), join(workspace, 'practice'), { recursive: true });
+const chips = join(workspace, 'chips');
 
 const userData = join(scratch, 'user');
 mkdirSync(join(userData, 'User'), { recursive: true });
@@ -87,6 +82,18 @@ writeFileSync(
             'testing.openTesting': 'neverOpen',
             'explorer.compactFolders': false,
             'files.autoSave': 'off',
+            // Scripted typing must not be completed or closed for it.
+            ...(args.includes('--demo')
+                ? {
+                      'editor.quickSuggestions': { other: 'off', comments: 'off', strings: 'off' },
+                      'editor.suggestOnTriggerCharacters': false,
+                      'editor.acceptSuggestionOnEnter': 'off',
+                      'editor.autoClosingBrackets': 'never',
+                      'editor.parameterHints.enabled': false,
+                      'editor.codeLens': false,
+                      'editor.fontSize': 15,
+                  }
+                : {}),
         },
         null,
         2,
@@ -207,7 +214,7 @@ async function shot(name) {
 const scenes = {
     // The Testing view with a project's scripts, all passing.
     async tests() {
-        await openFile('Majority.hdl');
+        await openFile('chips/Majority.hdl');
         await command('showTests');
         await pause(1500);
         await command('runAllTests');
@@ -220,12 +227,12 @@ const scenes = {
 
     // A failing test: the diff of expected and actual, and the pins.
     async failure() {
-        await openFile('Majority.hdl');
-        const file = join(workspace, 'Majority.hdl');
+        await openFile('chips/Majority.hdl');
+        const file = join(chips, 'Majority.hdl');
         const original = readFileSync(file, 'utf8');
         writeFileSync(file, original.replace('And(a=a, b=c, out=ac);', 'Or(a=a, b=c, out=ac);'));
         await pause(1500);
-        await openFile('Majority.tst');
+        await openFile('chips/Majority.tst');
         await command('runTest');
         await pause(4000);
         await command('clearNotifications');
@@ -240,7 +247,7 @@ const scenes = {
 
     // The chip simulator beside the source, with the truth table.
     async simulator() {
-        await openFile('Majority.hdl');
+        await openFile('chips/Majority.hdl');
         await command('openChip');
         await pause(3500);
         const frame = await chipFrame();
@@ -302,10 +309,30 @@ const scenes = {
         await shot('hack-computer');
     },
 
+    // A Jack program on the VM emulator, compiled in memory.
+    async jack() {
+        await openFile('Sunrise/Main.jack');
+        await command('runProgram');
+        await pause(3500);
+        const frame = await panelFrame('.screen canvas');
+        await frame.getByRole('button', { name: 'Run' }).click();
+        await pause(2500);
+        await frame.locator('.screen').click();
+        for (let i = 0; i < 25; i++) {
+            await page.keyboard.down('ArrowRight');
+            await pause(60);
+        }
+        await page.keyboard.up('ArrowRight');
+        await pause(600);
+        await shot('jack-program');
+        await frame.getByRole('button', { name: 'Pause' }).click();
+        await pause(500);
+    },
+
     // Diagnostics and hover while editing.
     async editing() {
         await openFile('Parity4.hdl');
-        const file = join(workspace, 'Parity4.hdl');
+        const file = join(chips, 'Parity4.hdl');
         const original = readFileSync(file, 'utf8');
         writeFileSync(file, original.replace('Xor(a=low, b=high, out=out);', 'Xor(a=low, b=hihg, out=out[1]);'));
         await pause(2500);
@@ -321,6 +348,73 @@ const scenes = {
         await pause(1000);
     },
 };
+
+/**
+ * The animated capture: write a chip, run its test, see it fail, fix it, see
+ * it pass. Frames are real screenshots taken while the editor is driven.
+ */
+async function demo() {
+    const framesDir = join(outDir, 'demo-frames');
+    rmSync(framesDir, { recursive: true, force: true });
+    mkdirSync(framesDir, { recursive: true });
+    let count = 0;
+    let capturing = true;
+    const loop = (async () => {
+        while (capturing) {
+            const started = Date.now();
+            await page.screenshot({ path: join(framesDir, `frame-${String(count++).padStart(4, '0')}.png`) }).catch(() => {});
+            await pause(Math.max(0, 125 - (Date.now() - started)));
+        }
+    })();
+    const type = (text) => page.keyboard.type(text, { delay: 28 });
+
+    await command('toggleSidebar');
+    await openFile('practice/Majority.hdl');
+    await pause(1200);
+    await goTo(16, 1);
+    await page.keyboard.press('End');
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Home');
+    await page.keyboard.up('Shift');
+    // The first attempt has a mistake: Or where an And belongs.
+    await type('    And(a=a, b=b, out=ab);');
+    await page.keyboard.press('Enter');
+    await type('Or(a=a, b=c, out=ac);');
+    await page.keyboard.press('Enter');
+    await type('And(a=b, b=c, out=bc);');
+    await page.keyboard.press('Enter');
+    await type('Or(a=ab, b=ac, out=either);');
+    await page.keyboard.press('Enter');
+    await type('Or(a=either, b=bc, out=out);');
+    await page.keyboard.press('Escape');
+    await pause(1200);
+    await command('runTest');
+    await pause(2200);
+    // The failure: the notification leads to the failing row and its details.
+    await page.getByRole('button', { name: 'Show Details' }).click();
+    await pause(1500);
+    await command('peekFailure');
+    await pause(4500);
+    await page.keyboard.press('Escape');
+    await command('closePanel');
+    await openFile('practice/Majority.hdl');
+    await pause(700);
+    // Fix line 17: Or -> And.
+    await goTo(17, 5);
+    await page.keyboard.down('Shift');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.up('Shift');
+    await pause(500);
+    await type('And');
+    await pause(1000);
+    await command('runTest');
+    await pause(3500);
+    capturing = false;
+    await loop;
+    console.log(`${count} frames in ${framesDir}`);
+}
 
 /** The frame of the webview panel that contains `selector`. */
 async function panelFrame(selector) {
@@ -339,7 +433,11 @@ const chipFrame = () => panelFrame('#root .pins');
 
 let failed = false;
 try {
-    for (const [name, scene] of Object.entries(scenes)) {
+    if (args.includes('--demo')) {
+        await closeEverything();
+        await demo();
+    }
+    for (const [name, scene] of Object.entries(args.includes('--demo') ? {} : scenes)) {
         if (only && only !== name) {
             continue;
         }

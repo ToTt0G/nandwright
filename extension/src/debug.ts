@@ -14,14 +14,13 @@ import { formatValue, keyName } from './values';
 const THREAD = 1;
 const FRAME = 1;
 
-/** Variable scopes, in the order shown. */
-const SCOPES: { reference: number; name: string; roles: Pin['role'][] }[] = [
-    { reference: 1, name: 'Inputs', roles: ['input'] },
-    { reference: 2, name: 'Outputs', roles: ['output'] },
-    { reference: 3, name: 'Internal pins', roles: ['internal'] },
-    { reference: 4, name: 'Registers', roles: ['register'] },
-    { reference: 5, name: 'Memory', roles: ['memory'] },
-];
+/**
+ * One scope, so that VS Code opens it by itself: a student should see the
+ * pins without hunting for them. Values are listed inputs first, then
+ * outputs, then internal pins (or registers, then memory).
+ */
+const SCOPE = 1;
+const ROLE_ORDER: Pin['role'][] = ['input', 'output', 'internal', 'register', 'memory'];
 
 interface Request {
     seq: number;
@@ -135,26 +134,21 @@ class ScriptDebugSession implements vscode.DebugAdapter {
                 this.respond(request, { stackFrames: frames, totalFrames: frames.length });
                 return;
             }
-            case 'scopes':
+            case 'scopes': {
+                const chip = this.pins.some((pin) => pin.role === 'input' || pin.role === 'output' || pin.role === 'internal');
                 this.respond(request, {
-                    scopes: SCOPES.filter((scope) => this.pins.some((pin) => scope.roles.includes(pin.role))).map(
-                        (scope) => ({
-                            name: scope.name,
-                            variablesReference: scope.reference,
-                            expensive: false,
-                            presentationHint: scope.reference === 1 ? 'arguments' : 'locals',
-                        }),
-                    ),
+                    scopes: [{ name: chip ? 'Pins' : 'Registers and memory', variablesReference: SCOPE, expensive: false }],
                 });
                 return;
+            }
             case 'variables': {
-                const scope = SCOPES.find((s) => s.reference === args.variablesReference);
-                const variables = this.pins
-                    .filter((pin) => scope?.roles.includes(pin.role))
+                const pins = args.variablesReference === SCOPE ? this.pins : [];
+                const variables = [...pins]
+                    .sort((a, b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role))
                     .map((pin) => ({
                         name: pin.name,
-                        value: describe(pin),
-                        type: pin.width === 1 ? 'bit' : `${pin.width} bits`,
+                        value: `${describe(pin)}  · ${pin.role}`,
+                        type: pin.width === 1 ? `${pin.role}, 1 bit` : `${pin.role}, ${pin.width} bits`,
                         variablesReference: 0,
                     }));
                 this.respond(request, { variables });

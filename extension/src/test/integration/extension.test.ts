@@ -555,9 +555,10 @@ describe('Nandwright', function () {
                 await session.customRequest('stepIn', { threadId: 1 });
                 await until('the command step', () => stops.length === 3);
                 const scopes = (await session.customRequest('scopes', { frameId: 1 })).scopes;
-                assert.deepEqual(scopes.map((s: any) => s.name), ['Inputs', 'Outputs', 'Internal pins']);
-                const inputs = (await session.customRequest('variables', { variablesReference: scopes[0].variablesReference })).variables;
-                assert.match(inputs.find((v: any) => v.name === 'in').value, /^5\b/);
+                assert.deepEqual(scopes.map((s: any) => s.name), ['Pins']);
+                const pins = (await session.customRequest('variables', { variablesReference: scopes[0].variablesReference })).variables;
+                assert.match(pins.find((v: any) => v.name === 'in').value, /^5\b.*input$/);
+                assert.match(pins.find((v: any) => v.name === 'sum').value, /internal$/);
                 await session.customRequest('continue', { threadId: 1 });
                 await until('the breakpoint', () => stops.length === 4).catch((error) => {
                     throw new Error(`${error.message}\n${log.join('\n')}`);
