@@ -52,7 +52,7 @@ if (process.argv.includes('--tests')) {
     builds.length = 0;
     builds.push({
         ...node,
-        entryPoints: ['src/test/unit/engine.test.ts'],
+        entryPoints: ['src/test/unit/engine.test.ts', 'src/test/unit/zip.test.ts'],
         outdir: 'dist-test/unit',
         outExtension: { '.js': '.cjs' },
         sourcemap: 'inline',

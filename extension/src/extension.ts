@@ -15,6 +15,7 @@ import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
 import { ScriptResult, TestExplorer } from './testing';
+import { projectFiles, writeProjectZip, zipProject } from './zipProject';
 
 const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
 const BUILTIN_SCHEME = 'n2t-builtin';
@@ -26,6 +27,8 @@ export interface NandwrightApi {
     computers: ComputerPanels;
     outputs: Outputs;
     progress: Progress;
+    /** Zip Project Files after its dialogs: what is offered, and writing the zip. */
+    zipProject: { projectFiles: typeof projectFiles; writeProjectZip: typeof writeProjectZip };
     runtime: Runtime;
     client: LanguageClient;
 }
@@ -339,6 +342,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
             ),
         ),
         vscode.commands.registerCommand('nandwright.openExample', () => openExample(context)),
+        vscode.commands.registerCommand('nandwright.zipProject', (argument?: unknown) => zipProject(argument)),
         vscode.languages.registerCodeLensProvider(
             { language: 'hdl', scheme: 'file' },
             {
@@ -392,7 +396,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         void vscode.commands.executeCommand('nandwright.getStarted');
     }
 
-    return { tests, chips, computers, outputs, progress, runtime, client };
+    return { tests, chips, computers, outputs, progress, zipProject: { projectFiles, writeProjectZip }, runtime, client };
 }
 
 export function deactivate(): void {}

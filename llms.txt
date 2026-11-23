@@ -21,6 +21,7 @@ Key facts:
 - The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 - The status bar shows how many of the folder's tests pass; click it for the list of what is passing, failing, not run or not started.
 - For clocked chips the simulator keeps a clock history: the pins after each tick and tock.
+- Zip Project Files packs a project folder for handing in; your own work is ticked, generated files are not, and you choose the final list.
 
 ## Docs
 
@@ -40,3 +41,4 @@ Key facts:
 - Compare with Reference Output: diffs a .hack, .vm or .xml file from your own tool against the reference
 - Compare Output with Expected (.out ↔ .cmp)
 - Show Project Progress
+- Zip Project Files…

@@ -299,6 +299,12 @@
         "command": "nandwright.showProgress",
         "title": "Show Project Progress",
         "category": "Nand2Tetris"
+      },
+      {
+        "command": "nandwright.zipProject",
+        "title": "Zip Project Files\u2026",
+        "category": "Nand2Tetris",
+        "icon": "$(file-zip)"
       }
     ],
     "menus": {
@@ -376,6 +382,11 @@
           "command": "nandwright.compareWithReference",
           "when": "resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .xml",
           "group": "nandwright@5"
+        },
+        {
+          "command": "nandwright.zipProject",
+          "when": "explorerResourceIsFolder",
+          "group": "nandwright@6"
         }
       ],
       "commandPalette": [
@@ -547,7 +558,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
   },

@@ -11,6 +11,8 @@
 - Project progress in the status bar: how many of the folder's tests pass, with a list of
   what is passing, failing, not run or not started.
 - Clock history in the chip simulator: the pins after each tick and tock.
+- Zip Project Files: packs a project folder for handing in, with your own work ticked and
+  generated files left out. You choose the final list.
 
 ## 0.2.0
 

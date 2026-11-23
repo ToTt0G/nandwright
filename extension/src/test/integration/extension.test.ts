@@ -492,6 +492,58 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('zip project files', () => {
+        it('offers the files of a folder, ticks the student\'s own work and writes the chosen ones', async () => {
+            const nandwright = await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'zip-'));
+            const target = path.join(workspace, `${path.basename(folder)}.zip`);
+            try {
+                const write = (relative: string, text: string) => {
+                    fs.mkdirSync(path.dirname(path.join(folder, relative)), { recursive: true });
+                    fs.writeFileSync(path.join(folder, relative), text);
+                };
+                write('Mine.hdl', 'CHIP Mine { IN a; OUT out; PARTS: Not(in=a, out=out); }\n');
+                write('Mine.tst', 'load Mine.hdl;\n');
+                write('Mine.cmp', '| a |\n');
+                write('Mine.out', '| a |\n');
+                write('notes.txt', 'mine\n');
+                write('asm/Prog.asm', '@0\n');
+                write('asm/Prog.HACK', '0000000000000000\n');
+                write('.hidden', 'x');
+                write('.idea/settings.xml', 'x');
+                write('node_modules/x/index.js', 'x');
+                write('build/y.txt', 'x');
+                const { files, tooLarge } = await nandwright.zipProject.projectFiles(folder);
+                assert.equal(tooLarge, false);
+                assert.deepEqual(
+                    files.map((f) => [f.path, f.picked, f.description ?? '']),
+                    [
+                        ['Mine.cmp', false, 'test file from the course'],
+                        ['Mine.hdl', true, ''],
+                        ['Mine.out', false, 'generated'],
+                        ['Mine.tst', false, 'test file from the course'],
+                        ['asm/Prog.HACK', false, 'generated'],
+                        ['asm/Prog.asm', true, ''],
+                        ['notes.txt', true, ''],
+                    ],
+                );
+                const chosen = files.filter((f) => f.picked).map((f) => f.path);
+                await nandwright.zipProject.writeProjectZip(folder, chosen, target);
+                const archive = fs.readFileSync(target);
+                const end = archive.length - 22;
+                assert.equal(archive.readUInt32LE(end), 0x06054b50);
+                assert.equal(archive.readUInt16LE(end + 10), 3);
+                for (const name of chosen) {
+                    assert.ok(archive.includes(Buffer.from(name)), `${name} is not in the zip`);
+                }
+                assert.ok(!archive.includes(Buffer.from('Mine.tst')));
+            } finally {
+                await removeFolder(folder);
+                fs.rmSync(target, { force: true });
+            }
+        });
+    });
+
     describe('simulator panel', () => {
         it('shows a chip, takes inputs and builds the truth table', async () => {
             const nandwright = await api();

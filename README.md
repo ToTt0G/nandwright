@@ -106,6 +106,7 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
   the Testing view.
 - **Assemble to .hack File** and **Compile Jack to VM Files** write the official output when
   you ask, and ask before replacing a file whose content differs.
+- Zip Project Files packs a project folder for handing in; your own work is ticked, generated files are not, and you choose the final list.
 
 ### Write code
 
