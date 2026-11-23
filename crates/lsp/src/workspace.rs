@@ -21,7 +21,7 @@ pub type ProjectElaborator = Elaborator<OverlaySourceProvider<HostSourceProvider
 
 /// The folder that documents without a file (untitled buffers) live in.
 /// Nothing exists there, so their parts resolve to the built-in chips.
-const UNTITLED_DIR: &str = "/n2t-untitled";
+pub(crate) const UNTITLED_DIR: &str = "/n2t-untitled";
 
 /// All chips in one folder share a resolution context (the folder is the
 /// "project directory" of the specification).
@@ -157,12 +157,15 @@ pub struct Workspace {
     pub projects: HashMap<String, Project>,
     pub builtins: Arc<BuiltinLibrary>,
     pub host: SharedHost,
+    /// Compiled Jack folders, by folder (dropped when a Jack file changes).
+    pub jack_folders: HashMap<String, Arc<crate::jack::JackFolder>>,
 }
 
 impl Workspace {
     pub fn new(host: SharedHost) -> Self {
         Self {
             docs: HashMap::new(),
+            jack_folders: HashMap::new(),
             projects: HashMap::new(),
             builtins: Arc::new(BuiltinLibrary::standard()),
             host,
@@ -214,6 +217,7 @@ impl Workspace {
             tst: None,
             asm: None,
         };
+        self.jack_folders.remove(&doc.dir);
         self.docs.insert(uri.clone(), doc);
         self.sync_overlay(&uri);
     }
@@ -225,11 +229,17 @@ impl Workspace {
             doc.version = version;
             doc.tst = None;
             doc.asm = None;
+            let dir = doc.dir.clone();
+            self.jack_folders.remove(&dir);
         }
         self.sync_overlay(uri);
     }
 
     pub fn close(&mut self, uri: &Url) {
+        if let Some(doc) = self.docs.get(uri) {
+            let dir = doc.dir.clone();
+            self.jack_folders.remove(&dir);
+        }
         if let Some(doc) = self.docs.remove(uri)
             && doc.is_overlay_chip()
         {

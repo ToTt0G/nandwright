@@ -149,7 +149,9 @@ pub fn diagnostic(
         related_information: (!related.is_empty()).then_some(related),
         tags: matches!(
             d.code,
-            n2t_core::DiagnosticCode::UnusedSignal | n2t_core::DiagnosticCode::UnusedInput
+            n2t_core::DiagnosticCode::UnusedSignal
+                | n2t_core::DiagnosticCode::UnusedInput
+                | n2t_core::DiagnosticCode::Other("jack-unreachable-code")
         )
         .then(|| vec![lsp::DiagnosticTag::UNNECESSARY]),
         ..Default::default()

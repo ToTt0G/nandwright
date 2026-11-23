@@ -194,6 +194,11 @@ pub fn capabilities() -> lsp::ServerCapabilities {
         document_range_formatting_provider: Some(lsp::OneOf::Left(true)),
         inlay_hint_provider: Some(lsp::OneOf::Left(true)),
         folding_range_provider: Some(lsp::FoldingRangeProviderCapability::Simple(true)),
+        signature_help_provider: Some(lsp::SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".into(), ",".into()]),
+            retrigger_characters: Some(vec![",".into()]),
+            work_done_progress_options: Default::default(),
+        }),
         semantic_tokens_provider: Some(
             lsp::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 lsp::SemanticTokensOptions {
@@ -293,6 +298,7 @@ impl Server {
                     Some(DocKind::Tst) => tst::hover(ws, &uri, position),
                     Some(DocKind::Asm) => asm::hover(ws, &uri, position),
                     Some(DocKind::Hack) => asm::hack_hover(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::hover(ws, &uri, position),
                     _ => None,
                 })
             }
@@ -304,6 +310,7 @@ impl Server {
                     Some(DocKind::Hdl) => hdl::definition(ws, &uri, position),
                     Some(DocKind::Tst) => tst::definition(ws, &uri, position),
                     Some(DocKind::Asm) => asm::definition(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::definition(ws, &uri, position),
                     _ => None,
                 };
                 ok(location.map(lsp::GotoDefinitionResponse::Scalar))
@@ -319,6 +326,9 @@ impl Server {
                     Some(DocKind::Asm) => {
                         asm::references(ws, &uri, position, p.context.include_declaration)
                     }
+                    Some(DocKind::Jack) => {
+                        jack::references(ws, &uri, position, p.context.include_declaration)
+                    }
                     _ => Vec::new(),
                 })
             }
@@ -329,6 +339,7 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::highlights(ws, &uri, position),
                     Some(DocKind::Asm) => asm::highlights(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::highlights(ws, &uri, position),
                     _ => Vec::new(),
                 })
             }
@@ -342,6 +353,9 @@ impl Server {
                     Some(DocKind::Asm) => Some(lsp::DocumentSymbolResponse::Nested(
                         asm::document_symbols(ws, &uri),
                     )),
+                    Some(DocKind::Jack) => Some(lsp::DocumentSymbolResponse::Nested(
+                        jack::document_symbols(ws, &uri),
+                    )),
                     _ => None,
                 })
             }
@@ -351,6 +365,7 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::prepare_rename(ws, &uri, p.position),
                     Some(DocKind::Asm) => asm::prepare_rename(ws, &uri, p.position),
+                    Some(DocKind::Jack) => jack::prepare_rename(ws, &uri, p.position),
                     _ => None,
                 })
             }
@@ -361,6 +376,7 @@ impl Server {
                 let result = match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::rename(ws, &uri, position, &p.new_name),
                     Some(DocKind::Asm) => asm::rename(ws, &uri, position, &p.new_name),
+                    Some(DocKind::Jack) => jack::rename(ws, &uri, position, &p.new_name),
                     _ => Ok(None),
                 };
                 match result {
@@ -377,6 +393,7 @@ impl Server {
                     Some(DocKind::Hdl) => hdl::completion(ws, &uri, position, snippets),
                     Some(DocKind::Tst) => tst::completion(ws, &uri, position, snippets),
                     Some(DocKind::Asm) => asm::completion(ws, &uri, position),
+                    Some(DocKind::Jack) => jack::completion(ws, &uri, position),
                     _ => Vec::new(),
                 };
                 ok(lsp::CompletionResponse::Array(items))
@@ -395,6 +412,16 @@ impl Server {
                 ok(match kind(ws, &uri) {
                     Some(DocKind::Hdl) => hdl::inlay_hints(ws, &uri, p.range),
                     _ => Vec::new(),
+                })
+            }
+            req::SignatureHelpRequest::METHOD => {
+                let p = params::<req::SignatureHelpRequest>(request)?;
+                let uri = p.text_document_position_params.text_document.uri;
+                let position = p.text_document_position_params.position;
+                ok(match kind(ws, &uri) {
+                    Some(DocKind::Jack) => jack::signature_help(ws, &uri, position),
+                    Some(DocKind::Hdl) => hdl::signature_help(ws, &uri, position),
+                    _ => None,
                 })
             }
             req::FoldingRangeRequest::METHOD => {
@@ -465,6 +492,7 @@ impl Server {
                 }
             }
             notif::DidChangeWatchedFiles::METHOD => {
+                self.workspace.jack_folders.clear();
                 let dirs: Vec<_> = self.workspace.projects.keys().cloned().collect();
                 for dir in dirs {
                     self.refresh_dir(&dir)?;

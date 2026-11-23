@@ -880,3 +880,15 @@ pub fn inlay_hints(ws: &mut Workspace, uri: &Url, range: lsp::Range) -> Vec<lsp:
         })
         .collect()
 }
+
+// -------------------------------------------------------------------------
+// Signature help
+// -------------------------------------------------------------------------
+
+pub fn signature_help(
+    _ws: &mut Workspace,
+    _uri: &Url,
+    _position: lsp::Position,
+) -> Option<lsp::SignatureHelp> {
+    None
+}
