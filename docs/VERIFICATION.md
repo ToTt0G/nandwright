@@ -95,7 +95,11 @@ words and, for the error probes, the way the program stopped are compared.
 In all: 85,904 VM steps, 1,028 RAM cells and 114,688 screen words.
 
 The captured Java results of the probe programs are also kept as tests of the `n2t-vm`
-crate (`crates/vm/tests/java_probes`), so they run in CI without Java. A seeded fuzzer
+crate (`crates/vm/tests/java_probes`), so they run in CI without Java. Captured Java results for programs
+with their own `Memory.init`, `Memory.alloc` and other OS `init` functions beside the
+built-in OS are in `crates/vm/tests/user_os_classes.rs`: the order and VM steps of the
+built-in `Sys.init`, and the built-in `Array` and `String` functions using the program's
+own `Memory.alloc` and `Memory.deAlloc`, as the Java emulator does. A seeded fuzzer
 (generated programs; the count is set with `N2T_VM_FUZZ_ITERS`, and the crate's reviewer
 ran 20,000) and a sweep of every built-in function with hostile arguments check that
 nothing a program does can make the emulator panic; they compare nothing with Java.

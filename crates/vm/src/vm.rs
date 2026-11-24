@@ -4,9 +4,10 @@ use std::collections::HashSet;
 
 use crate::error::{RunStatus, StepStatus, VmError};
 use crate::os::memory::{HEAP_END, HEAP_START, KEYBOARD_ADDR, RAM_LEN, SCREEN_END, SCREEN_START};
+use crate::os::string::write_word;
 use crate::os::{BuiltinOutcome, OsState};
 use crate::parse::Segment;
-use crate::program::{CallTarget, EntryPoint, Op, Program};
+use crate::program::{BuiltinOs, CallTarget, EntryPoint, Op, Program};
 
 const STACK_MIN: i16 = 256;
 const STACK_MAX: i16 = 2047;
@@ -65,6 +66,30 @@ pub struct CallFrame {
     pub arguments: Vec<i16>,
 }
 
+/// A built-in OS function waiting for the program's own function it called
+/// (the Java VM Emulator's built-in `Array.new`, `Array.dispose`, `String.new`
+/// and `String.dispose` call `Memory.alloc` or `Memory.deAlloc` through the VM,
+/// so a program's own `Memory.vm` serves them).
+#[derive(Debug, Clone, Copy)]
+struct BuiltinWait {
+    /// What the built-in does with the returned value.
+    then: AfterCall,
+    /// The built-in's own frame, to return from.
+    frame_lcl: u16,
+    frame_arg: u16,
+    return_pc: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AfterCall {
+    /// Return the value (`Array.new`).
+    ReturnValue,
+    /// Set up a string of this capacity at the address and return it (`String.new`).
+    NewString(i16),
+    /// Return 0 (`Array.dispose`, `String.dispose`).
+    ReturnZero,
+}
+
 /// Name shown for the frame of the built-in `Sys.init` that boots `Main.main`.
 const BUILTIN_SYS_INIT_FRAME: &str = "Sys.init (built-in)";
 
@@ -97,6 +122,11 @@ pub struct Vm {
     steps: u64,
     halted: bool,
     boot_pending: bool,
+    /// The built-in `Sys.init`'s next call: an index into the program's OS
+    /// `init` functions, then `Main.main`.
+    boot_next: usize,
+    /// Built-in OS functions waiting for the program's own functions they called.
+    builtin_waits: Vec<BuiltinWait>,
     screen_generation: u64,
     screen_dirty: bool,
     current_function: String,
@@ -115,6 +145,8 @@ impl Vm {
             steps: 0,
             halted: false,
             boot_pending: false,
+            boot_next: 0,
+            builtin_waits: Vec::new(),
             screen_generation: 0,
             screen_dirty: false,
             current_function: String::new(),
@@ -137,6 +169,7 @@ impl Vm {
         self.current_function.clear();
         self.last_index_in_func = None;
         self.call_frames.clear();
+        self.builtin_waits.clear();
         self.os.reset();
 
         match self.program.entry {
@@ -255,24 +288,22 @@ impl Vm {
 
     fn boot_builtin_sys_init(&mut self) {
         self.boot_pending = false;
-        self.os.init_all(&mut *self.ram);
+        let memory_init = self.program.function_by_name("Memory.init").is_some();
+        if memory_init {
+            self.os.init_all_but_memory();
+        } else {
+            self.os.init_all(&mut *self.ram);
+        }
 
-        // Built-in Sys.init frame at 256..260, followed by call frame for Main.main at 261..265.
+        // Built-in Sys.init frame at 256..260; its calls get frames from 261.
         self.ram[256] = 10;
         self.ram[257] = 0;
         self.ram[258] = 0;
         self.ram[259] = 0;
         self.ram[260] = 0;
-
-        self.ram[261] = BUILTIN_SYS_RETURN_ADDR;
-        self.ram[262] = 261; // saved LCL
-        self.ram[263] = 256; // saved ARG
-        self.ram[264] = 0; // saved THIS
-        self.ram[265] = 0; // saved THAT
-
-        self.ram[0] = 266; // SP
-        self.ram[1] = 266; // LCL
-        self.ram[2] = 261; // ARG
+        self.ram[0] = 261; // SP
+        self.ram[1] = 261; // LCL
+        self.ram[2] = 256; // ARG
         self.ram[3] = 0; // THIS
         self.ram[4] = 0; // THAT
 
@@ -288,24 +319,80 @@ impl Vm {
             n_locals: 0,
             n_args: 0,
         });
-        if let EntryPoint::BuiltinSysInit {
+        self.boot_next = 0;
+        self.boot_call_next();
+        self.steps += 1;
+    }
+
+    /// The built-in `Sys.init` calls the next function of its sequence: the
+    /// program's own OS `init` functions (as the Java VM Emulator does), then
+    /// `Main.main`. Returns `false` when the sequence is over.
+    fn boot_call_next(&mut self) -> bool {
+        let EntryPoint::BuiltinSysInit {
             main_pc,
             main_func_id,
         } = self.program.entry
-        {
-            let info = &self.program.functions[main_func_id as usize];
-            self.call_frames.push(FrameRecord {
-                function: Some(main_func_id),
-                file_idx: Some(info.file_idx),
-                call_line: Some(info.line),
-                local_base: 266,
-                argument_base: 261,
-                n_locals: info.n_locals,
-                n_args: 0,
-            });
-            self.pc = main_pc as usize;
+        else {
+            return false;
+        };
+        let (pc, func_id) = match self.program.boot_inits.get(self.boot_next) {
+            Some(&id) => (self.program.functions[id as usize].start_pc, id),
+            None if self.boot_next == self.program.boot_inits.len() => (main_pc, main_func_id),
+            None => return false,
+        };
+        self.boot_next += 1;
+        debug_assert_eq!(self.program.functions[func_id as usize].start_pc, pc);
+        self.call_from_builtin(func_id, 0);
+        true
+    }
+
+    /// The program's own `Memory.alloc` or `Memory.deAlloc` that a built-in OS
+    /// function calls (as the Java VM Emulator does), with its argument and what
+    /// the built-in does with the result. `None` when the built-in does its own
+    /// work: the program has no such function, or the argument is an error the
+    /// built-in reports before calling.
+    fn user_memory_target(&self, builtin: BuiltinOs, arg: i16) -> Option<(u32, i16, AfterCall)> {
+        match builtin {
+            BuiltinOs::ArrayNew if arg > 0 => self
+                .program
+                .user_alloc
+                .map(|f| (f, arg, AfterCall::ReturnValue)),
+            BuiltinOs::StringNew if arg >= 0 => self
+                .program
+                .user_alloc
+                .map(|f| (f, arg.wrapping_add(2), AfterCall::NewString(arg))),
+            BuiltinOs::ArrayDispose | BuiltinOs::StringDispose => self
+                .program
+                .user_dealloc
+                .map(|f| (f, arg, AfterCall::ReturnZero)),
+            _ => None,
         }
-        self.steps += 1;
+    }
+
+    /// A built-in OS function calls the program's function `func_id`, whose
+    /// `n_args` arguments are on the stack: a frame returning to the built-in.
+    fn call_from_builtin(&mut self, func_id: u32, n_args: u16) {
+        let base = self.ram[0].max(0) as usize;
+        self.ram[base] = BUILTIN_SYS_RETURN_ADDR;
+        self.ram[base + 1] = self.ram[1]; // saved LCL
+        self.ram[base + 2] = self.ram[2]; // saved ARG
+        self.ram[base + 3] = self.ram[3]; // saved THIS
+        self.ram[base + 4] = self.ram[4]; // saved THAT
+        let arg = base - usize::from(n_args);
+        self.ram[2] = arg as i16; // ARG
+        self.ram[1] = (base + 5) as i16; // LCL
+        self.ram[0] = (base + 5) as i16; // SP
+        let info = &self.program.functions[func_id as usize];
+        self.call_frames.push(FrameRecord {
+            function: Some(func_id),
+            file_idx: Some(info.file_idx),
+            call_line: Some(info.line),
+            local_base: (base + 5) as u16,
+            argument_base: arg as u16,
+            n_locals: info.n_locals,
+            n_args,
+        });
+        self.pc = info.start_pc as usize;
     }
 
     fn resume_pending(&mut self, now_ms: u64) -> StepStatus {
@@ -867,6 +954,30 @@ impl Vm {
                                     *slot = self.ram[a];
                                 }
                             }
+                            if let Some((func_id, value, then)) =
+                                self.user_memory_target(builtin, args_buf[0])
+                            {
+                                // The built-in passes its argument at its own LCL and
+                                // calls the program's function, as Java does.
+                                let lcl = new_sp as usize;
+                                if lcl + 6 > STACK_MAX as usize {
+                                    return Err(VmError::StackOverflow {
+                                        sp: self.ram[0],
+                                        location: self.format_location(pc),
+                                    });
+                                }
+                                self.ram[lcl] = value;
+                                self.ram[0] = (lcl + 1) as i16;
+                                self.builtin_waits.push(BuiltinWait {
+                                    then,
+                                    frame_lcl: new_sp as u16,
+                                    frame_arg: new_arg as u16,
+                                    return_pc,
+                                });
+                                self.call_from_builtin(func_id, 1);
+                                self.steps += 1;
+                                return Ok(StepStatus::Stepped);
+                            }
                             let outcome = self.os.call(
                                 builtin,
                                 &args_buf[..count],
@@ -952,9 +1063,57 @@ impl Vm {
 
                     self.call_frames.pop();
 
+                    if ret_addr == BUILTIN_SYS_RETURN_ADDR
+                        && let Some(wait) = self.builtin_waits.pop()
+                    {
+                        // Returned to a built-in OS function: it finishes and
+                        // returns to its caller in the same step.
+                        let value = match wait.then {
+                            AfterCall::ReturnValue => retval,
+                            AfterCall::ReturnZero => 0,
+                            AfterCall::NewString(capacity) => {
+                                let base = i32::from(retval);
+                                write_word(&mut *self.ram, base, capacity, "String.new")?;
+                                write_word(&mut *self.ram, base + 1, 0, "String.new")?;
+                                retval
+                            }
+                        };
+                        self.finish_builtin_return(
+                            wait.frame_lcl,
+                            wait.frame_arg,
+                            wait.return_pc,
+                            value,
+                        );
+                        self.current_function.clear();
+                        if let Some(caller) = self.program.meta.get(self.pc).and_then(|m| m.func_id)
+                        {
+                            self.current_function
+                                .push_str(&self.program.functions[caller as usize].name);
+                        }
+                        self.steps += 1;
+                        return Ok(StepStatus::Stepped);
+                    }
+
                     if ret_addr == BUILTIN_SYS_RETURN_ADDR {
-                        // Returned from `Main.main` back to built-in `Sys.init`.
+                        // Returned to the built-in `Sys.init`: it drops the
+                        // value and, in the same step, calls the next function
+                        // of its sequence, or halts after `Main.main`.
                         self.ram[0] = arg as i16;
+                        let more = self.boot_next <= self.program.boot_inits.len()
+                            && matches!(self.program.entry, EntryPoint::BuiltinSysInit { .. });
+                        if more && !(i32::from(STACK_MIN)..=i32::from(STACK_MAX) - 5).contains(&arg)
+                        {
+                            return Err(VmError::StackOverflow {
+                                sp: self.ram[0],
+                                location: self.format_location(pc),
+                            });
+                        }
+                        if self.boot_call_next() {
+                            self.current_function.clear();
+                            self.current_function.push_str(BUILTIN_SYS_INIT_FRAME);
+                            self.steps += 1;
+                            return Ok(StepStatus::Stepped);
+                        }
                         self.current_function.clear();
                         self.current_function.push_str(BUILTIN_SYS_INIT_FRAME);
                         self.halted = true;
@@ -1298,6 +1457,7 @@ impl Vm {
                 }
                 self.pc = pc;
                 self.boot_pending = false;
+                self.builtin_waits.clear();
                 self.halted = false;
                 Ok(())
             }

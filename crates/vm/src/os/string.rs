@@ -23,7 +23,12 @@ fn read_word(ram: &[i16], addr: i32, function: &'static str) -> Result<i16, VmEr
     Ok(ram[addr as usize])
 }
 
-fn write_word(ram: &mut [i16], addr: i32, val: i16, function: &'static str) -> Result<(), VmError> {
+pub(crate) fn write_word(
+    ram: &mut [i16],
+    addr: i32,
+    val: i16,
+    function: &'static str,
+) -> Result<(), VmError> {
     if !(memory::HEAP_START as i32..=memory::HEAP_END as i32).contains(&addr) {
         return Err(VmError::MemoryOutOfRange {
             function,

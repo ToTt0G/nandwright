@@ -244,3 +244,27 @@ fn suspended_builtin_keeps_debugger_on_the_vm_frame_with_its_own_locals() {
     assert_eq!(vm.call_stack(), before);
     assert_eq!(vm.run(100, 15, &bp), RunStatus::Halted);
 }
+
+#[test]
+fn a_moved_arg_cannot_make_the_built_in_sys_init_panic() {
+    // A script moves ARG to the top of the stack while the program's own `Memory.init`
+    // runs; the built-in `Sys.init` would build its next frame past the stack.
+    let mut vm = make_vm(&[
+        (
+            "Memory",
+            "function Memory.init 0\npush constant 0\nreturn\n",
+        ),
+        ("Main", "function Main.main 0\npush constant 0\nreturn\n"),
+    ]);
+    let bp = Breakpoints::new();
+    assert_eq!(vm.run(2, 0, &bp), RunStatus::Budget);
+    vm.set_var("RAM", Some(2), 2045).unwrap();
+    let status = vm.run(1000, 0, &bp);
+    assert!(
+        matches!(
+            status,
+            RunStatus::Error(n2t_vm::VmError::StackOverflow { .. })
+        ),
+        "{status:?}"
+    );
+}

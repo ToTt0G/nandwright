@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { Runtime } from './runtime/client';
 import { Range, isError } from './runtime/protocol';
+import { comparedLines } from './textCompare';
 
 const REFERENCE_SCHEME = 'n2t-reference';
 
@@ -168,9 +169,8 @@ export class Outputs implements vscode.TextDocumentContentProvider, vscode.Dispo
         // file another program has just rewritten).
         const open = vscode.workspace.textDocuments.find((d) => d.isDirty && d.uri.toString() === file.toString());
         const current = open ? open.getText() : new TextDecoder().decode(await vscode.workspace.fs.readFile(file));
-        const lines = (text: string) => text.replace(/\r\n?/g, '\n').replace(/\s+$/, '').split('\n').map((line) => line.trimEnd());
-        const mine = lines(current);
-        const theirs = lines(reply.text);
+        const mine = comparedLines(current);
+        const theirs = comparedLines(reply.text);
         const name = path.basename(file.fsPath);
         const source = path.basename(reply.from);
         const same = mine.length === theirs.length && mine.every((line, i) => line === theirs[i]);

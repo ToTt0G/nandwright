@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.3
+
+- VM emulator: with your own OS classes and no `Sys.vm`, the built-in `Sys.init` now runs
+  your `Memory.init`, `Math.init`, `Screen.init`, `Output.init` and `Keyboard.init` before
+  `Main.main`, in that order, as the official VM Emulator does. Before, your `Memory.init`
+  was skipped, so a program using your own `Memory.vm` (project 12) could behave
+  differently from the official tool.
+- VM emulator: the built-in `Array.new`, `Array.dispose`, `String.new` and `String.dispose`
+  now call your own `Memory.alloc` and `Memory.deAlloc` when the folder has them, as the
+  official VM Emulator does. Before, they used the built-in heap alongside yours.
+- Compare with Reference Output now ignores spaces and tabs inside a line, as the official
+  TextComparer does. XML written without indentation now matches.
+- Zip Project Files: a VM translator's output (`Prog.asm` next to `Prog.vm`, or `Dir/Dir.asm`
+  in a folder of `.vm` files) is not ticked, like other generated files.
+
 ## 0.3.2
 
 - Zip Project Files: a new setting, `nandwright.zip.fileName`, sets the name the zip gets.

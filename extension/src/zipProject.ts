@@ -66,7 +66,36 @@ export async function projectFiles(folder: string): Promise<{ files: ProjectFile
         }
     };
     await visit(folder, '');
+    for (const file of files) {
+        if (file.picked && translatedAssembly(file.path, path.basename(folder), files)) {
+            file.picked = false;
+            file.description = 'generated';
+        }
+    }
     return { files, tooLarge: files.length > MAX_FILES || bytes > MAX_BYTES, bytes };
+}
+
+/**
+ * Whether an `.asm` file is a VM translator's output: `Prog.asm` next to
+ * `Prog.vm`, or `Dir/Dir.asm` in a folder of `.vm` files. Hand-written
+ * assembly has no `.vm` file of its name.
+ */
+function translatedAssembly(file: string, folderName: string, files: ProjectFile[]): boolean {
+    if (!/\.asm$/i.test(file)) {
+        return false;
+    }
+    const slash = file.lastIndexOf('/');
+    const dir = slash < 0 ? '' : file.slice(0, slash);
+    const stem = file.slice(slash + 1, -'.asm'.length).toLowerCase();
+    const dirName = (slash < 0 ? folderName : dir.slice(dir.lastIndexOf('/') + 1)).toLowerCase();
+    const prefix = dir ? `${dir}/`.toLowerCase() : '';
+    return files.some((other) => {
+        const name = other.path.toLowerCase();
+        if (!name.startsWith(prefix) || name.slice(prefix.length).includes('/') || !name.endsWith('.vm')) {
+            return false;
+        }
+        return name.slice(prefix.length, -'.vm'.length) === stem || dirName === stem;
+    });
 }
 
 /**

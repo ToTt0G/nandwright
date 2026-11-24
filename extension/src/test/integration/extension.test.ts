@@ -617,6 +617,14 @@ describe('Nandwright', function () {
                 write('notes.txt', 'mine\n');
                 write('asm/Prog.asm', '@0\n');
                 write('asm/Prog.HACK', '0000000000000000\n');
+                // A VM translator's output: next to its .vm file, or named
+                // after a folder of .vm files. Hand-written .asm stays ticked.
+                write('vm/Prog.vm', 'push constant 1\n');
+                write('vm/Prog.asm', '@1\n');
+                write('vm/Mine.asm', '@2\n');
+                write('Calls/A.vm', 'push constant 1\n');
+                write('Calls/Calls.ASM', '@1\n');
+                write('Sheet.xlsx', 'sheet');
                 write('.hidden', 'x');
                 write('.idea/settings.xml', 'x');
                 write('node_modules/x/index.js', 'x');
@@ -632,13 +640,19 @@ describe('Nandwright', function () {
                 assert.deepEqual(
                     files.map((f) => [f.path, f.picked, f.description ?? '']),
                     [
+                        ['Calls/A.vm', false, 'generated'],
+                        ['Calls/Calls.ASM', false, 'generated'],
                         ['Mine.cmp', false, 'test file from the course'],
                         ['Mine.hdl', true, ''],
                         ['Mine.out', false, 'generated'],
                         ['Mine.tst', false, 'test file from the course'],
+                        ['Sheet.xlsx', true, ''],
                         ['asm/Prog.HACK', false, 'generated'],
                         ['asm/Prog.asm', true, ''],
                         ['notes.txt', true, ''],
+                        ['vm/Mine.asm', true, ''],
+                        ['vm/Prog.asm', false, 'generated'],
+                        ['vm/Prog.vm', false, 'generated'],
                     ],
                 );
                 const chosen = files.filter((f) => f.picked).map((f) => f.path);
@@ -646,7 +660,7 @@ describe('Nandwright', function () {
                 const archive = fs.readFileSync(target);
                 const end = archive.length - 22;
                 assert.equal(archive.readUInt32LE(end), 0x06054b50);
-                assert.equal(archive.readUInt16LE(end + 10), 3);
+                assert.equal(archive.readUInt16LE(end + 10), 5);
                 for (const name of chosen) {
                     assert.ok(archive.includes(Buffer.from(name)), `${name} is not in the zip`);
                 }
@@ -675,7 +689,7 @@ describe('Nandwright', function () {
                     assert.deepEqual(refused, ['NOTES.TXT']);
                     await nandwright.zipProject.writeProjectZip(folder, [...files.filter((f) => f.picked), added[0]], target);
                     const withSheet = fs.readFileSync(target);
-                    assert.equal(withSheet.readUInt16LE(withSheet.length - 22 + 10), 4);
+                    assert.equal(withSheet.readUInt16LE(withSheet.length - 22 + 10), 6);
                     assert.ok(withSheet.includes(Buffer.from('Grades.xlsx')));
                     assert.ok(!withSheet.includes(Buffer.from(path.basename(elsewhere))), 'the zip holds the other folder');
                 } finally {
@@ -1262,6 +1276,15 @@ describe('Nandwright', function () {
             // The analyzer's XML, for project 10.
             const xml = file('jack', 'MainT.xml');
             fs.writeFileSync(xml.fsPath, '<tokens>\n</tokens>\n');
+            assert.equal(await nandwright.outputs.compareWithReference(xml, { quiet: true }), false);
+            // Spaces and tabs inside lines do not count, as in the official
+            // TextComparer: an analyzer that writes no indentation matches.
+            const reference = await nandwright.runtime.call<{ text: string }>({ op: 'reference', path: xml.fsPath });
+            const flat = reference.text.split(/\r?\n/).map((line) => line.trim().replace(/> /g, '>').replace(/ </g, '<'));
+            fs.writeFileSync(xml.fsPath, flat.join('\r\n'));
+            assert.equal(await nandwright.outputs.compareWithReference(xml, { quiet: true }), true);
+            flat.splice(1, 1);
+            fs.writeFileSync(xml.fsPath, flat.join('\n'));
             assert.equal(await nandwright.outputs.compareWithReference(xml, { quiet: true }), false);
             // A file with no source next to it has no reference.
             const orphan = file('programs', 'Orphan.hack');

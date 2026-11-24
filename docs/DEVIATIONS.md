@@ -56,6 +56,9 @@ the `.out` file (line endings aside) are compared.
 |---|---|---|---|
 | A program that calls OS functions without containing the OS | The GUI asks whether to use its built-in OS; run from the command line it refuses to start without `Sys.vm`. | Uses the built-in OS, as the GUI does when you answer yes. | |
 | `Sys.wait` in a test script | Really waits. | The script's clock jumps to the end of the wait. | A test should not sleep. In the interactive panel the wait is real. |
+| An OS error in a test script (for example a heap overflow in the built-in `Memory.alloc`) | The GUI shows "Program Halted", then the script runs on to its end and writes its output. | The test fails at that step with the error. | The screen shows the same `ERR` code; a test should not pass after the program stopped. |
+| Built-in OS functions that use other OS functions, when the folder has its own version of those | The built-in `Output.printString`, `Keyboard.readLine`, `Keyboard.readInt` and `Sys.error` call your own `String`, `Output` or `Memory` functions if the folder has them. | Only `Array.new`, `Array.dispose`, `String.new` and `String.dispose` do: they call your own `Memory.alloc` and `Memory.deAlloc`, as Java does. The others use the built-in versions. | Covers the usual case, your own `Memory.vm` with the rest of the OS built in. |
+| `RAM[256]`, the first word of the built-in `Sys.init`'s frame | The program's length plus a few words. | 10. | No program reads it. |
 
 ## Jack compiler
 

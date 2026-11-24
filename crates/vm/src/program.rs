@@ -342,8 +342,9 @@ pub enum EntryPoint {
     /// Start at the user-defined `Sys.init` function at `pc`.
     UserSysInit { pc: u32 },
     /// No user `Sys.init`, but user `Main.main` exists: start via built-in
-    /// `Sys.init` (which initializes the built-in OS, calls `Main.main`, and
-    /// halts when `Main.main` returns).
+    /// `Sys.init` (which initializes the built-in OS, calls the program's own
+    /// OS `init` functions, then `Main.main`, and halts when `Main.main`
+    /// returns).
     BuiltinSysInit { main_pc: u32, main_func_id: u32 },
     /// Script-driven snippet (e.g. Project 7/8 tests without `Sys.init` or
     /// `Main.main`): start at PC 0 (skipping any leading labels).
@@ -360,7 +361,25 @@ pub struct Program {
     pub(crate) func_by_name: HashMap<String, u32>,
     pub(crate) entry: EntryPoint,
     pub(crate) has_builtin_calls: bool,
+    /// The program's own `init` functions of OS classes that the built-in
+    /// `Sys.init` calls before `Main.main`, in the Java VM Emulator's order.
+    pub(crate) boot_inits: Vec<u32>,
+    /// The program's own `Memory.alloc` and `Memory.deAlloc`, which the
+    /// built-in `Array.new`, `Array.dispose`, `String.new` and `String.dispose`
+    /// call instead of the built-in heap (Java VM Emulator).
+    pub(crate) user_alloc: Option<u32>,
+    pub(crate) user_dealloc: Option<u32>,
 }
+
+/// The OS `init` functions the built-in `Sys.init` calls, in this order, when
+/// the program defines them (Java VM Emulator).
+pub(crate) const BOOT_INITS: [&str; 5] = [
+    "Memory.init",
+    "Math.init",
+    "Screen.init",
+    "Output.init",
+    "Keyboard.init",
+];
 
 impl Program {
     /// Links one or more parsed `.vm` files into a single executable [`Program`].
@@ -392,6 +411,9 @@ impl Program {
                     func_by_name: HashMap::new(),
                     entry: EntryPoint::StartOfProgram { pc: 0 },
                     has_builtin_calls: false,
+                    boot_inits: Vec::new(),
+                    user_alloc: None,
+                    user_dealloc: None,
                 },
                 diagnostics,
             );
@@ -731,6 +753,16 @@ impl Program {
         } else {
             EntryPoint::StartOfProgram { pc: next_pc }
         };
+        let user_alloc = func_by_name.get("Memory.alloc").copied();
+        let user_dealloc = func_by_name.get("Memory.deAlloc").copied();
+        let boot_inits = if matches!(entry, EntryPoint::BuiltinSysInit { .. }) {
+            BOOT_INITS
+                .iter()
+                .filter_map(|name| func_by_name.get(*name).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         (
             Program {
@@ -741,6 +773,9 @@ impl Program {
                 func_by_name,
                 entry,
                 has_builtin_calls,
+                boot_inits,
+                user_alloc,
+                user_dealloc,
             },
             diagnostics,
         )

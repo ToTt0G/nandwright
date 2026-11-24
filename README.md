@@ -97,7 +97,10 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   Jack programs step by Jack line.
 - Jack runs with a built-in OS (`Math`, `String`, `Array`, `Output`, `Screen`, `Keyboard`,
   `Memory`, `Sys`). Classes you write yourself, including OS classes for project 12,
-  replace the built-in ones.
+  replace the built-in ones. As in the official VM Emulator, the built-in `Sys.init` first
+  runs your own `Memory.init`, `Math.init`, `Screen.init`, `Output.init` and `Keyboard.init`,
+  and the built-in `Array.new`, `String.new` and their `dispose` use your own `Memory.alloc`
+  and `Memory.deAlloc`.
 
 ![A Hack assembly program on the CPU emulator: screen, registers and memory](docs/images/hack-computer.png)
 
@@ -108,13 +111,17 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite their output.
 
 - **Compare with Reference Output** on a `.hack`, `.vm` or `.xml` file your tool wrote shows
-  a diff against what the built-in assembler, compiler or syntax analyzer produces.
+  a diff against what the built-in assembler, compiler or syntax analyzer produces. As with
+  the official TextComparer, spaces and tabs inside a line do not count, so XML without
+  indentation matches. The reference is what the official tools write; a course's own
+  expected files can use other label names.
 - Your VM translator's `.asm` output runs under the course's CPU Emulator test scripts in
   the Testing view.
 - **Assemble to .hack File** and **Compile Jack to VM Files** write the official output when
   you ask, and ask before replacing a file whose content differs.
 - **Zip Project Files** packs a project folder for handing in. Your own work is ticked; test
-  scripts, compare files and generated files are not, and you choose the final list. The
+  scripts, compare files and generated files are not (including a VM translator's `.asm`
+  next to its `.vm` files), and you choose the final list. The
   `+` button adds a file from another folder, such as a grade sheet. The setting
   `nandwright.zip.fileName` sets the name the zip gets: for example
   `Project{nn}-familyname-firstname`, with your own names, gives

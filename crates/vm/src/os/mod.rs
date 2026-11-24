@@ -154,6 +154,12 @@ impl OsState {
     /// Initializes all built-in OS subsystems (as performed by built-in `Sys.init`).
     pub fn init_all(&mut self, ram: &mut [i16]) {
         memory::init(ram);
+        self.init_all_but_memory();
+    }
+
+    /// Initializes the built-in OS without touching the heap: the program has
+    /// its own `Memory.init`, and the Java VM Emulator then leaves the heap to it.
+    pub fn init_all_but_memory(&mut self) {
         self.screen.init();
         self.output.init();
         self.pending = None;
