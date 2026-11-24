@@ -42,6 +42,15 @@ cpSync(join(repo, 'examples'), workspace, { recursive: true });
 mkdirSync(join(workspace, 'practice'), { recursive: true });
 cpSync(join(extension, 'media', 'example'), join(workspace, 'practice'), { recursive: true });
 const chips = join(workspace, 'chips');
+// A made-up project of two folders and its grade sheet, for the hand-in list.
+for (const [folder, chip] of [['lab1', 'Majority'], ['lab2', 'Parity4']]) {
+    mkdirSync(join(workspace, 'hand-in', folder), { recursive: true });
+    for (const ext of ['hdl', 'tst', 'cmp']) {
+        cpSync(join(chips, `${chip}.${ext}`), join(workspace, 'hand-in', folder, `${chip}.${ext}`));
+    }
+}
+mkdirSync(join(workspace, 'grade-sheets'), { recursive: true });
+writeFileSync(join(workspace, 'grade-sheets', 'Project1.xlsx'), 'a made-up sheet');
 
 const userData = join(scratch, 'user');
 mkdirSync(join(userData, 'User'), { recursive: true });
@@ -82,6 +91,10 @@ writeFileSync(
             'testing.openTesting': 'neverOpen',
             'explorer.compactFolders': false,
             'files.autoSave': 'off',
+            'nandwright.zip.projects': { 1: ['lab1', 'lab2'] },
+            'nandwright.zip.fileName': 'Project{nn}-{familyname}-{firstname}',
+            'nandwright.student.familyName': 'familyname',
+            'nandwright.student.firstName': 'firstname',
             // Scripted typing must not be completed or closed for it.
             ...(args.includes('--demo')
                 ? {
@@ -123,6 +136,8 @@ const KEYS = {
     expandTests: ['ctrl+alt+shift+x', 'testing.expandAll'],
     suggest: ['ctrl+alt+shift+c', 'editor.action.triggerSuggest'],
     nextFailure: ['ctrl+alt+shift+n', 'testing.goToNextMessage'],
+    setup: ['ctrl+alt+shift+u', 'nandwright.setup'],
+    zipProject: ['ctrl+alt+shift+z', 'nandwright.zipProject'],
 };
 writeFileSync(
     join(userData, 'User', 'keybindings.json'),
@@ -213,6 +228,28 @@ async function shot(name) {
 
 const scenes = {
     // The Testing view with a project's scripts, all passing.
+    // Nand2Tetris: Set Up…, its first step.
+    async setup() {
+        await command('setup');
+        await page.waitForSelector('.quick-input-widget:not(.hidden)');
+        await pause(1200);
+        await shot('setup');
+        await page.keyboard.press('Escape');
+        await pause(500);
+        await command('clearNotifications');
+    },
+
+    // The hand-in list of a project of two folders, with Hand In in the status bar.
+    async handIn() {
+        await openFile('lab1/Majority.hdl');
+        await pause(2500);
+        await command('zipProject');
+        await page.waitForSelector('.quick-input-widget:not(.hidden)');
+        await pause(1500);
+        await shot('hand-in-list');
+        await page.keyboard.press('Escape');
+    },
+
     async tests() {
         await openFile('chips/Majority.hdl');
         await command('showTests');

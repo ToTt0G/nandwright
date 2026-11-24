@@ -45,6 +45,13 @@ export function hasNoParts(hdl: string): boolean {
 
 export class Progress implements vscode.Disposable {
     private readonly item = vscode.window.createStatusBarItem('nandwright.progress', vscode.StatusBarAlignment.Left, 10);
+    /** Hand In: zips the project of the active file. */
+    private readonly handIn = vscode.window.createStatusBarItem('nandwright.handIn', vscode.StatusBarAlignment.Left, 9);
+    /** The folder Hand In zips. */
+    private handInFolder: string | undefined;
+    /** Folders that had a failing test this session, and those already offered a zip. */
+    private readonly hadFailing = new Set<string>();
+    private readonly offeredZip = new Set<string>();
     private readonly disposables: vscode.Disposable[] = [];
     /** The folder shown: the last one with tests whose file was active. */
     private folder: string | undefined;
@@ -54,8 +61,12 @@ export class Progress implements vscode.Disposable {
     constructor(private readonly tests: TestExplorer) {
         this.item.name = 'Nand2Tetris Project Progress';
         this.item.command = 'nandwright.showProgress';
+        this.handIn.name = 'Nand2Tetris Hand In';
+        this.handIn.text = '$(file-zip) Hand In';
+        this.handIn.tooltip = "Zip this project's files for handing in";
         this.disposables.push(
             this.item,
+            this.handIn,
             vscode.window.onDidChangeActiveTextEditor(() => this.schedule()),
             tests.onDidChangeStatus(() => this.schedule()),
             vscode.commands.registerCommand('nandwright.showProgress', () => this.show()),
@@ -64,8 +75,49 @@ export class Progress implements vscode.Disposable {
     }
 
     /** The item's text and tooltip as shown now, for tests. */
-    get shown(): { visible: boolean; text: string; tooltip: string; folder: string | undefined } {
-        return { visible: this.visible, text: this.item.text, tooltip: String(this.item.tooltip ?? ''), folder: this.folder };
+    get shown(): { visible: boolean; text: string; tooltip: string; folder: string | undefined; handIn: string | undefined } {
+        return {
+            visible: this.visible,
+            text: this.item.text,
+            tooltip: String(this.item.tooltip ?? ''),
+            folder: this.folder,
+            handIn: this.handInShown ? this.handInFolder : undefined,
+        };
+    }
+
+    private handInShown = false;
+
+    /** Shows Hand In for a folder with Nand2Tetris files, for the active file's folder. */
+    private async refreshHandIn(uri: vscode.Uri | undefined): Promise<void> {
+        if (!uri) {
+            return;
+        }
+        const folder = uri.scheme === 'file' ? path.dirname(uri.fsPath) : undefined;
+        if (folder && (await hasNand2TetrisFiles(folder))) {
+            this.handInFolder = folder;
+            this.handIn.command = { title: 'Hand In', command: 'nandwright.zipProject', arguments: [vscode.Uri.file(folder)] };
+            this.handInShown = true;
+            this.handIn.show();
+        } else {
+            this.handInShown = false;
+            this.handIn.hide();
+        }
+    }
+
+    /** Once per folder and session: when its last failing test passes, offer to zip it. */
+    private offerZip(progress: FolderProgress): void {
+        const key = progress.folder;
+        if (progress.failed > 0) {
+            this.hadFailing.add(key);
+            return;
+        }
+        if (progress.running || progress.total === 0 || progress.passed !== progress.total || !this.hadFailing.has(key) || this.offeredZip.has(key)) {
+            return;
+        }
+        this.offeredZip.add(key);
+        void vscode.window
+            .showInformationMessage(`All ${progress.total} tests in ${path.basename(key)} pass.`, 'Zip for Hand-In')
+            .then((answer) => answer && vscode.commands.executeCommand('nandwright.zipProject', vscode.Uri.file(key)));
     }
 
     private visible = false;
@@ -83,6 +135,7 @@ export class Progress implements vscode.Disposable {
 
     private async refresh(): Promise<void> {
         const uri = vscode.window.activeTextEditor?.document.uri;
+        await this.refreshHandIn(uri);
         if (uri) {
             // A panel leaves no active editor and keeps the last folder; any
             // file outside a folder of tests hides the item.
@@ -95,6 +148,7 @@ export class Progress implements vscode.Disposable {
             return;
         }
         const progress = await this.of(this.folder);
+        this.offerZip(progress);
         const name = path.basename(progress.folder);
         this.item.text = `${progress.running ? '$(sync~spin)' : '$(beaker)'} ${progress.passed} of ${progress.total} pass`;
         this.item.tooltip = `Nand2Tetris tests in ${name}: ${progress.passed} passing, ${progress.failed} failing, ${progress.notRun} not run. Click for the list.`;
@@ -173,9 +227,10 @@ export class Progress implements vscode.Disposable {
             return;
         }
         const progress = await this.of(folder);
-        type Item = vscode.QuickPickItem & { entry?: ProgressEntry; runAll?: boolean };
+        type Item = vscode.QuickPickItem & { entry?: ProgressEntry; runAll?: boolean; zip?: boolean };
         const items: Item[] = [
             { label: `$(run-all) Run all ${progress.total} tests in this folder`, runAll: true },
+            { label: '$(file-zip) Zip this project for hand-in\u2026', zip: true },
             ...progress.entries.map((entry) => ({ label: entry.label, description: entry.description, entry })),
         ];
         const picked = await vscode.window.showQuickPick(items, {
@@ -183,6 +238,8 @@ export class Progress implements vscode.Disposable {
         });
         if (picked?.runAll) {
             await this.runAll(folder);
+        } else if (picked?.zip) {
+            await vscode.commands.executeCommand('nandwright.zipProject', vscode.Uri.file(folder));
         } else if (picked?.entry) {
             await this.open(picked.entry);
         }
@@ -191,6 +248,15 @@ export class Progress implements vscode.Disposable {
     dispose(): void {
         clearTimeout(this.timer);
         this.disposables.forEach((d) => d.dispose());
+    }
+}
+
+/** Whether a folder holds files of the Nand2Tetris tools directly. */
+async function hasNand2TetrisFiles(folder: string): Promise<boolean> {
+    try {
+        return (await fs.promises.readdir(folder)).some((name) => /\.(hdl|tst|asm|hack|vm|jack)$/i.test(name));
+    } catch {
+        return false;
     }
 }
 

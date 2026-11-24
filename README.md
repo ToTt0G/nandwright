@@ -119,13 +119,7 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
   the Testing view.
 - **Assemble to .hack File** and **Compile Jack to VM Files** write the official output when
   you ask, and ask before replacing a file whose content differs.
-- **Zip Project Files** packs a project folder for handing in. Your own work is ticked; test
-  scripts, compare files and generated files are not (including a VM translator's `.asm`
-  next to its `.vm` files), and you choose the final list. The
-  `+` button adds a file from another folder, such as a grade sheet. The setting
-  `nandwright.zip.fileName` sets the name the zip gets: for example
-  `Project{nn}-familyname-firstname`, with your own names, gives
-  `Project01-familyname-firstname.zip` for a folder named `01`.
+- **Zip Project for Hand-In** packs a project for handing in. See [Handing in](#handing-in).
 
 ### Write code
 
@@ -148,6 +142,62 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
 The panels use your colour theme, including light and high-contrast themes.
 
 ![The chip simulator in a light theme](docs/images/chip-simulator-light.png)
+
+## Handing in
+
+**Zip Project for Hand-In** makes the zip you hand in. Start it from **Hand In** in the
+status bar, from the editor's `…` menu, from the project progress list, or by
+right-clicking a folder in the Explorer. When the last failing test of a folder passes,
+Nandwright also offers to zip it.
+
+The list shows every file of the project. Your own work is ticked. Test scripts, compare
+files and generated files are not (a VM translator's `.asm` next to its `.vm` files counts
+as generated). You choose the final list. The `+` button adds a file from anywhere.
+
+The easiest way to set it up is **Nand2Tetris: Set Up…** in the Command Palette. It asks
+for your course, your name and your grade sheets. You can skip any step.
+
+- **The zip's name.** The setting `nandwright.zip.fileName` is the name without `.zip`.
+  `{folder}` is the folder's name, `{n}` the project's number and `{nn}` that number with
+  two digits. `{familyname}` and `{firstname}` are your name from
+  `nandwright.student.familyName` and `nandwright.student.firstName`, which are kept in your
+  user settings only. If the name needs one of them and it is not set, you are asked when
+  you zip. Example: `Project{nn}-{familyname}-{firstname}` gives
+  `Project01-familyname-firstname.zip` for a folder named `01`.
+- **Projects made of several folders, or numbered differently.** The setting
+  `nandwright.zip.projects` lists the folders of each project, by the course's numbers.
+  With `{ "1": ["01", "02"], "2": ["03"] }`, zipping `01` or `02` packs both folders into
+  one zip, with their files side by side. `{n}` is then `1`. Zipping `03`, or a folder
+  inside it such as `03/a`, is project `2`. If two folders hold a file of the same name,
+  each copy goes under its folder's name. A listed folder that does not exist is named in
+  the list.
+- **The grade sheet.** If your course has one sheet per project, keep the sheets in a
+  folder named `grade-sheets` in your workspace. **Set Up** can copy the sheets you
+  downloaded there; it never replaces a sheet without asking. The zip takes the sheet
+  named like `Project1.xlsx` or `project_01.ods` for the project's number. It looks in
+  the project's folder, then the folder in `nandwright.zip.gradeSheetFolder`, then a
+  `grade-sheets` folder (in the workspace or beside the project), then the folder above
+  the project and the workspace. The sheet is ticked and shows when it last changed. Its
+  button opens it, so you can fill it in first; the zip takes the sheet as it is saved
+  when you save the zip.
+
+![The hand-in list for a project of two folders, with the grade sheet](docs/images/hand-in-list.png)
+
+## Course presets
+
+A course preset sets the hand-in rules of one course at once. Choose it with
+**Nand2Tetris: Set Up…** or the setting `nandwright.course`. The default is no preset:
+nothing course-specific is on. A setting you set yourself wins over the preset.
+
+- **KTH EP121U** (Computer Science): projects 1 to 4 are the book's folders `01` and `02`
+  (together), `03`, `04` and `05`. Projects 5 to 10 are the course's own folders. Zips are
+  named `Project01-familyname-firstname.zip`, and `project09-familyname-firstname.zip` for
+  project 9. Only the files the course asks for are ticked: the `.hdl` files, the `.asm`
+  files, or the named Python and Jack files. The project's grade sheet is added.
+
+Presets for other courses are welcome as contributions: see `extension/src/presets.ts`.
+
+![Nand2Tetris: Set Up… choosing a course](docs/images/setup.png)
 
 ## Course projects
 

@@ -5,19 +5,58 @@
 // eslint-disable-next-line no-control-regex
 const NOT_ALLOWED = /[<>:"/\\|?*\u0000-\u001f]/g;
 
-/**
- * Expands the placeholders of a zip name, without `.zip`:
- * `{folder}` the folder's name, `{n}` the number in it (its last run of
- * digits, without leading zeros), `{nn}` that number with at least two digits.
- * A folder name without a number gives the folder's name for `{n}` and `{nn}`.
- * Characters not allowed in file names are removed; if nothing is left, the
- * folder's name is used.
- */
-export function zipFileName(pattern: string, folder: string): string {
+/** The project number in a folder's name: its last run of digits, without leading zeros. */
+export function folderNumber(folder: string): string | undefined {
     const digits = folder.match(/(\d+)(?!.*\d)/)?.[1];
-    const n = digits === undefined ? folder : String(Number.parseInt(digits, 10));
-    const nn = digits === undefined ? folder : n.padStart(2, '0');
-    const expanded = pattern.replace(/\{(folder|nn|n)\}/g, (_, key: string) => (key === 'folder' ? folder : key === 'nn' ? nn : n));
+    return digits === undefined ? undefined : String(Number.parseInt(digits, 10));
+}
+
+/**
+ * Expands `{folder}`, `{n}`, `{nn}`, `{familyname}` and `{firstname}` in a pattern. `{n}` is the project
+ * number: `project` when given (from `nandwright.zip.projects`), otherwise the
+ * last number in the folder's name, without leading zeros; `{nn}` is that
+ * number with at least two digits. Without a number, `{n}` and `{nn}` give
+ * the folder's name; a project key that is not a number is used as it is.
+ */
+export function expandPlaceholders(pattern: string, folder: string, project?: string, names: StudentName = {}): string {
+    const number = project === undefined ? folderNumber(folder) : /^\d+$/.test(project) ? String(Number.parseInt(project, 10)) : undefined;
+    const n = number ?? project ?? folder;
+    const nn = number === undefined ? n : number.padStart(2, '0');
+    const values: Record<string, string> = {
+        folder,
+        n,
+        nn,
+        familyname: names.familyName?.trim() ?? '',
+        firstname: names.firstName?.trim() ?? '',
+    };
+    return pattern.replace(/\{(folder|nn|n|familyname|firstname)\}/g, (_, key: string) => values[key]);
+}
+
+/** The student's name, from `nandwright.student.familyName` and `.firstName`. */
+export interface StudentName {
+    familyName?: string;
+    firstName?: string;
+}
+
+/** The parts of the student's name a pattern uses but that are not set. */
+export function missingNames(pattern: string, names: StudentName): Array<keyof StudentName> {
+    const missing: Array<keyof StudentName> = [];
+    if (/\{familyname\}/.test(pattern) && !names.familyName?.trim()) {
+        missing.push('familyName');
+    }
+    if (/\{firstname\}/.test(pattern) && !names.firstName?.trim()) {
+        missing.push('firstName');
+    }
+    return missing;
+}
+
+/**
+ * The zip's name without `.zip`, from the `nandwright.zip.fileName` pattern
+ * (see {@link expandPlaceholders}). Characters not allowed in file names are
+ * removed; if nothing is left, the folder's name is used.
+ */
+export function zipFileName(pattern: string, folder: string, project?: string, names: StudentName = {}): string {
+    const expanded = expandPlaceholders(pattern, folder, project, names);
     const clean = (text: string) =>
         text
             .replace(NOT_ALLOWED, '')

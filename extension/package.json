@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -214,6 +214,36 @@
     "configuration": {
       "title": "Nandwright",
       "properties": {
+        "nandwright.course": {
+          "type": "string",
+          "enum": [
+            "none",
+            "kth-ep121u"
+          ],
+          "enumItemLabels": [
+            "No course preset",
+            "KTH EP121U"
+          ],
+          "markdownEnumDescriptions": [
+            "Nothing course-specific: you choose the zip's name, folders and files with the `nandwright.zip` settings.",
+            "KTH EP121U (Computer Science): projects 1 to 4 are the book's folders `01`+`02`, `03`, `04` and `05`; zips are named `Project01-familyname-firstname.zip` (`project09-…` for project 9); only the files the course asks for are ticked, plus the project's grade sheet."
+          ],
+          "default": "none",
+          "scope": "resource",
+          "markdownDescription": "Hand-in rules of your course for **Zip Project for Hand-In**. A setting you set yourself (`#nandwright.zip.fileName#`, `#nandwright.zip.projects#`) wins over the course's. Run **Nand2Tetris: Set Up…** to choose."
+        },
+        "nandwright.student.familyName": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "Your family name, for `{familyname}` in `#nandwright.zip.fileName#`. Kept in your user settings only."
+        },
+        "nandwright.student.firstName": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "Your first name, for `{firstname}` in `#nandwright.zip.fileName#`. Kept in your user settings only."
+        },
         "nandwright.simulator.followEditor": {
           "type": "boolean",
           "default": true,
@@ -232,7 +262,25 @@
         "nandwright.zip.fileName": {
           "type": "string",
           "default": "{folder}",
-          "markdownDescription": "The name **Zip Project Files** offers for the zip, without `.zip`. `{folder}` is the folder's name. `{n}` is the number in the folder's name without leading zeros (`01` gives `1`), and `{nn}` is that number with two digits (`1` gives `01`). If the folder's name has no number, `{n}` and `{nn}` give the folder's name. Example: `Project{nn}-familyname-firstname` (with your own names) gives `Project01-familyname-firstname.zip` for a folder named `01` or `project1`."
+          "markdownDescription": "The name **Zip Project for Hand-In** offers for the zip, without `.zip`. `{folder}` is the folder's name. `{n}` is the project's number: its key in `#nandwright.zip.projects#` if the folder is listed there, otherwise the number in the folder's name without leading zeros (`01` gives `1`). `{nn}` is that number with two digits (`1` gives `01`). `{familyname}` and `{firstname}` are your name from `#nandwright.student.familyName#` and `#nandwright.student.firstName#`; if one is not set, you are asked when you zip. Example: `Project{nn}-{familyname}-{firstname}`. Leave it unset to use your course preset's name, or the folder's name."
+        },
+        "nandwright.zip.projects": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "markdownDescription": "For courses that number their projects differently from the folders, or hand in several folders as one project. Each key is a project number as your course counts it; its value lists the folders of that project. Example: `{ \"1\": [\"01\", \"02\"], \"2\": [\"03\"] }`. Zipping folder `01` or `02` then packs both folders into one zip, and `{n}` is `1`; zipping `03` gives project `2`. A name is a folder next to the one you zip; a name with `/` is a path inside the workspace folder. Folders that are not listed are zipped on their own, as before."
+        },
+        "nandwright.zip.gradeSheetFolder": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "markdownDescription": "The folder where you keep your grade sheets, if it is not a folder named `grade-sheets`. A path inside the workspace folder, or a full path. The zip takes the sheet for the project's number from it, such as `Project1.xlsx` or `project_01.ods`."
         },
         "nandwright.trace.server": {
           "type": "string",
@@ -291,7 +339,7 @@
       },
       {
         "command": "nandwright.compareOutput",
-        "title": "Compare Output with Expected (.out \u2194 .cmp)",
+        "title": "Compare Output with Expected (.out ↔ .cmp)",
         "category": "Nand2Tetris",
         "icon": "$(diff)"
       },
@@ -307,9 +355,14 @@
       },
       {
         "command": "nandwright.zipProject",
-        "title": "Zip Project Files\u2026",
+        "title": "Zip Project for Hand-In…",
         "category": "Nand2Tetris",
         "icon": "$(file-zip)"
+      },
+      {
+        "command": "nandwright.setup",
+        "title": "Set Up…",
+        "category": "Nand2Tetris"
       }
     ],
     "menus": {
@@ -355,6 +408,11 @@
           "command": "nandwright.compareWithReference",
           "when": "resourceLangId == hack || resourceLangId == vm",
           "group": "navigation@13"
+        },
+        {
+          "command": "nandwright.zipProject",
+          "when": "resourceExtname =~ /^\\.(hdl|asm|vm|jack)$/i",
+          "group": "nandwright@99"
         }
       ],
       "explorer/context": [
@@ -553,6 +611,17 @@
             "completionEvents": [
               "onCommand:nandwright.runProgram"
             ]
+          },
+          {
+            "id": "handin",
+            "title": "Set up handing in",
+            "description": "Choose your course, type your name and show where your grade sheets are. Then **Zip Project for Hand-In** names the zip, picks the files and adds the grade sheet.\n[Set Up](command:nandwright.setup)",
+            "media": {
+              "markdown": "media/walkthrough/handin.md"
+            },
+            "completionEvents": [
+              "onCommand:nandwright.setup"
+            ]
           }
         ]
       }
@@ -563,7 +632,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs dist-test/unit/zipFiles.test.cjs dist-test/unit/offer.test.cjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
   },

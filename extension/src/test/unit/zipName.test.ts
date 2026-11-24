@@ -39,3 +39,9 @@ test('an empty result falls back to the folder name', () => {
 test('unknown placeholders are left as they are', () => {
     assert.equal(zipFileName('{name}-{nn}', '5'), '{name}-05');
 });
+
+test('a project number from nandwright.zip.projects replaces the folder number', () => {
+    assert.equal(zipFileName('Project{nn}-familyname-firstname', '03', '2'), 'Project02-familyname-firstname');
+    assert.equal(zipFileName('Project{n}-{folder}', '05', '04'), 'Project4-05');
+    assert.equal(zipFileName('Hand-in {n}', 'logic', 'gates'), 'Hand-in gates');
+});

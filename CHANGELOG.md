@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+- **Nand2Tetris: Set Up…** asks for your course, your name and your grade sheets, and
+  whether tests run when you save. Every step can be skipped. Nandwright offers it once,
+  as an ordinary notification, when you install or update.
+- Course presets: the setting `nandwright.course`. The default, no preset, turns nothing
+  course-specific on. **KTH EP121U** puts each project's folders together, names the zip
+  as the course asks, ticks only the files the course asks for and adds the grade sheet.
+  A setting you set yourself wins over the preset.
+- Zip Project for Hand-In (the new name of Zip Project Files):
+  - `nandwright.zip.projects` lists the folders of each project by the course's numbers.
+    A project of several folders gives one zip with their files side by side, and `{n}`
+    and `{nn}` in the zip's name come from the course's number. Zipping a folder inside a
+    listed folder zips the listed folder.
+  - `{familyname}` and `{firstname}` in the zip's name, from the new settings
+    `nandwright.student.familyName` and `nandwright.student.firstName` (user settings
+    only). If one is needed and not set, you are asked when you zip.
+  - The project's grade sheet (`Project1.xlsx`, `project_01.ods`, …) is found and added:
+    in the project's folder, the folder in `nandwright.zip.gradeSheetFolder`, a folder
+    named `grade-sheets`, or the folders above. It is ticked, shows when it last changed,
+    and has a button that opens it. A `grade-sheets` folder is never zipped as part of a
+    project.
+  - Easier to find: **Hand In** in the status bar, an entry in the project progress list,
+    the editor's `…` menu for `.hdl`, `.asm`, `.vm` and `.jack` files, and an offer to zip
+    when the last failing test of a folder passes.
+- The Get Started walkthrough has a step for handing in.
+
 ## 0.3.3
 
 - VM emulator: with your own OS classes and no `Sys.vm`, the built-in `Sys.init` now runs

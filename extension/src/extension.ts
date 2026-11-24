@@ -15,7 +15,8 @@ import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime } from './runtime/client';
 import { ScriptResult, TestExplorer } from './testing';
-import { addedFiles, projectFiles, writeProjectZip, zipProject } from './zipProject';
+import { addedFiles, handInFolder, planZip, projectFiles, writeProjectZip, zipPlaces, zipProject, zipSettings } from './zipProject';
+import { SetupUi, offerSetup, runSetup, setupPlaces, vscodeSetupUi } from './setup';
 
 const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
 const BUILTIN_SCHEME = 'n2t-builtin';
@@ -28,7 +29,17 @@ export interface NandwrightApi {
     outputs: Outputs;
     progress: Progress;
     /** Zip Project Files after its dialogs: what is offered, and writing the zip. */
-    zipProject: { projectFiles: typeof projectFiles; writeProjectZip: typeof writeProjectZip; addedFiles: typeof addedFiles };
+    zipProject: {
+        projectFiles: typeof projectFiles;
+        writeProjectZip: typeof writeProjectZip;
+        addedFiles: typeof addedFiles;
+        planZip: typeof planZip;
+        zipSettings: typeof zipSettings;
+        zipPlaces: typeof zipPlaces;
+        handInFolder: typeof handInFolder;
+    };
+    /** Nandwright: Set Up… with given answers, and whether the offer to run it was shown. */
+    setup: { run: (ui: SetupUi) => Promise<string[]>; offerShown: boolean };
     runtime: Runtime;
     client: LanguageClient;
 }
@@ -399,6 +410,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         ),
         vscode.commands.registerCommand('nandwright.openExample', () => openExample(context)),
         vscode.commands.registerCommand('nandwright.zipProject', (argument?: unknown) => zipProject(argument)),
+        vscode.commands.registerCommand('nandwright.setup', () => runSetup(vscodeSetupUi, setupPlaces())),
         vscode.languages.registerCodeLensProvider(
             { language: 'hdl', scheme: 'file' },
             {
@@ -457,7 +469,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         void vscode.commands.executeCommand('nandwright.getStarted');
     }
 
-    return { tests, chips, computers, outputs, progress, zipProject: { projectFiles, writeProjectZip, addedFiles }, runtime, client };
+    const offerShown = offerSetup(context);
+
+    return {
+        tests,
+        chips,
+        computers,
+        outputs,
+        progress,
+        zipProject: { projectFiles, writeProjectZip, addedFiles, planZip, zipSettings, zipPlaces, handInFolder },
+        setup: { run: (ui: SetupUi) => runSetup(ui, setupPlaces()), offerShown },
+        runtime,
+        client,
+    };
 }
 
 export function deactivate(): void {}

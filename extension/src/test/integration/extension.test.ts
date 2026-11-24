@@ -702,6 +702,149 @@ describe('Nandwright', function () {
         });
     });
 
+    describe('hand-in setup and course presets', () => {
+        const zipConfig = () => vscode.workspace.getConfiguration('nandwright.zip');
+        const clear = async () => {
+            await vscode.workspace.getConfiguration('nandwright').update('course', undefined, vscode.ConfigurationTarget.Global);
+            for (const key of ['familyName', 'firstName']) {
+                await vscode.workspace.getConfiguration('nandwright.student').update(key, undefined, vscode.ConfigurationTarget.Global);
+            }
+            for (const key of ['fileName', 'projects', 'gradeSheetFolder']) {
+                await zipConfig().update(key, undefined, vscode.ConfigurationTarget.Global);
+                await zipConfig().update(key, undefined, vscode.ConfigurationTarget.Workspace);
+            }
+        };
+        const write = (relative: string, text: string) => {
+            fs.mkdirSync(path.dirname(path.join(workspace, relative)), { recursive: true });
+            fs.writeFileSync(path.join(workspace, relative), text);
+        };
+        const picked = (files: { path: string; picked: boolean }[]) => files.filter((f) => f.picked).map((f) => f.path);
+
+        afterEach(clear);
+
+        it('does not offer the setup during the tests', async () => {
+            assert.equal((await api()).setup.offerShown, false);
+        });
+
+        it('with no course preset, zips a folder as before', async () => {
+            const nandwright = await api();
+            const folder = path.join(workspace, 'handin-plain', '01');
+            write('handin-plain/01/Gate.hdl', 'CHIP Gate { IN a; OUT out; PARTS: }\n');
+            write('handin-plain/01/Gate.tst', 'load Gate.hdl;\n');
+            write('handin-plain/01/notes.txt', 'mine\n');
+            try {
+                const plan = await nandwright.zipProject.planZip(folder, nandwright.zipProject.zipSettings(folder), nandwright.zipProject.zipPlaces(folder));
+                assert.equal(plan.title, 'Zip 01');
+                assert.equal(plan.name, '01');
+                assert.deepEqual(picked(plan.files), ['Gate.hdl', 'notes.txt']);
+                assert.deepEqual(plan.notes, []);
+            } finally {
+                await removeFolder(path.join(workspace, 'handin-plain'));
+            }
+        });
+
+        it('with the KTH EP121U preset, zips both folders of project 1 under its name with the grade sheet', async () => {
+            const nandwright = await api();
+            await vscode.workspace.getConfiguration('nandwright').update('course', 'kth-ep121u', vscode.ConfigurationTarget.Global);
+            const student = vscode.workspace.getConfiguration('nandwright.student');
+            await student.update('familyName', 'familyname', vscode.ConfigurationTarget.Global);
+            await student.update('firstName', 'firstname', vscode.ConfigurationTarget.Global);
+            write('handin-kth/01/Gate.hdl', 'CHIP Gate { IN a; OUT out; PARTS: }\n');
+            write('handin-kth/01/Gate.tst', 'load Gate.hdl;\n');
+            write('handin-kth/02/sub/Adder.hdl', 'CHIP Adder { IN a; OUT out; PARTS: }\n');
+            write('handin-kth/02/notes.txt', 'mine\n');
+            write('handin-kth/grade-sheets/Project1.xlsx', 'a made-up sheet');
+            const target = path.join(workspace, 'handin-kth', 'out.zip');
+            try {
+                // A subfolder of a project folder: the project is zipped.
+                const folder = nandwright.zipProject.handInFolder(path.join(workspace, 'handin-kth', '02', 'sub'));
+                assert.equal(folder, path.join(workspace, 'handin-kth', '02'));
+                const plan = await nandwright.zipProject.planZip(folder, nandwright.zipProject.zipSettings(folder), nandwright.zipProject.zipPlaces(folder));
+                assert.equal(plan.title, 'Zip project 1 (01, 02)');
+                assert.equal(plan.name, 'Project01-familyname-firstname');
+                assert.deepEqual(picked(plan.files), ['Gate.hdl', 'sub/Adder.hdl', 'Project1.xlsx']);
+                const sheet = plan.files.find((f) => f.path === 'Project1.xlsx');
+                assert.match(sheet?.description ?? '', /^grade sheet \u00b7 handin-kth\/grade-sheets \u00b7 last changed \d{4}-/);
+                await nandwright.zipProject.writeProjectZip(folder, plan.files.filter((f) => f.picked), target);
+                const archive = fs.readFileSync(target);
+                assert.equal(archive.readUInt16LE(archive.length - 22 + 10), 3);
+                for (const name of ['Gate.hdl', 'sub/Adder.hdl', 'Project1.xlsx']) {
+                    assert.ok(archive.includes(Buffer.from(name)), name);
+                }
+                assert.ok(!archive.includes(Buffer.from('notes.txt')));
+
+                // The student's own setting wins over the preset.
+                await zipConfig().update('fileName', 'Mine-{nn}-{folder}', vscode.ConfigurationTarget.Global);
+                const own = await nandwright.zipProject.planZip(folder, nandwright.zipProject.zipSettings(folder), nandwright.zipProject.zipPlaces(folder));
+                assert.equal(own.name, 'Mine-01-02');
+            } finally {
+                await removeFolder(path.join(workspace, 'handin-kth'));
+            }
+        });
+
+        it('setup writes the course and name to the user settings and copies sheets without replacing one', async () => {
+            const nandwright = await api();
+            const downloads = fs.mkdtempSync(path.join(workspace, 'downloads-'));
+            fs.writeFileSync(path.join(downloads, 'Project1.xlsx'), 'new 1');
+            fs.writeFileSync(path.join(downloads, 'Project2.xlsx'), 'new 2');
+            write('grade-sheets/Project1.xlsx', 'filled in');
+            const asked: string[] = [];
+            let message = '';
+            const answers = ['kth-ep121u', 'copy', 'keep'];
+            try {
+                const set = await nandwright.setup.run({
+                    pick: async (_title, choices) => {
+                    const wanted = answers.shift();
+                    return choices.find((c) => c.value === wanted);
+                },
+                    input: async (title) => (title.includes('family') ? 'familyname' : 'firstname'),
+                    pickFiles: async () => [path.join(downloads, 'Project1.xlsx'), path.join(downloads, 'Project2.xlsx')],
+                    pickFolder: async () => undefined,
+                    confirmReplace: async (name) => {
+                        asked.push(name);
+                        return false;
+                    },
+                    done: (text) => {
+                        message = text;
+                    },
+                });
+                const course = vscode.workspace.getConfiguration('nandwright').inspect<string>('course');
+                assert.equal(course?.globalValue, 'kth-ep121u');
+                assert.equal(course?.workspaceValue, undefined);
+                const family = vscode.workspace.getConfiguration('nandwright.student').inspect<string>('familyName');
+                assert.equal(family?.globalValue, 'familyname');
+                assert.equal(family?.workspaceValue, undefined);
+                assert.deepEqual(asked, ['Project1.xlsx']);
+                assert.equal(fs.readFileSync(path.join(workspace, 'grade-sheets', 'Project1.xlsx'), 'utf8'), 'filled in');
+                assert.equal(fs.readFileSync(path.join(workspace, 'grade-sheets', 'Project2.xlsx'), 'utf8'), 'new 2');
+                assert.ok(set.some((line) => line.includes('Project2.xlsx')));
+                assert.match(message, /^Nandwright is set up: course: KTH EP121U/);
+            } finally {
+                await removeFolder(downloads);
+                await removeFolder(path.join(workspace, 'grade-sheets'));
+            }
+        });
+
+        it('setup stores a grade sheet folder inside the workspace as a relative workspace setting', async () => {
+            const nandwright = await api();
+            const answers = ['keep', 'folder', 'keep'];
+            await nandwright.setup.run({
+                pick: async (_title, choices) => {
+                    const wanted = answers.shift();
+                    return choices.find((c) => c.value === wanted);
+                },
+                input: async () => '',
+                pickFiles: async () => [],
+                pickFolder: async () => path.join(workspace, 'my sheets'),
+                confirmReplace: async () => false,
+                done: () => undefined,
+            });
+            const folder = zipConfig().inspect<string>('gradeSheetFolder');
+            assert.equal(folder?.workspaceValue, 'my sheets');
+            assert.equal(folder?.globalValue, undefined);
+        });
+    });
+
     describe('simulator panel', () => {
         it('shows a chip, takes inputs and builds the truth table', async () => {
             const nandwright = await api();
