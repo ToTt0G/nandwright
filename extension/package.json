@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -228,6 +228,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Run a file's tests when you save it: saving a chip, a program, a test script or a compare file runs the test scripts in the same folder that use it. Results appear in the Testing view and in the chip simulator without taking focus. Scripts that repeat forever are not run this way."
+        },
+        "nandwright.zip.fileName": {
+          "type": "string",
+          "default": "{folder}",
+          "markdownDescription": "The name **Zip Project Files** offers for the zip, without `.zip`. `{folder}` is the folder's name. `{n}` is the number in the folder's name without leading zeros (`01` gives `1`), and `{nn}` is that number with two digits (`1` gives `01`). If the folder's name has no number, `{n}` and `{nn}` give the folder's name. Example: `Project{nn}-familyname-firstname` (with your own names) gives `Project01-familyname-firstname.zip` for a folder named `01` or `project1`."
         },
         "nandwright.trace.server": {
           "type": "string",
@@ -558,7 +563,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
   },

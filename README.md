@@ -113,7 +113,12 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
   the Testing view.
 - **Assemble to .hack File** and **Compile Jack to VM Files** write the official output when
   you ask, and ask before replacing a file whose content differs.
-- Zip Project Files packs a project folder for handing in; your own work is ticked, generated files are not, and you choose the final list.
+- **Zip Project Files** packs a project folder for handing in. Your own work is ticked; test
+  scripts, compare files and generated files are not, and you choose the final list. The
+  `+` button adds a file from another folder, such as a grade sheet. The setting
+  `nandwright.zip.fileName` sets the name the zip gets: for example
+  `Project{nn}-familyname-firstname`, with your own names, gives
+  `Project01-familyname-firstname.zip` for a folder named `01`.
 
 ### Write code
 

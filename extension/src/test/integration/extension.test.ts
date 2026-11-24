@@ -621,6 +621,12 @@ describe('Nandwright', function () {
                 write('.idea/settings.xml', 'x');
                 write('node_modules/x/index.js', 'x');
                 write('build/y.txt', 'x');
+                // Another program's bookkeeping: an open Excel sheet's lock
+                // file, Windows folder settings, a Mac zip's extra folder.
+                write('~$Grades.xlsx', 'x');
+                write('Thumbs.db', 'x');
+                write('asm/desktop.ini', 'x');
+                write('__MACOSX/Mine.hdl', 'x');
                 const { files, tooLarge } = await nandwright.zipProject.projectFiles(folder);
                 assert.equal(tooLarge, false);
                 assert.deepEqual(
@@ -645,6 +651,36 @@ describe('Nandwright', function () {
                     assert.ok(archive.includes(Buffer.from(name)), `${name} is not in the zip`);
                 }
                 assert.ok(!archive.includes(Buffer.from('Mine.tst')));
+
+                // A file from another folder goes to the root of the zip; a
+                // name already at the root is refused, whatever its case.
+                const elsewhere = fs.mkdtempSync(path.join(workspace, 'zip-other-'));
+                try {
+                    const sheet = path.join(elsewhere, 'Grades.xlsx');
+                    fs.writeFileSync(sheet, 'sheet');
+                    fs.writeFileSync(path.join(elsewhere, 'NOTES.TXT'), 'other');
+                    fs.writeFileSync(path.join(elsewhere, 'Prog.asm'), 'other');
+                    const { added, refused } = await nandwright.zipProject.addedFiles(files, [
+                        sheet,
+                        path.join(elsewhere, 'NOTES.TXT'),
+                        path.join(elsewhere, 'Prog.asm'),
+                    ]);
+                    assert.deepEqual(
+                        added.map((f) => [f.path, f.picked, f.description]),
+                        [
+                            ['Grades.xlsx', true, 'added'],
+                            ['Prog.asm', true, 'added'],
+                        ],
+                    );
+                    assert.deepEqual(refused, ['NOTES.TXT']);
+                    await nandwright.zipProject.writeProjectZip(folder, [...files.filter((f) => f.picked), added[0]], target);
+                    const withSheet = fs.readFileSync(target);
+                    assert.equal(withSheet.readUInt16LE(withSheet.length - 22 + 10), 4);
+                    assert.ok(withSheet.includes(Buffer.from('Grades.xlsx')));
+                    assert.ok(!withSheet.includes(Buffer.from(path.basename(elsewhere))), 'the zip holds the other folder');
+                } finally {
+                    await removeFolder(elsewhere);
+                }
             } finally {
                 await removeFolder(folder);
                 fs.rmSync(target, { force: true });
