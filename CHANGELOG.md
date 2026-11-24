@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- **Show Circuit Diagram** draws a chip as a live schematic beside its code: gate shapes,
+  wires coloured by their value, bus values in decimal, binary or hex. Click inputs to
+  change them and watch the change travel through the wires (setting
+  `nandwright.circuit.animate`). Double-click a part that is one of your own chips to see
+  inside it. Clicking a part or a wire selects its part statements in the HDL, and the
+  editor cursor marks the part it is on. Export as SVG or PNG. From the editor title, the
+  editor and Explorer context menus and the Command Palette.
+- The chip simulator and the circuit diagram of the same chip share one simulation.
+- A new practice chip, `Veto`, built from `Majority`.
+
 ## 0.4.0
 
 - **Nand2Tetris: Set Up…** asks for your course, your name and your grade sheets, and

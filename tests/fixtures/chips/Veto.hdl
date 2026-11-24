@@ -1,0 +1,14 @@
+/**
+ * A vote with a veto: most = 1 when at least two of a, b, c are 1,
+ * pass = 1 when most say yes and veto is 0.
+ * Built from the Majority chip of this folder.
+ */
+CHIP Veto {
+    IN a, b, c, veto;
+    OUT most, pass;
+
+    PARTS:
+    Majority(a=a, b=b, c=c, out=vote, out=most);
+    Not(in=veto, out=allowed);
+    And(a=vote, b=allowed, out=pass);
+}

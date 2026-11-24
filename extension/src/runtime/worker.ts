@@ -6,19 +6,17 @@
 // message gets through. No single engine request is unbounded.
 
 import * as path from 'node:path';
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
 import { EngineCrash, WasmEngine } from '../engine/wasm';
-import { FromWorker, MAX_REPORTED_FAILURES, MachineRunRequest, TestRunRequest, ToWorker } from './protocol';
+import { FromWorker, MAX_REPORTED_FAILURES, MachineRunRequest, TestRunRequest, ToWorker, WorkerStart, firstSession } from './protocol';
 
 const wasmPath = path.join(__dirname, 'engine.wasm');
 const port = parentPort!;
 
-/**
- * Each engine numbers its sessions from its own range, so a request for a
- * session of an engine that crashed can never reach a session of the engine
- * that replaced it.
- */
-const SESSIONS_PER_ENGINE = 2 ** 32;
+// Each engine numbers its sessions from its own range, disjoint from those
+// of the other engines of this worker and of every other worker (see
+// `firstSession`).
+const start: WorkerStart = { worker: 0, ...(workerData as Partial<WorkerStart> | undefined) };
 let engines = 0;
 let engine = newEngine();
 
@@ -28,8 +26,9 @@ const cancelled = new Set<number>();
 
 function newEngine(): WasmEngine {
     const fresh = new WasmEngine(wasmPath, (line) => post({ type: 'log', line }));
-    if (engines > 0) {
-        fresh.call({ op: 'start', firstSession: engines * SESSIONS_PER_ENGINE + 1 });
+    const first = firstSession(start.worker, engines);
+    if (first !== 1) {
+        fresh.call({ op: 'start', firstSession: first });
     }
     engines += 1;
     return fresh;

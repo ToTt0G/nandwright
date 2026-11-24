@@ -5,7 +5,9 @@
 //! the code the editor runs is the code the tests run.
 //!
 //! Requests are objects with an `op`. A failed request answers
-//! `{"error": {"message": …}}`; nothing here panics on bad input.
+//! `{"error": {"message": …}}` (chip-session and ended-session failures also
+//! include `"code"`, and live chip sessions include `"revision"`); nothing
+//! here panics on bad input.
 //!
 //! | op | does |
 //! |---|---|
@@ -13,7 +15,7 @@
 //! | `start` | sets the first session number of a fresh engine, so that numbers are never reused after a restart |
 //! | `overlay.set`, `overlay.clear`, `overlay.replace` | unsaved editor buffers that shadow files |
 //! | `test.open`, `test.run`, `test.step`, `test.inspect` | a `.tst` script run |
-//! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.reset`, `chip.state` | an interactive chip |
+//! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.step`, `chip.reset`, `chip.state`, `chip.table`, `chip.diagram`, `chip.values` | an interactive chip |
 //! | `cpu.open`, `cpu.run`, `cpu.step`, `cpu.reset`, `cpu.restart`, `cpu.set`, `cpu.state` | a Hack computer running a program |
 //! | `vm.open`, `vm.run`, `vm.step`, `vm.reset`, `vm.set`, `vm.state` | a VM program (or a Jack folder, compiled in memory) on the VM emulator |
 //! | `asm.assemble` | assembles a `.asm` file to a `.hack` file |
@@ -49,6 +51,81 @@ use crate::vmsession::VmSession;
 pub(crate) type Failure = String;
 pub(crate) type Reply = Result<Value, Failure>;
 
+/// Machine-readable error codes for chip-session and ended-session failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ErrorCode {
+    StaleRevision,
+    InvalidPath,
+    BuildFailed,
+    SessionEnded,
+    InvalidInput,
+    Other,
+}
+
+impl ErrorCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::StaleRevision => "stale-revision",
+            ErrorCode::InvalidPath => "invalid-path",
+            ErrorCode::BuildFailed => "build-failed",
+            ErrorCode::SessionEnded => "session-ended",
+            ErrorCode::InvalidInput => "invalid-input",
+            ErrorCode::Other => "other",
+        }
+    }
+}
+
+/// A structured request failure serialized as `{"error": {"message": …}}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ErrorReply {
+    pub(crate) message: String,
+    pub(crate) code: Option<ErrorCode>,
+    pub(crate) revision: Option<u64>,
+}
+
+impl ErrorReply {
+    pub(crate) fn coded(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            code: Some(code),
+            revision: None,
+        }
+    }
+
+    pub(crate) fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = Some(revision);
+        self
+    }
+
+    fn to_json(&self) -> Value {
+        let mut error = serde_json::Map::new();
+        error.insert("message".into(), json!(self.message));
+        if let Some(code) = self.code {
+            error.insert("code".into(), json!(code.as_str()));
+        }
+        if let Some(revision) = self.revision {
+            error.insert("revision".into(), json!(revision));
+        }
+        json!({ "error": error })
+    }
+}
+
+impl From<String> for ErrorReply {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+            revision: None,
+        }
+    }
+}
+
+impl From<&str> for ErrorReply {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_string())
+    }
+}
+
 enum Session {
     Test(Box<TestSession>),
     Chip(Box<ChipSession>),
@@ -81,15 +158,17 @@ impl Engine {
     pub fn call(&mut self, request: &str) -> String {
         let reply = match serde_json::from_str::<Value>(request) {
             Ok(request) => self.dispatch(&request),
-            Err(e) => Err(format!("the request is not valid JSON: {e}")),
+            Err(e) => Err(ErrorReply::from(format!(
+                "the request is not valid JSON: {e}"
+            ))),
         };
         match reply {
             Ok(value) => value.to_string(),
-            Err(message) => json!({ "error": { "message": message } }).to_string(),
+            Err(error) => error.to_json().to_string(),
         }
     }
 
-    fn dispatch(&mut self, request: &Value) -> Reply {
+    fn dispatch(&mut self, request: &Value) -> Result<Value, ErrorReply> {
         let op = request["op"].as_str().unwrap_or_default();
         match op {
             "version" => Ok(json!({ "version": env!("CARGO_PKG_VERSION") })),
@@ -153,9 +232,13 @@ impl Engine {
                 reply["session"] = json!(self.add(Session::Vm(Box::new(session))));
                 Ok(reply)
             }
-            "jack.compile" => outputs::jack_compile(&self.host, self.overlay.disk(), request),
-            "asm.assemble" => outputs::assemble(&self.host, self.overlay.disk(), request),
-            "reference" => outputs::reference(&self.host, request),
+            "jack.compile" => Ok(outputs::jack_compile(
+                &self.host,
+                self.overlay.disk(),
+                request,
+            )?),
+            "asm.assemble" => Ok(outputs::assemble(&self.host, self.overlay.disk(), request)?),
+            "reference" => Ok(outputs::reference(&self.host, request)?),
             "close" => {
                 self.sessions
                     .remove(&request["session"].as_u64().unwrap_or(0));
@@ -165,15 +248,17 @@ impl Engine {
                 let id = request["session"]
                     .as_u64()
                     .ok_or_else(|| format!("unknown operation `{op}`"))?;
-                let session = self
-                    .sessions
-                    .get_mut(&id)
-                    .ok_or("this session has ended; start it again")?;
+                let session = self.sessions.get_mut(&id).ok_or_else(|| {
+                    ErrorReply::coded(
+                        ErrorCode::SessionEnded,
+                        "this session has ended; start it again",
+                    )
+                })?;
                 match session {
-                    Session::Test(test) => test.call(op, request),
+                    Session::Test(test) => Ok(test.call(op, request)?),
                     Session::Chip(chip) => chip.call(op, request),
-                    Session::Computer(computer) => computer.call(op, request),
-                    Session::Vm(vm) => vm.call(op, request),
+                    Session::Computer(computer) => Ok(computer.call(op, request)?),
+                    Session::Vm(vm) => Ok(vm.call(op, request)?),
                 }
             }
         }

@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -244,6 +244,11 @@
           "scope": "application",
           "markdownDescription": "Your first name, for `{firstname}` in `#nandwright.zip.fileName#`. Kept in your user settings only."
         },
+        "nandwright.circuit.animate": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "In the circuit diagram, light up the wires whose value changed after an input change or a clock step, in the order the signal travels. Off when your system asks for reduced motion. The diagram's Animate button sets this too."
+        },
         "nandwright.simulator.followEditor": {
           "type": "boolean",
           "default": true,
@@ -312,6 +317,12 @@
         "title": "Open Chip in Simulator",
         "category": "Nand2Tetris",
         "icon": "$(circuit-board)"
+      },
+      {
+        "command": "nandwright.showCircuit",
+        "title": "Show Circuit Diagram",
+        "category": "Nand2Tetris",
+        "icon": "$(type-hierarchy)"
       },
       {
         "command": "nandwright.runProgram",
@@ -390,6 +401,11 @@
           "group": "navigation@10"
         },
         {
+          "command": "nandwright.showCircuit",
+          "when": "resourceLangId == hdl",
+          "group": "navigation@10"
+        },
+        {
           "command": "nandwright.compareOutput",
           "when": "resourceLangId == cmp || resourceLangId == tst",
           "group": "navigation@11"
@@ -423,6 +439,11 @@
         },
         {
           "command": "nandwright.openChip",
+          "when": "resourceExtname == .hdl",
+          "group": "nandwright@2"
+        },
+        {
+          "command": "nandwright.showCircuit",
           "when": "resourceExtname == .hdl",
           "group": "nandwright@2"
         },
@@ -466,6 +487,10 @@
           "when": "editorLangId == hdl"
         },
         {
+          "command": "nandwright.showCircuit",
+          "when": "editorLangId == hdl"
+        },
+        {
           "command": "nandwright.compareOutput",
           "when": "editorLangId == cmp || editorLangId == tst || editorLangId == hdl"
         },
@@ -484,6 +509,13 @@
         {
           "command": "nandwright.compareWithReference",
           "when": "resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .xml"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "nandwright.showCircuit",
+          "when": "resourceLangId == hdl",
+          "group": "nandwright@1"
         }
       ]
     },
@@ -632,7 +664,8 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs dist-test/unit/zipFiles.test.cjs dist-test/unit/offer.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs dist-test/unit/zipFiles.test.cjs dist-test/unit/offer.test.cjs dist-test/unit/circuitLayout.test.cjs dist-test/unit/circuitExport.test.cjs dist-test/unit/chipSessions.test.cjs dist-test/unit/chipWebview.test.cjs",
+    "preview:circuit": "node scripts/build.mjs && node scripts/circuit-preview.mjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
   },

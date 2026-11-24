@@ -138,6 +138,8 @@ const KEYS = {
     nextFailure: ['ctrl+alt+shift+n', 'testing.goToNextMessage'],
     setup: ['ctrl+alt+shift+u', 'nandwright.setup'],
     zipProject: ['ctrl+alt+shift+z', 'nandwright.zipProject'],
+    showCircuit: ['ctrl+alt+shift+g', 'nandwright.showCircuit'],
+    hideSidebar: ['ctrl+alt+shift+j', 'workbench.action.closeSidebar'],
 };
 writeFileSync(
     join(userData, 'User', 'keybindings.json'),
@@ -302,6 +304,29 @@ const scenes = {
         await shot('chip-simulator');
         writeFileSync(file, original);
         await pause(1000);
+    },
+
+    // The circuit diagram beside the chip's source, two inputs on: the vote
+    // passes. In the dark theme, also the inside of its Majority part.
+    async circuit() {
+        await command('hideSidebar');
+        await openFile('chips/Veto.hdl');
+        await command('showCircuit');
+        await pause(3500);
+        const frame = await circuitFrame();
+        await frame.locator('[data-port="in:0"]').click();
+        await pause(300);
+        await frame.locator('[data-port="in:1"]').click();
+        // Off the port over empty canvas, or its net stays lit and dims the rest.
+        await page.mouse.move(WIDTH * 0.75, HEIGHT * 0.2, { steps: 8 });
+        await frame.locator('[data-port="in:1"]').evaluate((el) => el.blur());
+        await pause(1500);
+        await shot('circuit-diagram');
+        if (themeKey === 'dark') {
+            await frame.locator('[data-part="0"]').dblclick();
+            await pause(1500);
+            await shot('circuit-drilled');
+        }
     },
 
     // A clocked chip: tick, tock and time.
@@ -476,6 +501,7 @@ async function panelFrame(selector) {
 }
 
 const chipFrame = () => panelFrame('#root .pins');
+const circuitFrame = () => panelFrame('#root.circuit [data-port]');
 
 let failed = false;
 try {

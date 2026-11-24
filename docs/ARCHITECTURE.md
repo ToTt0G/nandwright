@@ -17,6 +17,8 @@ extension/            VS Code extension (TypeScript)
   src/runtime/          worker thread: test runs, simulators, emulators
   src/testing.ts        the Testing view
   src/chipPanel.ts      the chip simulator panel        (webview: src/webview/chip.ts)
+  src/circuitPanel.ts   the circuit diagram panel       (webview: src/webview/circuit*.ts)
+  src/chipSessions.ts   one hub per chip file: the shared runtime session, its queue and events
   src/computerPanel.ts  the CPU / VM emulator panel     (webview: src/webview/computer.ts)
   src/debug.ts          debug adapter that steps through test scripts
   src/outputs.ts        assemble, compile, compare with the reference
@@ -146,6 +148,12 @@ The dialect is chosen from the first `load` command (or, without one, from the
 commands used), because the Java suite makes the user pick the right program and an
 editor should not.
 
+For interactive inspection (such as the circuit diagram panel), `Circuit::with_probes`
+(and `HardwareMachine::with_probes`) opts in to retaining a flat `u32`-per-bit mapping
+and compact instance tree after union-find flattening so any composite instance's nets
+and any part's own pins can be read at arbitrary depth via `Circuit::instance(path)`.
+Test runs (`Circuit::new` / `HardwareMachine::new`) never build probes.
+
 ## The wasm ABI
 
 `n2t-wasm` exports `nw_alloc`, `nw_free` and `nw_call(ptr, len) -> ptr` (JSON in, JSON
@@ -159,7 +167,9 @@ function natively. Two instances run in the extension:
 - the **runtime** worker thread owns *sessions*: a test run (`test.*`), an interactive
   chip (`chip.*`), a Hack computer (`cpu.*`) or a VM (`vm.*`). Sessions are stepped
   with a budget so a runaway program can always be paused or cancelled, and a trap
-  tears down one instance, not the editor.
+  tears down one instance, not the editor. The client (`runtime/client.ts`) fires
+  `onDidStop` whenever every session is gone: the worker stopped, or it replaced a
+  trapped engine (a reply with `crashed: true`, announced before that reply arrives).
 
 Unsaved editor buffers are pushed to the runtime as overlays (`overlay.set`) before a
 run, so tests and simulators use what is on screen. Output that a student's own tool
@@ -171,6 +181,16 @@ may have produced (`.hack`, `.vm`) is written only when asked (`asm.assemble`,
 Native VS Code surfaces are used wherever one exists: the Testing view for test
 scripts, the Problems panel and hovers for diagnostics, CodeLens and the editor title
 for actions, the debugger for stepping through scripts, the diff editor for
-comparisons. Two webview panels exist for what is inherently visual: a chip's pins and
-a computer's screen, keyboard and memory. They are drawn with VS Code's theme
-variables only.
+comparisons. Three webview panels exist for what is inherently visual: a chip's pins,
+a chip's circuit diagram, and a computer's screen, keyboard and memory. They are drawn
+with VS Code's theme variables only.
+
+The circuit diagram (`docs/CIRCUIT_DIAGRAM.md`) draws one level of a chip as a live
+schematic, with drill-down into parts that are chips of the student's own. Its layout is
+computed in the webview from the engine's `chip.diagram` reply; values come from
+`chip.values` after each change. When the chip simulator and the circuit diagram show
+the same file they share one runtime chip session through a hub (`chipSessions.ts`):
+every runtime call for that session, from either panel, runs through the hub's one
+queue, and the hub publishes each outcome to both panels in the order the engine ran
+it. The hub also reopens the chip after `onDidStop`, at most three times a minute;
+after that the panels offer Retry.

@@ -5,6 +5,9 @@ import Mocha from 'mocha';
 
 export function run(): Promise<void> {
     const mocha = new Mocha({ ui: 'bdd', color: true, timeout: 60_000, slow: 5_000 });
+    if (process.env.NANDWRIGHT_TEST_GREP) {
+        mocha.grep(process.env.NANDWRIGHT_TEST_GREP);
+    }
     // Bundled into this file; registering through `suite.emit` gives the test
     // file mocha's globals (describe, it) before it is evaluated.
     mocha.suite.emit('pre-require', globalThis, 'extension.test', mocha);

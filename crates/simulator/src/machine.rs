@@ -105,6 +105,7 @@ pub struct HardwareMachine {
     registry: BuiltinRegistry,
     circuit: Option<Circuit>,
     loaded: Option<String>,
+    probes: bool,
 }
 
 impl HardwareMachine {
@@ -114,6 +115,16 @@ impl HardwareMachine {
             registry: BuiltinRegistry::standard(),
             circuit: None,
             loaded: None,
+            probes: false,
+        }
+    }
+
+    /// Creates a hardware simulator whose loaded circuits retain per-instance
+    /// probes (see [`Circuit::with_probes`]), for interactive inspection.
+    pub fn with_probes(provider: Box<dyn SourceProvider>, builtins: Arc<BuiltinLibrary>) -> Self {
+        Self {
+            probes: true,
+            ..Self::new(provider, builtins)
         }
     }
 
@@ -133,14 +144,22 @@ impl HardwareMachine {
         &mut self.elaborator
     }
 
+    pub fn elaborator_ref(&self) -> &Elaborator<Box<dyn SourceProvider>> {
+        &self.elaborator
+    }
+
     /// Loads a chip by name, as `load Name.hdl` does.
     pub fn load_chip(&mut self, name: &str, file_name: &str, span: Span) -> Result<(), RunError> {
         let unit = self.elaborator.compile(name);
         let Some(definition) = unit.definition.clone() else {
             return Err(error(load_failure(file_name, &unit), span));
         };
-        let circuit =
-            Circuit::new(definition, &self.registry).map_err(|e| error(e.to_string(), span))?;
+        let circuit = if self.probes {
+            Circuit::with_probes(definition, &self.registry)
+        } else {
+            Circuit::new(definition, &self.registry)
+        }
+        .map_err(|e| error(e.to_string(), span))?;
         self.circuit = Some(circuit);
         self.loaded = Some(name.to_string());
         Ok(())

@@ -103,6 +103,8 @@ try {
             NANDWRIGHT_TEST_WORKSPACE: workspace,
             NANDWRIGHT_TEST_VSIX: vsix ? '1' : '',
             NANDWRIGHT_TEST_REPORT: report,
+            // Runs only the tests whose full title matches, e.g. NANDWRIGHT_TEST_GREP='circuit diagram'.
+            NANDWRIGHT_TEST_GREP: process.env.NANDWRIGHT_TEST_GREP ?? '',
         },
     });
 } catch (error) {

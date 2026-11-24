@@ -84,6 +84,215 @@ pub struct PinHandle {
     wires: Vec<u32>,
 }
 
+/// One node in the instance tree recorded when probes are enabled.
+///
+/// Direct parts of a composite instance are placed contiguously at
+/// `children_start..children_start + parts.len()` in [`Probes::instances`], so
+/// walking a path of part indices is O(depth) with no extra allocations.
+#[derive(Debug, Clone, Copy)]
+struct InstanceNode {
+    /// First bit id in [`Probes::bit_to_wire`] allocated for this instance's
+    /// nets (composite) or input+output pins (built-in).
+    base_bit: u32,
+    /// Index in [`Probes::instances`] of part 0 of this composite instance.
+    /// Unused (`0`) for built-in instances and empty composites.
+    children_start: u32,
+}
+
+/// Per-instance bit-to-wire table retained for interactive inspection.
+///
+/// Memory overhead: 4 bytes (`u32`) per flattened bit before union-find
+/// deduplication in `bit_to_wire`, plus 8 bytes (two `u32`s) per instantiated
+/// chip in `instances`. Built only via [`Circuit::with_probes`]; test runs
+/// keep [`Circuit::probes`] as `None` and pay nothing.
+struct Probes {
+    bit_to_wire: Vec<u32>,
+    instances: Vec<InstanceNode>,
+}
+
+impl Probes {
+    fn read_bits(&self, values: &[bool], start_bit: u32, width: u32) -> u64 {
+        let mut acc = 0u64;
+        let start = start_bit as usize;
+        let bits = width.min(64) as usize;
+        for i in 0..bits {
+            let Some(&wire) = self.bit_to_wire.get(start.saturating_add(i)) else {
+                break;
+            };
+            if values.get(wire as usize).copied().unwrap_or(false) {
+                acc |= 1u64 << i;
+            }
+        }
+        acc
+    }
+}
+
+/// A read-only view of one chip instance inside a [`Circuit`] built with
+/// [`Circuit::with_probes`].
+#[derive(Clone, Copy)]
+pub struct InstanceView<'a> {
+    circuit: &'a Circuit,
+    probes: &'a Probes,
+    definition: &'a Arc<ChipDefinition>,
+    node_idx: usize,
+}
+
+impl<'a> InstanceView<'a> {
+    pub fn definition(&self) -> &'a Arc<ChipDefinition> {
+        self.definition
+    }
+
+    pub fn is_composite(&self) -> bool {
+        self.definition.as_composite().is_some()
+    }
+
+    fn base_bit(&self) -> u32 {
+        self.probes
+            .instances
+            .get(self.node_idx)
+            .map_or(0, |n| n.base_bit)
+    }
+
+    fn outputs_base_bit(&self) -> u32 {
+        self.definition
+            .interface
+            .inputs
+            .iter()
+            .fold(self.base_bit(), |acc, pin| acc.saturating_add(pin.width))
+    }
+
+    /// Direct child part `index` of a composite instance, in `PARTS:` order.
+    pub fn part(&self, index: usize) -> Option<InstanceView<'a>> {
+        let composite = self.definition.as_composite()?;
+        let part = composite.parts.get(index)?;
+        let node = self.probes.instances.get(self.node_idx)?;
+        let child_idx = (node.children_start as usize).checked_add(index)?;
+        if child_idx >= self.probes.instances.len() {
+            return None;
+        }
+        Some(InstanceView {
+            circuit: self.circuit,
+            probes: self.probes,
+            definition: &part.chip,
+            node_idx: child_idx,
+        })
+    }
+
+    /// Every direct child part of a composite instance, in `PARTS:` order.
+    /// Empty for built-in instances.
+    pub fn parts(&self) -> impl Iterator<Item = InstanceView<'a>> + '_ {
+        let count = self.definition.as_composite().map_or(0, |c| c.parts.len());
+        (0..count).filter_map(|i| self.part(i))
+    }
+
+    /// Current values of this instance's input pins, in interface order.
+    pub fn input_values(&self) -> Vec<u64> {
+        let mut offset = self.base_bit();
+        self.definition
+            .interface
+            .inputs
+            .iter()
+            .map(|pin| {
+                let value = self
+                    .probes
+                    .read_bits(&self.circuit.values, offset, pin.width);
+                offset = offset.saturating_add(pin.width);
+                value
+            })
+            .collect()
+    }
+
+    /// Current value of input pin `index` of this instance.
+    pub fn input_value(&self, index: usize) -> Option<u64> {
+        let pin = self.definition.interface.inputs.get(index)?;
+        let offset = self
+            .definition
+            .interface
+            .inputs
+            .iter()
+            .take(index)
+            .fold(self.base_bit(), |acc, prior| {
+                acc.saturating_add(prior.width)
+            });
+        Some(
+            self.probes
+                .read_bits(&self.circuit.values, offset, pin.width),
+        )
+    }
+
+    /// Current values of this instance's output pins, in interface order.
+    pub fn output_values(&self) -> Vec<u64> {
+        let mut offset = self.outputs_base_bit();
+        self.definition
+            .interface
+            .outputs
+            .iter()
+            .map(|pin| {
+                let value = self
+                    .probes
+                    .read_bits(&self.circuit.values, offset, pin.width);
+                offset = offset.saturating_add(pin.width);
+                value
+            })
+            .collect()
+    }
+
+    /// Current value of output pin `index` of this instance.
+    pub fn output_value(&self, index: usize) -> Option<u64> {
+        let pin = self.definition.interface.outputs.get(index)?;
+        let offset = self
+            .definition
+            .interface
+            .outputs
+            .iter()
+            .take(index)
+            .fold(self.outputs_base_bit(), |acc, prior| {
+                acc.saturating_add(prior.width)
+            });
+        Some(
+            self.probes
+                .read_bits(&self.circuit.values, offset, pin.width),
+        )
+    }
+
+    /// Current values of every net of a composite instance, in `composite.nets`
+    /// order (inputs, outputs, internal). Returns `None` for built-in instances.
+    pub fn net_values(&self) -> Option<Vec<u64>> {
+        let composite = self.definition.as_composite()?;
+        let mut offset = self.base_bit();
+        Some(
+            composite
+                .nets
+                .iter()
+                .map(|net| {
+                    let value = self
+                        .probes
+                        .read_bits(&self.circuit.values, offset, net.width);
+                    offset = offset.saturating_add(net.width);
+                    value
+                })
+                .collect(),
+        )
+    }
+
+    /// Current value of net `index` of a composite instance.
+    pub fn net_value(&self, index: usize) -> Option<u64> {
+        let composite = self.definition.as_composite()?;
+        let net = composite.nets.get(index)?;
+        let offset = composite
+            .nets
+            .iter()
+            .take(index)
+            .fold(self.base_bit(), |acc, prior| {
+                acc.saturating_add(prior.width)
+            });
+        Some(
+            self.probes
+                .read_bits(&self.circuit.values, offset, net.width),
+        )
+    }
+}
+
 pub struct Circuit {
     definition: Arc<ChipDefinition>,
     values: Vec<bool>,
@@ -93,6 +302,7 @@ pub struct Circuit {
     /// unusual custom built-ins); evaluation then iterates to a fixed point.
     cyclic: bool,
     pins: Vec<PinHandle>,
+    probes: Option<Probes>,
     time: Time,
     scratch_in: Vec<u64>,
     scratch_out: Vec<u64>,
@@ -108,6 +318,7 @@ struct Builder<'r> {
     registry: &'r BuiltinRegistry,
     parent: Vec<u32>,
     primitives: Vec<PrimitiveInstance>,
+    instances: Option<Vec<InstanceNode>>,
 }
 
 impl Builder<'_> {
@@ -148,6 +359,7 @@ impl Builder<'_> {
         &mut self,
         def: &ChipDefinition,
         path: &mut Vec<usize>,
+        node_idx: usize,
     ) -> Result<InstanceBits, SimError> {
         match &def.implementation {
             Implementation::Builtin(builtin) => {
@@ -157,6 +369,15 @@ impl Builder<'_> {
                         symbol: builtin.symbol.clone(),
                     }
                 })?;
+                let base_bit = self.parent.len() as u32;
+                if let Some(nodes) = &mut self.instances
+                    && let Some(slot) = nodes.get_mut(node_idx)
+                {
+                    *slot = InstanceNode {
+                        base_bit,
+                        children_start: 0,
+                    };
+                }
                 let inputs = def
                     .interface
                     .inputs
@@ -193,14 +414,45 @@ impl Builder<'_> {
                 Ok((inputs, outputs, nets))
             }
             Implementation::Composite(composite) => {
+                let base_bit = self.parent.len() as u32;
                 let nets = composite
                     .nets
                     .iter()
                     .map(|n| self.alloc(n.width))
                     .collect::<Result<Vec<_>, _>>()?;
+                let children_start = if let Some(nodes) = &mut self.instances {
+                    let start = nodes.len();
+                    let new_len = start
+                        .checked_add(composite.parts.len())
+                        .ok_or(SimError::TooLarge)?;
+                    if new_len > MAX_BITS || u32::try_from(start).is_err() {
+                        return Err(SimError::TooLarge);
+                    }
+                    if let Some(slot) = nodes.get_mut(node_idx) {
+                        *slot = InstanceNode {
+                            base_bit,
+                            children_start: if composite.parts.is_empty() {
+                                0
+                            } else {
+                                start as u32
+                            },
+                        };
+                    }
+                    nodes.resize(
+                        new_len,
+                        InstanceNode {
+                            base_bit: 0,
+                            children_start: 0,
+                        },
+                    );
+                    start
+                } else {
+                    0
+                };
                 for (index, part) in composite.parts.iter().enumerate() {
                     path.push(index);
-                    let (child_inputs, child_outputs, _) = self.instantiate(&part.chip, path)?;
+                    let (child_inputs, child_outputs, _) =
+                        self.instantiate(&part.chip, path, children_start + index)?;
                     path.pop();
                     for conn in &part.inputs {
                         for k in 0..conn.pin_bits.width {
@@ -237,16 +489,46 @@ impl Builder<'_> {
 
 impl Circuit {
     /// Builds a fresh circuit with all state and inputs zero, then settles it.
+    ///
+    /// Does not retain per-instance probe metadata; use [`Circuit::with_probes`]
+    /// when interactive drill-down inspection is needed.
     pub fn new(
         definition: Arc<ChipDefinition>,
         registry: &BuiltinRegistry,
+    ) -> Result<Self, SimError> {
+        Self::build(definition, registry, false)
+    }
+
+    /// Builds a fresh circuit like [`Circuit::new`], additionally retaining
+    /// per-instance probes so any composite instance's nets and any part's own
+    /// input/output pins can be read via [`Circuit::instance`].
+    ///
+    /// Memory cost: one `u32` (4 bytes) per flattened bit for the bit-to-wire
+    /// table, plus 8 bytes per chip instance in the hierarchy.
+    pub fn with_probes(
+        definition: Arc<ChipDefinition>,
+        registry: &BuiltinRegistry,
+    ) -> Result<Self, SimError> {
+        Self::build(definition, registry, true)
+    }
+
+    fn build(
+        definition: Arc<ChipDefinition>,
+        registry: &BuiltinRegistry,
+        with_probes: bool,
     ) -> Result<Self, SimError> {
         let mut builder = Builder {
             registry,
             parent: vec![FALSE_WIRE, TRUE_WIRE],
             primitives: Vec::new(),
+            instances: with_probes.then(|| {
+                vec![InstanceNode {
+                    base_bit: 0,
+                    children_start: 0,
+                }]
+            }),
         };
-        let (_, _, nets) = builder.instantiate(&definition, &mut Vec::new())?;
+        let (_, _, nets) = builder.instantiate(&definition, &mut Vec::new(), 0)?;
 
         // Compress union-find roots into dense wire indices (constants first).
         let total = builder.parent.len();
@@ -303,6 +585,11 @@ impl Circuit {
             }
         };
 
+        let probes = builder.instances.map(|instances| Probes {
+            bit_to_wire: wire,
+            instances,
+        });
+
         let (order, cyclic) = schedule(&primitives, next as usize);
         let max_pins = primitives
             .iter()
@@ -318,12 +605,38 @@ impl Circuit {
             order,
             cyclic,
             pins,
+            probes,
             time: Time::default(),
             scratch_in: vec![0; max_pins],
             scratch_out: vec![0; max_pins],
         };
         circuit.eval();
         Ok(circuit)
+    }
+
+    /// Whether this circuit was built with per-instance probes.
+    pub fn has_probes(&self) -> bool {
+        self.probes.is_some()
+    }
+
+    /// Returns a view of the instance at `path` (part indices from the root;
+    /// `&[]` is the root). Returns `None` if probes are not enabled, if any
+    /// index is out of range, or if `path` descends through a built-in chip.
+    pub fn instance(&self, path: &[usize]) -> Option<InstanceView<'_>> {
+        let probes = self.probes.as_ref()?;
+        if probes.instances.is_empty() {
+            return None;
+        }
+        let mut view = InstanceView {
+            circuit: self,
+            probes,
+            definition: &self.definition,
+            node_idx: 0,
+        };
+        for &part_index in path {
+            view = view.part(part_index)?;
+        }
+        Some(view)
     }
 
     pub fn definition(&self) -> &Arc<ChipDefinition> {

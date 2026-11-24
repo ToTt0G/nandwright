@@ -12,6 +12,13 @@ import * as vscode from 'vscode';
 import type { NandwrightApi } from '../../extension';
 import { samePath } from '../../paths';
 import type { ScriptResult } from '../../testing';
+import { CircuitPanel, type CircuitPanels } from '../../circuitPanel';
+import { ChipPanel } from '../../chipPanel';
+import { Runtime } from '../../runtime/client';
+import { ChipSessions, type HubEvent } from '../../chipSessions';
+import { firstSession } from '../../runtime/protocol';
+import type { TestExplorer } from '../../testing';
+import { FakeRuntime } from '../fakeRuntime';
 
 const EXTENSION_ID = 'nandwright.nandwright';
 const workspace = process.env.NANDWRIGHT_TEST_WORKSPACE!;
@@ -123,7 +130,7 @@ describe('Nandwright', function () {
         assert.equal((await open('chips', 'Majority.tst')).document.languageId, 'tst');
         assert.equal((await open('chips', 'Majority.cmp')).document.languageId, 'cmp');
         const commands = await vscode.commands.getCommands(true);
-        for (const command of ['runTest', 'debugTest', 'openChip', 'compareOutput', 'getStarted']) {
+        for (const command of ['runTest', 'debugTest', 'openChip', 'showCircuit', 'compareOutput', 'getStarted']) {
             assert.ok(commands.includes(`nandwright.${command}`), `command ${command} is missing`);
         }
     });
@@ -1219,6 +1226,1059 @@ describe('Nandwright', function () {
                 assert.deepEqual(rejections, []);
             } finally {
                 process.off('unhandledRejection', onRejection);
+            }
+        });
+    });
+
+    describe('circuit diagram', () => {
+        const netOf = (panel: CircuitPanel, name: string) => {
+            const { diagram, values } = panel.snapshot();
+            const index = diagram!.nets.findIndex((net) => net.name === name);
+            assert.ok(index >= 0, `no net ${name}`);
+            return values!.nets[index];
+        };
+        const lastValues = (panel: CircuitPanel) => [...panel.posted].reverse().find((m) => m.type === 'values');
+
+        it('Show Circuit Diagram opens the diagram of a chip', async () => {
+            await open('chips', 'Veto.hdl');
+            const panel = (await vscode.commands.executeCommand('nandwright.showCircuit')) as CircuitPanel;
+            assert.ok(panel, 'the command returns the panel');
+            const { diagram, problem, path: shown } = panel.snapshot();
+            assert.equal(problem, null);
+            assert.deepEqual(shown, []);
+            assert.equal(diagram?.chip, 'Veto');
+            assert.ok(samePath(diagram!.file!, file('chips', 'Veto.hdl').fsPath));
+            assert.deepEqual(diagram!.parts.map((part) => part.chip), ['Majority', 'Not', 'And']);
+            assert.equal(diagram!.parts[0].drill, true);
+            assert.equal(panel.panel.title, 'Veto · circuit');
+            // The webview gets the diagram once it is ready, and says when it has drawn it
+            // (`posted` alone holds messages before the webview has them).
+            await until('the webview to draw the diagram', () => panel.snapshot().drawn);
+            const drawn = [...panel.posted].reverse().find((m) => m.type === 'diagram');
+            assert.ok(drawn?.type === 'diagram' && drawn.token === panel.snapshot().token && drawn.diagram.chip === 'Veto');
+            panel.panel.dispose();
+        });
+
+        it('takes inputs and sends the new values', async () => {
+            const nandwright = await api();
+            const panel = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+            assert.equal(netOf(panel, 'pass'), 0);
+            await panel.simulate({ type: 'set', pin: 'a', value: 1 });
+            await panel.simulate({ type: 'set', pin: 'b', value: 1 });
+            assert.deepEqual([netOf(panel, 'vote'), netOf(panel, 'most'), netOf(panel, 'pass')], [1, 1, 1]);
+            const sent = lastValues(panel);
+            assert.ok(sent?.type === 'values' && sent.cause === 'input');
+            await panel.simulate({ type: 'set', pin: 'veto', value: 1 });
+            assert.deepEqual([netOf(panel, 'most'), netOf(panel, 'pass')], [1, 0]);
+            panel.panel.dispose();
+        });
+
+        it('clocks a sequential chip', async () => {
+            const nandwright = await api();
+            const panel = await nandwright.circuits.open(file('chips', 'Accumulator.hdl'));
+            await panel.simulate({ type: 'set', pin: 'in', value: 7 });
+            await panel.simulate({ type: 'set', pin: 'add', value: 1 });
+            await panel.simulate({ type: 'clock', action: 'step' });
+            await panel.simulate({ type: 'clock', action: 'step' });
+            assert.equal(panel.snapshot().values?.time, '2');
+            assert.equal(netOf(panel, 'out'), 14);
+            const sent = lastValues(panel);
+            assert.ok(sent?.type === 'values' && sent.cause === 'clock');
+            await panel.simulate({ type: 'clock', action: 'reset' });
+            assert.equal(netOf(panel, 'out'), 0);
+            panel.panel.dispose();
+        });
+
+        it('drills into a part and back up', async () => {
+            const nandwright = await api();
+            const panel = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+            await panel.simulate({ type: 'set', pin: 'a', value: 1 });
+            await panel.simulate({ type: 'set', pin: 'c', value: 1 });
+            await panel.simulate({ type: 'drill', path: [0] });
+            let { diagram } = panel.snapshot();
+            assert.equal(diagram?.chip, 'Majority');
+            assert.ok(samePath(diagram!.file!, file('chips', 'Majority.hdl').fsPath));
+            assert.deepEqual(diagram!.breadcrumb.map((crumb) => crumb.chip), ['Veto', 'Majority']);
+            // Live values from the same simulation.
+            assert.deepEqual([netOf(panel, 'ac'), netOf(panel, 'out')], [1, 1]);
+            // A built-in part cannot be opened: the panel stays at the nearest level that can.
+            await panel.simulate({ type: 'drill', path: [0, 1] });
+            assert.equal(panel.snapshot().diagram?.chip, 'Majority');
+            await panel.simulate({ type: 'drill', path: diagram!.breadcrumb[0].path });
+            ({ diagram } = panel.snapshot());
+            assert.equal(diagram?.chip, 'Veto');
+            assert.deepEqual(panel.snapshot().path, []);
+            panel.panel.dispose();
+        });
+
+        it('reloads on edit, keeping the inputs and the drill path, and shows errors', async () => {
+            const nandwright = await api();
+            const editor = await open('chips', 'Veto.hdl');
+            const panel = await nandwright.circuits.open(editor.document.uri);
+            await panel.simulate({ type: 'set', pin: 'b', value: 1 });
+            await panel.simulate({ type: 'set', pin: 'c', value: 1 });
+            await panel.simulate({ type: 'drill', path: [0] });
+            const original = editor.document.getText();
+            await replaceAll(editor, original.replace('And(a=vote, b=allowed, out=pass);', 'Andd(a=vote, b=allowed, out=pass);'));
+            await until('the panel to show the error', () => /unknown chip `Andd`/.test(panel.snapshot().problem ?? ''));
+            assert.equal(panel.snapshot().diagram?.chip, 'Majority', 'the last diagram stays');
+            assert.ok(panel.posted.some((m) => m.type === 'error'));
+            await replaceAll(editor, original.replace('Not(in=veto, out=allowed);', 'Not(in=veto, out=allowed);\n    // checked'));
+            await until('the panel to recover', () => panel.snapshot().problem === null);
+            await panel.settled();
+            assert.ok((panel.snapshot().diagram?.revision ?? 0) > 1, 'the engine counts the builds of the chip');
+            assert.deepEqual(panel.snapshot().values?.path, [0]);
+            assert.deepEqual(panel.snapshot().path, [0]);
+            assert.equal(panel.snapshot().diagram?.chip, 'Majority');
+            assert.equal(netOf(panel, 'bc'), 1, 'the inputs were kept');
+            panel.panel.dispose();
+        });
+
+        it('shares one simulation with the simulator panel of the same chip', async () => {
+            const nandwright = await api();
+            const chip = await nandwright.chips.open(file('chips', 'Veto.hdl'));
+            const circuit = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+            const pin = (name: string) => chip.snapshot().state?.pins.find((p) => p.name === name)?.bits;
+            // A flip in the simulator shows in the diagram...
+            await chip.simulate({ type: 'set', pin: 'a', value: 1 });
+            await chip.simulate({ type: 'set', pin: 'b', value: 1 });
+            await until('the diagram to update', async () => {
+                await circuit.settled();
+                return netOf(circuit, 'pass') === 1;
+            });
+            const sent = lastValues(circuit);
+            assert.ok(sent?.type === 'values' && sent.cause === 'external');
+            // ...and one in the diagram shows in the simulator.
+            await circuit.simulate({ type: 'set', pin: 'veto', value: 1 });
+            await until('the simulator to update', async () => {
+                await chip.settled();
+                return pin('veto') === 1 && pin('pass') === 0;
+            });
+            chip.panel.dispose();
+            // The diagram keeps the session when the simulator closes.
+            await circuit.simulate({ type: 'set', pin: 'veto', value: 0 });
+            assert.equal(netOf(circuit, 'pass'), 1);
+            circuit.panel.dispose();
+        });
+
+        it('a click on a part or a wire selects its part statements', async () => {
+            const nandwright = await api();
+            const editor = await open('chips', 'Veto.hdl');
+            const panel = await nandwright.circuits.open(editor.document.uri);
+            const selected = (name: string) => {
+                const shown = vscode.window.visibleTextEditors.find((e) => e.document.uri.fsPath.endsWith(name));
+                return shown ? shown.document.getText(shown.selection) : undefined;
+            };
+            await panel.simulate({ type: 'reveal', part: 1 });
+            await until('the Not statement to be selected', () => selected('Veto.hdl')?.startsWith('Not(in=veto, out=allowed)'));
+            const vote = panel.snapshot().diagram!.nets.findIndex((net) => net.name === 'vote');
+            await panel.simulate({ type: 'reveal', net: vote });
+            await until('the first statement using vote to be selected', () => selected('Veto.hdl')?.startsWith('Majority(a=a'));
+            // Drilled in, the part is in the other chip's file.
+            await panel.simulate({ type: 'drill', path: [0] });
+            await panel.simulate({ type: 'reveal', part: 3 });
+            await until('the Or statement of Majority to be selected', () => selected('Majority.hdl')?.startsWith('Or(a=ab, b=ac, out=abOrAc)'));
+            panel.panel.dispose();
+        });
+
+        it('the editor cursor highlights its part and net', async () => {
+            const nandwright = await api();
+            const editor = await open('chips', 'Veto.hdl');
+            const panel = await nandwright.circuits.open(editor.document.uri);
+            const line = editor.document.getText().split('\n').findIndex((text) => text.includes('And(a=vote'));
+            const column = editor.document.lineAt(line).text.indexOf('vote') + 1;
+            editor.selection = new vscode.Selection(line, column, line, column);
+            await until('a highlight', () => {
+                const last = [...panel.posted].reverse().find((m) => m.type === 'highlight');
+                return last?.type === 'highlight' && last.part === 2 && last.net === panel.snapshot().diagram!.nets.findIndex((n) => n.name === 'vote');
+            });
+            panel.panel.dispose();
+        });
+
+        describe('races', () => {
+            it('a click sent about the old chip is not applied to the chip switched to', async () => {
+                const nandwright = await api();
+                const panel = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+                const before = panel.snapshot().token;
+                // The switch comes first; the click (on Veto's `a`, a pin Majority has too) after it.
+                const switching = panel.showChip(file('chips', 'Majority.hdl'));
+                const clicked = panel.simulate({ type: 'set', pin: 'a', value: 1, diagram: before });
+                await Promise.all([switching, clicked]);
+                assert.equal(panel.snapshot().diagram?.chip, 'Majority');
+                assert.notEqual(panel.snapshot().token, before);
+                assert.equal(netOf(panel, 'a'), 0, 'the click was dropped');
+                // A click on the diagram shown works.
+                await panel.simulate({ type: 'set', pin: 'a', value: 1, diagram: panel.snapshot().token });
+                assert.equal(netOf(panel, 'a'), 1);
+                panel.panel.dispose();
+            });
+
+            it('a step in the simulator taken just as the diagram switches chips does not reach the new chip', async () => {
+                const nandwright = await api();
+                const chip = await nandwright.chips.open(file('chips', 'Accumulator.hdl'));
+                const circuit = await nandwright.circuits.open(file('chips', 'Accumulator.hdl'));
+                await circuit.settled();
+                const switching = circuit.showChip(file('chips', 'Majority.hdl'));
+                const sent = circuit.posted.length;
+                await chip.simulate({ type: 'action', action: 'step' });
+                await switching;
+                await circuit.settled();
+                assert.equal(circuit.snapshot().diagram?.chip, 'Majority');
+                const late = circuit.posted.slice(sent).filter((m) => m.type === 'values' && m.cause === 'external');
+                assert.deepEqual(late, [], 'no values were fetched for the step on Accumulator');
+                chip.panel.dispose();
+                circuit.panel.dispose();
+            });
+
+            it('steps taken quickly in the diagram are each recorded in the simulator history, in order', async () => {
+                const nandwright = await api();
+                const chip = await nandwright.chips.open(file('chips', 'Accumulator.hdl'));
+                const circuit = await nandwright.circuits.open(file('chips', 'Accumulator.hdl'));
+                await circuit.simulate({ type: 'set', pin: 'in', value: 3 });
+                await circuit.simulate({ type: 'set', pin: 'add', value: 1 });
+                await Promise.all([circuit.simulate({ type: 'clock', action: 'step' }), circuit.simulate({ type: 'clock', action: 'step' })]);
+                await chip.settled();
+                const steps = chip.snapshot().history.map((step) => [step.time, step.pins.find((pin) => pin.name === 'out')?.bits]);
+                assert.deepEqual(steps, [
+                    ['1', 3],
+                    ['2', 6],
+                ]);
+                chip.panel.dispose();
+                circuit.panel.dispose();
+            });
+
+            it('R3: Reset then Step clicked quickly in the diagram: the step runs on the reset chip, not dropped', async () => {
+                const nandwright = await api();
+                const chip = await nandwright.chips.open(file('chips', 'Accumulator.hdl'));
+                const circuit = await nandwright.circuits.open(file('chips', 'Accumulator.hdl'));
+                await circuit.simulate({ type: 'set', pin: 'in', value: 7 });
+                await circuit.simulate({ type: 'set', pin: 'add', value: 1 });
+                await circuit.simulate({ type: 'clock', action: 'step' });
+                await circuit.simulate({ type: 'clock', action: 'step' });
+                assert.equal(netOf(circuit, 'out'), 14);
+                // Both clicks are made before the reset has replaced the diagram.
+                await Promise.all([circuit.simulate({ type: 'clock', action: 'reset' }), circuit.simulate({ type: 'clock', action: 'step' })]);
+                await chip.settled();
+                assert.equal(circuit.snapshot().values?.time, '1', 'one step after the reset');
+                assert.equal(netOf(circuit, 'out'), 7);
+                assert.equal(chip.snapshot().state?.time, '1', 'the simulator shows the same');
+                chip.panel.dispose();
+                circuit.panel.dispose();
+            });
+
+            it('R4: a Reset that fails leaves the error in both panels, also after a Step in either', async () => {
+                const nandwright = await api();
+                const editor = await open('chips', 'Accumulator.hdl');
+                const chip = await nandwright.chips.open(editor.document.uri);
+                const circuit = await nandwright.circuits.open(editor.document.uri);
+                const original = editor.document.getText();
+                try {
+                    await replaceAll(editor, original.replace(/\bRegister\(/, 'Registerr('));
+                    await until('both panels to show the error', async () => {
+                        await Promise.all([chip.settled(), circuit.settled()]);
+                        return /Registerr/.test(chip.snapshot().problem ?? '') && /Registerr/.test(circuit.snapshot().problem ?? '');
+                    });
+                    await circuit.simulate({ type: 'clock', action: 'reset' });
+                    await chip.settled();
+                    assert.match(chip.snapshot().problem ?? '', /Registerr/, 'the simulator still shows why the chip does not load');
+                    assert.match(circuit.snapshot().problem ?? '', /Registerr/);
+                    // The old circuit runs on, but a step does not make the error go away.
+                    await chip.simulate({ type: 'action', action: 'step' });
+                    await circuit.simulate({ type: 'clock', action: 'step' });
+                    await chip.settled();
+                    assert.equal(chip.snapshot().state?.time, '2', 'the old circuit stepped');
+                    assert.match(chip.snapshot().problem ?? '', /Registerr/);
+                    assert.match(circuit.snapshot().problem ?? '', /Registerr/);
+                    // A build that works clears it in both.
+                    await replaceAll(editor, original);
+                    await until('both panels to recover', async () => {
+                        await Promise.all([chip.settled(), circuit.settled()]);
+                        return chip.snapshot().problem === null && circuit.snapshot().problem === null;
+                    });
+                } finally {
+                    await replaceAll(editor, original);
+                    await editor.document.save();
+                    chip.panel.dispose();
+                    circuit.panel.dispose();
+                }
+            });
+
+            it('R6: a drilled part that becomes built-in: the diagram goes up to the deepest level that exists, not grey', async () => {
+                const nandwright = await api();
+                const editor = await open('chips', 'Veto.hdl');
+                const chip = await nandwright.chips.open(editor.document.uri);
+                const circuit = await nandwright.circuits.open(editor.document.uri);
+                const original = editor.document.getText();
+                try {
+                    await circuit.simulate({ type: 'drill', path: [0] });
+                    assert.equal(circuit.snapshot().diagram?.chip, 'Majority');
+                    await replaceAll(editor, original.replace('Majority(a=a, b=b, c=c, out=vote, out=most);', 'Mux(a=a, b=b, sel=c, out=vote, out=most);'));
+                    await until('the diagram to go up to Veto', async () => {
+                        await Promise.all([chip.settled(), circuit.settled()]);
+                        return circuit.snapshot().diagram?.chip === 'Veto' && circuit.snapshot().diagram?.parts[0].chip === 'Mux';
+                    });
+                    assert.deepEqual(circuit.snapshot().path, []);
+                    assert.equal(circuit.snapshot().problem, null);
+                    // A change in the simulator shows; nothing is greyed.
+                    await chip.simulate({ type: 'set', pin: 'veto', value: 1 });
+                    await circuit.settled();
+                    assert.equal(circuit.snapshot().problem, null);
+                    assert.equal(netOf(circuit, 'veto'), 1);
+                } finally {
+                    await replaceAll(editor, original);
+                    await editor.document.save();
+                    chip.panel.dispose();
+                    circuit.panel.dispose();
+                }
+            });
+
+            it('after the simulator restarts, an old diagram never reaches the session of another chip', async function () {
+                const nandwright = await api();
+                if (!nandwright.testHooks) {
+                    this.skip();
+                }
+                const circuit = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+                await circuit.simulate({ type: 'set', pin: 'a', value: 1 });
+                await nandwright.testHooks!.crashWorker();
+                // The new worker numbers its sessions from a range of its own.
+                const probe = await nandwright.runtime.call<{ session: number }>({ op: 'chip.open', path: file('chips', 'Parity4.hdl').fsPath });
+                assert.ok(probe.session >= firstSession(1, 0), `session ${probe.session} is in the new worker's range`);
+                nandwright.runtime.close(probe.session);
+                const chip = await nandwright.chips.open(file('chips', 'Majority.hdl'));
+                await chip.simulate({ type: 'set', pin: 'a', value: 1 });
+                // The diagram's hub opened its chip again ...
+                await until('the diagram to reload Veto', async () => {
+                    await circuit.settled();
+                    return circuit.snapshot().problem === null && circuit.snapshot().diagram?.chip === 'Veto';
+                });
+                await circuit.simulate({ type: 'set', pin: 'veto', value: 1 });
+                assert.equal(netOf(circuit, 'veto'), 1);
+                // ... and closing it closes Veto's session, not Majority's.
+                circuit.panel.dispose();
+                await chip.simulate({ type: 'set', pin: 'b', value: 1 });
+                const pin = (name: string) => chip.snapshot().state?.pins.find((p) => p.name === name)?.bits;
+                assert.equal(pin('out'), 1, 'Majority is still running');
+                chip.panel.dispose();
+            });
+
+            it('R6: after a worker crash both panels recover by themselves, and the diagram keeps its drill path', async function () {
+                const nandwright = await api();
+                if (!nandwright.testHooks) {
+                    this.skip();
+                }
+                const chip = await nandwright.chips.open(file('chips', 'Veto.hdl'));
+                const circuit = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
+                await circuit.simulate({ type: 'set', pin: 'a', value: 1 });
+                await circuit.simulate({ type: 'drill', path: [0] });
+                const before = circuit.snapshot().diagram;
+                await nandwright.testHooks!.crashWorker();
+                await until('the diagram to come back', async () => {
+                    await Promise.all([chip.settled(), circuit.settled()]);
+                    return circuit.snapshot().diagram !== before && circuit.snapshot().diagram?.chip === 'Majority';
+                });
+                assert.deepEqual(circuit.snapshot().path, [0], 'the drill path was kept');
+                assert.equal(circuit.snapshot().problem, null);
+                assert.equal(chip.snapshot().problem, null);
+                assert.ok(chip.snapshot().state, 'the simulator shows the chip again');
+                // One session again, shared; top-level inputs (a = 1) were restored on reopen.
+                assert.equal(chip.snapshot().state?.pins.find((p) => p.name === 'a')?.bits, 1, 'input a restored after crash');
+                await chip.simulate({ type: 'set', pin: 'b', value: 1 });
+                await circuit.settled();
+                assert.equal(netOf(circuit, 'out'), 1);
+                chip.panel.dispose();
+                circuit.panel.dispose();
+            });
+
+            it('R7: the crash hook exists only when the extension runs under test', async () => {
+                const nandwright = await api();
+                assert.equal((nandwright.runtime as unknown as Record<string, unknown>).crashForTests, undefined, 'no crash method on the runtime');
+                if (process.env.NANDWRIGHT_TEST_VSIX) {
+                    // The installed VSIX runs as a user's extension (ExtensionMode.Production).
+                    assert.equal(nandwright.testHooks, undefined);
+                } else {
+                    assert.equal(typeof nandwright.testHooks?.crashWorker, 'function');
+                }
+            });
+        });
+
+        describe('the runtime client with a stand-in worker', () => {
+            let folder: string;
+            const output = { appendLine: () => undefined } as unknown as vscode.OutputChannel;
+            /** An extension folder whose `dist/runtime.js` is `source`. */
+            const withWorker = (source: string) => {
+                folder = fs.mkdtempSync(path.join(os.tmpdir(), 'nandwright worker '));
+                fs.mkdirSync(path.join(folder, 'dist'));
+                fs.writeFileSync(path.join(folder, 'dist', 'runtime.js'), source);
+                return folder;
+            };
+            afterEach(() => removeFolder(folder));
+
+            it('a reply that says the engine was replaced (`crashed`) ends every session first, and panels reopen and redraw', async () => {
+                const runtime = new Runtime(
+                    withWorker(`
+                        const { parentPort } = require('node:worker_threads');
+                        let nextSession = 1;
+                        let live = new Set();
+                        let trapped = false;
+                        const state = (session) => ({ chip: 'Fake', clocked: true, time: '0', revision: 1, pins: [{ name: 'a', role: 'input', width: 1, bits: 0 }] });
+                        const diagram = () => ({
+                            revision: 1, path: [], chip: 'Fake', file: null, breadcrumb: [],
+                            inputs: [{ name: 'a', width: 1 }], outputs: [],
+                            nets: [{ name: 'a', width: 1, kind: 'input' }], parts: [],
+                            values: { revision: 1, path: [], time: '0', clocked: true, nets: [0], parts: [] },
+                        });
+                        parentPort.on('message', (m) => {
+                            const req = m.request;
+                            let reply;
+                            if (req.op === 'overlay.replace' || req.op === 'close') {
+                                reply = {};
+                            } else if (req.op === 'chip.open') {
+                                const session = nextSession++;
+                                live.add(session);
+                                reply = { ...state(session), session };
+                            } else if (req.op === 'chip.step' && !trapped) {
+                                trapped = true;
+                                live.clear();
+                                reply = { error: { message: 'trap', crashed: true } };
+                            } else if (!live.has(req.session)) {
+                                reply = { error: { message: 'this session has ended', code: 'session-ended' } };
+                            } else if (req.op === 'chip.diagram') {
+                                reply = diagram();
+                            } else {
+                                reply = state(req.session);
+                            }
+                            parentPort.postMessage({ type: 'reply', id: m.id, reply });
+                        });`),
+                    output,
+                );
+                const sessions = new ChipSessions(runtime);
+                const fakeWebview = () => ({
+                    onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+                    postMessage: async () => true,
+                });
+                const fakePanel = () =>
+                    ({ webview: fakeWebview(), onDidDispose: () => new vscode.Disposable(() => undefined), title: '', viewColumn: vscode.ViewColumn.One }) as unknown as vscode.WebviewPanel;
+                const host = { settings: () => ({ animate: false, radix: 'dec' }), log: () => undefined } as unknown as CircuitPanels;
+                const circuit = new CircuitPanel(file('chips', 'Veto.hdl'), fakePanel(), sessions, host, () => undefined);
+                try {
+                    await circuit.load();
+                    const tokenBefore = circuit.snapshot().token;
+                    const hub = sessions.hub(file('chips', 'Veto.hdl').fsPath)!;
+                    const sessionBefore = hub.status().session;
+                    assert.equal(sessionBefore, 1);
+
+                    const order: string[] = [];
+                    const sub = runtime.onDidStop(() => order.push('stop'));
+                    const heard: string[] = [];
+                    const spy = { hubEvent: (e: HubEvent) => heard.push(`${e.op}${e.outcome.ok ? '' : `!${e.outcome.error.code}`}`) };
+                    sessions.join(file('chips', 'Veto.hdl').fsPath, spy);
+
+                    const stepEvent = await hub.request(circuit, { op: 'step' });
+                    order.push('reply');
+                    sub.dispose();
+                    await until('the panel to reopen and redraw after engine trap', async () => {
+                        await circuit.settled();
+                        return hub.status().session === 2 && circuit.snapshot().token > tokenBefore;
+                    });
+                    assert.deepEqual(order, ['stop', 'reply']);
+                    assert.equal(!stepEvent!.outcome.ok && stepEvent!.outcome.error.code, 'stopped');
+                    assert.ok(heard.includes('lost!stopped'), heard.join(', '));
+                    assert.ok(heard.includes('open'), heard.join(', '));
+                    assert.equal(hub.status().session, 2, 'reopened on a fresh session');
+                    assert.equal(circuit.snapshot().problem, null);
+                    assert.ok(circuit.snapshot().token > tokenBefore, 'diagram redrawn');
+                    assert.ok(circuit.posted.some((m) => m.type === 'diagram' && m.token === circuit.snapshot().token));
+                    sessions.leave(file('chips', 'Veto.hdl').fsPath, spy);
+                } finally {
+                    circuit.dispose();
+                    sessions.dispose();
+                    runtime.dispose();
+                }
+            });
+
+            it('F2: a live worker that never replies times out, terminates, recovers, and respects the restart budget', async () => {
+                // Worker 0 hangs on `chip.step`; worker 1 answers normally.
+                const runtime = new Runtime(
+                    withWorker(`
+                        const { parentPort, workerData } = require('node:worker_threads');
+                        let nextSession = (workerData.worker + 1) * 100;
+                        const state = () => ({ chip: 'Fake', clocked: true, time: '1', revision: 1, pins: [] });
+                        parentPort.on('message', (m) => {
+                            if (m.type === 'runTest') {
+                                setTimeout(() => parentPort.postMessage({ type: 'reply', id: m.id, reply: { state: 'finished', events: [], failures: [], commands: 0, echo: null } }), 250);
+                                return;
+                            }
+                            const req = m.request;
+                            if (workerData.worker === 0 && req.op === 'chip.step') {
+                                return; // hang forever on worker 0
+                            }
+                            if (req.op === 'overlay.replace' || req.op === 'close') {
+                                parentPort.postMessage({ type: 'reply', id: m.id, reply: {} });
+                            } else if (req.op === 'chip.open') {
+                                parentPort.postMessage({ type: 'reply', id: m.id, reply: { ...state(), session: nextSession++ } });
+                            } else {
+                                parentPort.postMessage({ type: 'reply', id: m.id, reply: state() });
+                            }
+                        });`),
+                    output,
+                    { callTimeoutMs: 120 },
+                );
+                const sessions = new ChipSessions(runtime);
+                try {
+                    const events: HubEvent[] = [];
+                    const hub = sessions.join(file('chips', 'Veto.hdl').fsPath, { hubEvent: (e) => events.push(e) });
+                    await hub.request(undefined, { op: 'state' });
+                    assert.equal(hub.status().session, 100);
+                    // A streaming test run is NOT killed by the single-call deadline.
+                    const testStatus = await runtime.runTest(100, {}, () => undefined);
+                    assert.equal(testStatus.state, 'finished');
+                    // Now trigger the hang on worker 0: deadline fires, terminates worker 0, hub recovers on worker 1.
+                    const hung = await hub.request(undefined, { op: 'step' });
+                    assert.equal(!hung!.outcome.ok && hung!.outcome.error.code, 'stopped');
+                    await until('recovery on worker 1', async () => {
+                        await hub.whenIdle();
+                        return hub.status().session === 200;
+                    });
+                    assert.ok(events.some((e) => e.op === 'lost'));
+                    const recovered = await hub.request(undefined, { op: 'step' });
+                    assert.ok(recovered?.outcome.ok, 'subsequent op succeeds on the fresh worker');
+                } finally {
+                    sessions.dispose();
+                    runtime.dispose();
+                }
+
+                // A worker that always hangs exhausts the restart budget and halts.
+                const spawns = path.join(os.tmpdir(), `nandwright-hang-${process.pid}-${Date.now()}.log`);
+                const hungRuntime = new Runtime(
+                    withWorker(`
+                        require('node:fs').appendFileSync(${JSON.stringify(spawns)}, 'x');
+                        const { parentPort } = require('node:worker_threads');
+                        parentPort.on('message', (m) => {
+                            if (m.request?.op === 'overlay.replace') {
+                                parentPort.postMessage({ type: 'reply', id: m.id, reply: {} });
+                            }
+                            // never reply to chip.open
+                        });`),
+                    output,
+                    { callTimeoutMs: 80 },
+                );
+                const hungSessions = new ChipSessions(hungRuntime);
+                try {
+                    const hub = hungSessions.join(file('chips', 'Veto.hdl').fsPath, { hubEvent: () => undefined });
+                    void hub.request(undefined, { op: 'state' });
+                    await until('hung worker to exhaust restart budget', () => hub.status().halted !== null);
+                    await new Promise((resolve) => setTimeout(resolve, 300));
+                    assert.equal(fs.readFileSync(spawns, 'utf8').length, 4, 'first start plus three automatic restarts');
+                } finally {
+                    hungSessions.dispose();
+                    hungRuntime.dispose();
+                    fs.rmSync(spawns, { force: true });
+                }
+            });
+
+            it('R2: a worker that cannot start is started at most four times, then the panels wait for Retry', async () => {
+                const spawns = path.join(os.tmpdir(), `nandwright-spawns-${process.pid}-${Date.now()}.log`);
+                const runtime = new Runtime(
+                    withWorker(`
+                        require('node:fs').appendFileSync(${JSON.stringify(spawns)}, 'x');
+                        throw new Error('engine.wasm is missing');`),
+                    output,
+                );
+                const sessions = new ChipSessions(runtime);
+                try {
+                    const events: HubEvent[] = [];
+                    const hub = sessions.join(file('chips', 'Veto.hdl').fsPath, { hubEvent: (event) => events.push(event) });
+                    void hub.request(undefined, { op: 'state' });
+                    await until('the hub to give up', () => hub.status().halted !== null);
+                    await new Promise((resolve) => setTimeout(resolve, 1500));
+                    assert.equal(fs.readFileSync(spawns, 'utf8').length, 4, 'the first start and three restarts');
+                    assert.equal(events.filter((e) => e.op === 'halted').length, 1);
+                    // Retry is one more start.
+                    await sessions.retry(undefined);
+                    await until('the hub to give up again', () => hub.status().halted !== null);
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                    assert.equal(fs.readFileSync(spawns, 'utf8').length, 5);
+                } finally {
+                    sessions.dispose();
+                    runtime.dispose();
+                    fs.rmSync(spawns, { force: true });
+                }
+            });
+        });
+
+        describe('panels on one hub, with a fake simulator', () => {
+            const FAKE = file('chips', 'Fake.hdl');
+            let fake: FakeRuntime;
+            let sessions: ChipSessions;
+            let circuit: CircuitPanel;
+            let chip: ChipPanel;
+            let chipMessages: unknown[];
+            const webview = (log?: unknown[]) => ({
+                onDidReceiveMessage: () => new vscode.Disposable(() => undefined),
+                postMessage: async (message: unknown) => {
+                    log?.push(message);
+                    return true;
+                },
+            });
+            const fakePanel = (log?: unknown[]) =>
+                ({ webview: webview(log), onDidDispose: () => new vscode.Disposable(() => undefined), title: '', viewColumn: vscode.ViewColumn.One }) as unknown as vscode.WebviewPanel;
+            const host = { settings: () => ({ animate: false, radix: 'dec' }), log: () => undefined } as unknown as CircuitPanels;
+            const tests = {
+                onDidChangeStatus: () => new vscode.Disposable(() => undefined),
+                statusOf: () => ({ status: 'none' }),
+                runScripts: async () => [],
+            } as unknown as TestExplorer;
+            /** A message from the webview, as it arrives: not waited for. Missing tokens default to the current view. */
+            const send = (panel: CircuitPanel | ChipPanel, message: Record<string, unknown>) => {
+                let filled = message;
+                if (panel instanceof CircuitPanel) {
+                    if (['set', 'drill', 'reveal'].includes(String(message.type)) && message.diagram === undefined) {
+                        filled = { ...message, diagram: panel.snapshot().token };
+                    } else if (message.type === 'clock' && message.target === undefined) {
+                        filled = { ...message, target: panel.snapshot().target };
+                    }
+                } else {
+                    if (['set', 'setAll'].includes(String(message.type))) {
+                        filled = {
+                            ...message,
+                            ...(message.build === undefined ? { build: panel.snapshot().build } : {}),
+                            ...(message.target === undefined ? { target: panel.snapshot().target } : {}),
+                        };
+                    } else if (message.type === 'action' && message.target === undefined) {
+                        filled = { ...message, target: panel.snapshot().target };
+                    }
+                }
+                return (panel as unknown as { receive(m: unknown): Promise<unknown> }).receive(filled);
+            };
+            const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+            const settled = () => Promise.all([circuit.settled(), chip.settled()]);
+
+            beforeEach(async () => {
+                fake = new FakeRuntime();
+                sessions = new ChipSessions(fake);
+                chipMessages = [];
+                circuit = new CircuitPanel(FAKE, fakePanel(), sessions, host, () => undefined);
+                chip = new ChipPanel(FAKE, fakePanel(chipMessages), sessions, tests, () => undefined);
+                await circuit.load();
+                await chip.load();
+                assert.equal(circuit.snapshot().diagram?.revision, 1);
+                assert.equal(fake.count('chip.open'), 1, 'one session for both');
+            });
+            afterEach(() => {
+                circuit.dispose();
+                chip.dispose();
+                sessions.dispose();
+            });
+
+            it('R1: a click on a diagram of build 1 that arrives after the simulator rebuilt the chip is not applied to build 2', async () => {
+                const shown = circuit.snapshot().token;
+                fake.hold('chip.diagram');
+                await send(chip, { type: 'action', action: 'reset' });
+                assert.equal(circuit.snapshot().token, shown, 'the new diagram has not come yet');
+                const sets = fake.count('chip.set');
+                const clicked = send(circuit, { type: 'set', pin: 'a', value: 1 });
+                await flush();
+                fake.release('chip.diagram');
+                await clicked;
+                await settled();
+                assert.equal(fake.count('chip.set'), sets, 'the input was not set on build 2');
+                assert.equal(fake.sessions.get(1)!.pins.get('a'), undefined);
+                assert.ok(circuit.posted.some((m) => m.type === 'note' && /rebuilt/.test(m.message)), 'the student is told to click again');
+                assert.equal(circuit.snapshot().diagram?.revision, 2);
+                assert.equal(circuit.snapshot().problem, null, 'not an error');
+                // A click on the new diagram works.
+                await circuit.simulate({ type: 'set', pin: 'a', value: 1 });
+                assert.equal(fake.sessions.get(1)!.pins.get('a'), 1);
+            });
+
+            it('R3: Reset then Step in the diagram: reset, then a step of the new build; the step is not dropped', async () => {
+                fake.hold('chip.reset');
+                const reset = send(circuit, { type: 'clock', action: 'reset' });
+                const step = send(circuit, { type: 'clock', action: 'step' });
+                await flush();
+                fake.release('chip.reset');
+                await Promise.all([reset, step]);
+                await settled();
+                assert.deepEqual(
+                    fake.ops().filter((op) => op === 'chip.reset' || op === 'chip.step'),
+                    ['chip.reset', 'chip.step'],
+                );
+                assert.equal(circuit.snapshot().diagram?.revision, 2);
+                assert.equal(circuit.snapshot().values?.time, '1');
+                assert.equal(chip.snapshot().state?.time, '1');
+            });
+
+            it('R4: the simulator records steps in the engine order when the diagram\'s values come late', async () => {
+                fake.hold('chip.values');
+                const first = send(circuit, { type: 'clock', action: 'step' });
+                await flush();
+                // The diagram's values request is waiting; the simulator steps meanwhile.
+                const second = send(chip, { type: 'action', action: 'step' });
+                await flush();
+                fake.release('chip.values');
+                await Promise.all([first, second]);
+                await settled();
+                assert.deepEqual(
+                    chip.snapshot().history.map((step) => step.time),
+                    ['1', '2'],
+                );
+                assert.equal(circuit.snapshot().values?.time, '2');
+            });
+
+            it('R4: a step in one panel does not clear the build error the other shows', async () => {
+                fake.buildError = 'unknown chip `Nott`';
+                await circuit.simulate({ type: 'clock', action: 'reset' });
+                await settled();
+                assert.match(chip.snapshot().problem ?? '', /Nott/);
+                assert.match(circuit.snapshot().problem ?? '', /Nott/);
+                await chip.simulate({ type: 'action', action: 'step' });
+                await circuit.simulate({ type: 'clock', action: 'step' });
+                await settled();
+                assert.equal(chip.snapshot().state?.time, '2', 'the old circuit runs on');
+                assert.match(chip.snapshot().problem ?? '', /Nott/, 'the simulator still shows it');
+                assert.match(circuit.snapshot().problem ?? '', /Nott/, 'the diagram still shows it');
+                fake.buildError = undefined;
+                await chip.simulate({ type: 'action', action: 'reset' });
+                await settled();
+                assert.equal(chip.snapshot().problem, null);
+                assert.equal(circuit.snapshot().problem, null);
+            });
+
+            it('R6: a drill path the new build does not have walks up to the deepest level it has, without greying', async () => {
+                fake.paths = new Set(['0', '0/1']);
+                await chip.simulate({ type: 'action', action: 'reset' });
+                await circuit.simulate({ type: 'drill', path: [0, 1] });
+                assert.equal(circuit.snapshot().diagram?.chip, 'Part0/1');
+                // An edit that turns part 1 of part 0 into a built-in, built by the simulator panel.
+                fake.paths = new Set(['0']);
+                await chip.simulate({ type: 'action', action: 'reset' });
+                await settled();
+                assert.deepEqual(circuit.snapshot().path, [0]);
+                assert.equal(circuit.snapshot().diagram?.chip, 'Part0');
+                assert.equal(circuit.snapshot().problem, null);
+                await chip.simulate({ type: 'set', pin: 'a', value: 1 });
+                await settled();
+                assert.equal(circuit.snapshot().problem, null);
+                assert.deepEqual(circuit.snapshot().values?.path, [0]);
+            });
+
+            it('R6: a worker that stops while the drilled diagram loads keeps the drill path', async () => {
+                fake.hold('chip.diagram');
+                const drilled = send(circuit, { type: 'drill', path: [0] });
+                await flush();
+                fake.stop();
+                await drilled;
+                fake.release('chip.diagram');
+                await settled();
+                assert.deepEqual(circuit.snapshot().path, [0]);
+                assert.equal(circuit.snapshot().diagram?.chip, 'Part0');
+                assert.equal(circuit.snapshot().problem, null);
+                assert.ok(chip.snapshot().state, 'the simulator shows the reopened chip');
+                assert.equal(fake.count('chip.open'), 2, 'opened once again for both');
+            });
+
+            it('values that do not fit the diagram are never drawn on it: a mismatched chip.values reply brings the new diagram', async () => {
+                // Start a normal rev-1 step so the circuit panel genuinely requests chip.values.
+                fake.hold('chip.values');
+                await send(chip, { type: 'action', action: 'step' });
+                await until('chip.values to be in flight', () => fake.waiting('chip.values') === 1);
+                const sent = circuit.posted.length;
+                const valuesCount = fake.count('chip.values');
+                // Meanwhile the engine moves to revision 5, so the in-flight chip.values replies with revision 5.
+                fake.sessions.get(1)!.revision = 5;
+                fake.release('chip.values');
+                await settled();
+                assert.equal(fake.count('chip.values'), valuesCount, 'the mismatched chip.values reply actually ran');
+                assert.deepEqual(
+                    circuit.posted.slice(sent).map((m) => m.type),
+                    ['diagram'],
+                    'the mismatched values were not drawn; the new diagram was fetched instead',
+                );
+                assert.equal(circuit.snapshot().diagram?.revision, 5);
+            });
+
+            it('F1: simulator set and setAll from build 1 are rejected after a peer resets to build 2', async () => {
+                const oldBuild = chip.snapshot().build!;
+                const target = chip.snapshot().target;
+                assert.equal(oldBuild.revision, 1);
+                await circuit.simulate({ type: 'clock', action: 'reset' });
+                await settled();
+                assert.equal(chip.snapshot().build?.revision, 2);
+
+                const setsBefore = fake.count('chip.set');
+                const messagesBefore = chipMessages.length;
+                await send(chip, { type: 'set', pin: 'a', value: 1, build: oldBuild, target });
+                await send(chip, { type: 'setAll', values: { a: 1 }, build: oldBuild, target });
+                await settled();
+                assert.equal(fake.count('chip.set'), setsBefore, 'stale simulator inputs never mutated build 2');
+                assert.equal(fake.sessions.get(1)!.pins.get('a'), undefined);
+                const posted = chipMessages.slice(messagesBefore) as { type: string; pin?: string; message?: string }[];
+                assert.ok(posted.some((m) => m.type === 'rejected' && m.pin === 'a' && /built again/.test(m.message ?? '')), 'rejected feedback sent for set');
+                assert.ok(posted.some((m) => m.type === 'note' && /built again/.test(m.message ?? '')), 'note sent for stale setAll');
+            });
+
+            it('F1: inputs and clock/reset actions from an old file target are dropped after switching chips', async () => {
+                const oldChipTarget = chip.snapshot().target;
+                const oldChipBuild = chip.snapshot().build!;
+                const oldCircuitTarget = circuit.snapshot().target;
+                const OTHER = file('chips', 'Other.hdl');
+                await Promise.all([chip.showChip(OTHER), circuit.showChip(OTHER)]);
+                await settled();
+                const otherSession = sessions.hub(OTHER.fsPath)!.status().session!;
+
+                await send(chip, { type: 'set', pin: 'a', value: 1, build: oldChipBuild, target: oldChipTarget });
+                await send(chip, { type: 'setAll', values: { a: 1 }, build: oldChipBuild, target: oldChipTarget });
+                await send(chip, { type: 'action', action: 'step', target: oldChipTarget });
+                await send(chip, { type: 'action', action: 'reset', target: oldChipTarget });
+                await send(circuit, { type: 'clock', action: 'step', target: oldCircuitTarget });
+                await send(circuit, { type: 'clock', action: 'reset', target: oldCircuitTarget });
+                await settled();
+
+                assert.equal(fake.sessions.get(otherSession)!.pins.get('a'), undefined, 'old set/setAll did not touch the new chip');
+                assert.equal(fake.sessions.get(otherSession)!.time, 0, 'old step did not clock the new chip');
+                assert.equal(fake.sessions.get(otherSession)!.revision, 1, 'old reset did not rebuild the new chip');
+            });
+
+            it('F4: a drill or breadcrumb click made on build 1 while build 2 is pending is rejected and never opens build 2\'s part', async () => {
+                const token1 = circuit.snapshot().token;
+                fake.hold('chip.diagram');
+                // Simulator resets to build 2; circuit's replacement diagram for [] is held so token1 is still current.
+                await send(chip, { type: 'action', action: 'reset' });
+                assert.equal(circuit.snapshot().token, token1);
+                const drillSent = circuit.posted.length;
+                const drilled = send(circuit, { type: 'drill', path: [0], diagram: token1 });
+                await flush();
+                fake.release('chip.diagram');
+                await drilled;
+                await settled();
+                assert.equal(
+                    fake.calls.some((c) => c.op === 'chip.diagram' && Array.isArray(c.path) && c.path.length === 1),
+                    false,
+                    'part 0 of build 2 was never fetched',
+                );
+                assert.deepEqual(circuit.snapshot().path, [], 'stayed at root');
+                assert.equal(circuit.snapshot().diagram?.revision, 2);
+                assert.equal(circuit.snapshot().diagram?.chip, 'Fake');
+                assert.ok(circuit.posted.slice(drillSent).some((m) => m.type === 'note' && /rebuilt/.test(m.message)));
+
+                // Now drill legitimately into [0] on build 2, then test a stale breadcrumb click back to [].
+                await circuit.simulate({ type: 'drill', path: [0] });
+                assert.deepEqual(circuit.snapshot().path, [0]);
+                const token2 = circuit.snapshot().token;
+                fake.hold('chip.diagram');
+                await send(chip, { type: 'action', action: 'reset' });
+                const crumbSent = circuit.posted.length;
+                const crumb = send(circuit, { type: 'drill', path: [], diagram: token2 });
+                await flush();
+                fake.release('chip.diagram');
+                await crumb;
+                await settled();
+                assert.deepEqual(circuit.snapshot().path, [0], 'stale breadcrumb click did not navigate');
+                assert.equal(circuit.snapshot().diagram?.revision, 3);
+                assert.ok(circuit.posted.slice(crumbSent).some((m) => m.type === 'note' && /rebuilt/.test(m.message)));
+            });
+
+            it('F3: both panels show Retry alongside a retained build error after a runtime halt', async () => {
+                const BROKEN = file('chips', 'Broken.hdl');
+                const brokenCircuit = new CircuitPanel(BROKEN, fakePanel(), sessions, host, () => undefined);
+                const brokenChipMessages: unknown[] = [];
+                const brokenChip = new ChipPanel(BROKEN, fakePanel(brokenChipMessages), sessions, tests, () => undefined);
+                try {
+                    fake.buildError = 'unknown chip `Nope`';
+                    await brokenCircuit.load();
+                    await brokenChip.load();
+                    assert.match(brokenCircuit.snapshot().problem ?? '', /Nope/);
+                    assert.match(brokenChip.snapshot().problem ?? '', /Nope/);
+                    assert.equal(brokenCircuit.snapshot().retry, false);
+                    assert.equal(brokenChip.snapshot().retry, false);
+
+                    // Exhaust the restart budget via stops so every hub halts.
+                    fake.broken = true;
+                    fake.stop();
+                    await until('both panels to offer Retry alongside the build error', async () => {
+                        await Promise.all([brokenCircuit.settled(), brokenChip.settled(), settled()]);
+                        return brokenCircuit.snapshot().retry && brokenChip.snapshot().retry;
+                    });
+                    assert.match(brokenCircuit.snapshot().problem ?? '', /Nope/, 'circuit keeps the build error');
+                    assert.match(brokenChip.snapshot().problem ?? '', /Nope/, 'simulator keeps the build error');
+                    assert.ok(brokenCircuit.posted.some((m) => m.type === 'error' && m.retry === true));
+                    assert.ok(brokenChipMessages.some((m) => (m as { retry?: boolean }).retry === true));
+
+                    // Once fixed, Retry works from either panel.
+                    fake.broken = false;
+                    fake.buildError = undefined;
+                    await brokenChip.simulate({ type: 'retry' });
+                    await Promise.all([brokenCircuit.settled(), brokenChip.settled()]);
+                    assert.equal(brokenChip.snapshot().retry, false);
+                    assert.equal(brokenCircuit.snapshot().retry, false);
+                    assert.equal(brokenChip.snapshot().problem, null);
+                    assert.equal(brokenCircuit.snapshot().problem, null);
+                    assert.ok(brokenCircuit.snapshot().diagram);
+                } finally {
+                    brokenCircuit.dispose();
+                    brokenChip.dispose();
+                }
+            });
+
+            it('F2: panels show a non-modal note (not an error banner) when the action backlog is full', async () => {
+                const tinySessions = new ChipSessions(fake, { maxQueuedActions: 2 });
+                const busyCircuit = new CircuitPanel(FAKE, fakePanel(), tinySessions, host, () => undefined);
+                const busyChipMessages: unknown[] = [];
+                const busyChip = new ChipPanel(FAKE, fakePanel(busyChipMessages), tinySessions, tests, () => undefined);
+                try {
+                    await busyCircuit.load();
+                    await busyChip.load();
+                    fake.hold('chip.step');
+                    const running = send(busyCircuit, { type: 'clock', action: 'step' });
+                    await flush();
+                    const q1 = send(busyCircuit, { type: 'clock', action: 'step' });
+                    const q2 = send(busyChip, { type: 'action', action: 'step' });
+                    // Queue is now full (2 queued actions): extra actions from either panel produce a non-modal note.
+                    const circuitBefore = busyCircuit.posted.length;
+                    const chipBefore = busyChipMessages.length;
+                    await send(busyCircuit, { type: 'clock', action: 'step' });
+                    await send(busyChip, { type: 'action', action: 'step' });
+                    assert.ok(busyCircuit.posted.slice(circuitBefore).some((m) => m.type === 'note' && /busy/.test(m.message)));
+                    assert.ok((busyChipMessages.slice(chipBefore) as { type: string; message?: string }[]).some((m) => m.type === 'note' && /busy/.test(m.message ?? '')));
+                    assert.equal(busyCircuit.snapshot().problem, null);
+                    assert.equal(busyChip.snapshot().problem, null);
+                    fake.release('chip.step');
+                    await Promise.all([running, q1, q2]);
+                } finally {
+                    busyCircuit.dispose();
+                    busyChip.dispose();
+                    tinySessions.dispose();
+                }
+            });
+
+            it('R2: after three restarts in a minute both panels show Retry, and Retry brings them back', async () => {
+                fake.broken = true;
+                fake.stop();
+                await until('the panels to offer Retry', async () => {
+                    await settled();
+                    return circuit.snapshot().retry && chip.snapshot().retry;
+                });
+                assert.equal(fake.spawns, 1 + 3, 'three automatic restarts');
+                assert.ok(circuit.posted.some((m) => m.type === 'error' && m.retry === true));
+                assert.ok(chipMessages.some((m) => (m as { retry?: boolean }).retry === true));
+                // Nothing happens by itself any more.
+                await chip.simulate({ type: 'action', action: 'step' });
+                await new Promise((resolve) => setTimeout(resolve, 100));
+                assert.equal(fake.spawns, 4);
+                fake.broken = false;
+                await circuit.simulate({ type: 'retry' });
+                await settled();
+                assert.equal(circuit.snapshot().retry, false);
+                assert.equal(circuit.snapshot().problem, null);
+                assert.equal(chip.snapshot().problem, null);
+                assert.ok(circuit.snapshot().diagram);
+                await chip.simulate({ type: 'action', action: 'step' });
+                assert.equal(chip.snapshot().state?.time, '1');
+            });
+        });
+
+        it('R5: a click on a part of a file that changed on disk since the build selects its line, not stale offsets', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('hub offsets ', ['chips/Veto.hdl', 'chips/Majority.hdl']);
+            const veto = vscode.Uri.file(path.join(folder, 'Veto.hdl'));
+            const majority = path.join(folder, 'Majority.hdl');
+            const panel = await nandwright.circuits.open(veto);
+            try {
+                await panel.simulate({ type: 'drill', path: [0] });
+                assert.equal(panel.snapshot().diagram?.chip, 'Majority');
+                // Majority.hdl was never open. It changes on disk: its offsets move, its lines do not.
+                const text = fs.readFileSync(majority, 'utf8');
+                const line = text.split('\n').findIndex((l) => l.includes('Or(a=ab, b=ac'));
+                fs.writeFileSync(majority, text.replace('    Or(a=ab, b=ac', '      Or(a=ab, b=ac'));
+                await panel.simulate({ type: 'reveal', part: 3 });
+                const shown = await until('the Majority editor', () => vscode.window.visibleTextEditors.find((e) => samePath(e.document.uri.fsPath, majority)));
+                assert.equal(shown.selection.start.line, line);
+                assert.equal(shown.selection.start.character, 0, 'the whole line is selected');
+                assert.equal(shown.selection.end.character, shown.document.lineAt(line).text.length);
+            } finally {
+                panel.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('a click on a part after a same-line edit selects its line, not stale offsets', async () => {
+            const nandwright = await api();
+            const editor = await open('chips', 'Veto.hdl');
+            const panel = await nandwright.circuits.open(editor.document.uri);
+            const line = editor.document.getText().split('\n').findIndex((text) => text.includes('Not(in=veto'));
+            // An edit before the part statement on its own line moves the offsets, but not the lines.
+            await editor.edit((edit) => edit.insert(new vscode.Position(line, 0), '  '));
+            await panel.simulate({ type: 'reveal', part: 1 });
+            const shown = await until('the Veto editor', () => vscode.window.visibleTextEditors.find((e) => e.document === editor.document));
+            const selection = shown.selection;
+            assert.equal(selection.start.line, line);
+            assert.equal(selection.start.character, 0, 'the whole line is selected');
+            assert.equal(selection.end.character, editor.document.lineAt(line).text.length);
+            // After the reload the offsets match again and select the statement.
+            await until('the diagram to reload', async () => {
+                await panel.settled();
+                return panel.spansMatch(editor.document.getText());
+            });
+            await panel.simulate({ type: 'reveal', part: 1 });
+            await until('the Not statement to be selected', () => {
+                const e = vscode.window.visibleTextEditors.find((x) => x.document === editor.document);
+                return e?.document.getText(e.selection).startsWith('Not(in=veto, out=allowed)');
+            });
+            panel.panel.dispose();
+        });
+
+        it('F5: reveal ignores stale spans when the diagram changes while editor calls await, and checks the captured diagram hash', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('reveal race ', ['chips/Veto.hdl', 'chips/Majority.hdl']);
+            const veto = vscode.Uri.file(path.join(folder, 'Veto.hdl'));
+            const panel = await nandwright.circuits.open(veto);
+            try {
+                const diagram1 = panel.snapshot().diagram!;
+                const original = fs.readFileSync(veto.fsPath, 'utf8');
+                const notLine = original.split('\n').findIndex((l) => l.includes('Not(in=veto'));
+                // Edit Veto.hdl on disk so offsets shift on the same line, and build diagram2 for that text.
+                const edited = original.replace('    Not(in=veto', '        Not(in=veto');
+                fs.writeFileSync(veto.fsPath, edited);
+                await panel.simulate({ type: 'clock', action: 'reset' });
+                const diagram2 = panel.snapshot().diagram!;
+                assert.notEqual(diagram1.sourceHash, diagram2.sourceHash);
+
+                // First: open the editor with selection at line 0, col 0.
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(veto), { preview: false });
+                const sentinel = new vscode.Selection(0, 0, 0, 0);
+                editor.selection = sentinel;
+
+                // Simulate a reveal whose diagram token changes while openTextDocument awaits:
+                // snapshot() returns diagram1 (token 1) before the await, then diagram2 (token 2) after.
+                let calls = 0;
+                const racingPanel = {
+                    isDisposed: false,
+                    panel: panel.panel,
+                    snapshot: () => (++calls <= 2 ? { diagram: diagram1, token: 1 } : { diagram: diagram2, token: 2 }),
+                    spansMatch: (text: string) => panel.spansMatch(text),
+                } as unknown as CircuitPanel;
+                await nandwright.circuits.reveal(racingPanel, 1, undefined, 1);
+                assert.ok(editor.selection.isEqual(sentinel), 'reveal aborted after openTextDocument when token changed');
+
+                // Second: even if token stayed 1 while panel.spansMatch already moved to diagram2's hash,
+                // reveal validates against the *captured* diagram1.sourceHash and falls back to whole-line selection
+                // instead of applying diagram1's shifted byte offsets to the edited text.
+                let calls2 = 0;
+                const swappedHashPanel = {
+                    isDisposed: false,
+                    panel: panel.panel,
+                    snapshot: () => ({ diagram: ++calls2 <= 2 ? diagram1 : diagram2, token: 1 }),
+                    spansMatch: () => true, // would falsely claim exact match if reveal asked the panel
+                } as unknown as CircuitPanel;
+                await nandwright.circuits.reveal(swappedHashPanel, 1, undefined, 1);
+                assert.equal(editor.selection.start.line, notLine);
+                assert.equal(editor.selection.start.character, 0, 'fell back to full line instead of stale offsets');
+                assert.equal(editor.selection.end.character, editor.document.lineAt(notLine).text.length);
+            } finally {
+                panel.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
             }
         });
     });

@@ -88,6 +88,23 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 
 ![A clocked chip in the simulator with Tick, Tock and the clock time](docs/images/clocked-chip.png)
 
+### See the circuit
+
+- **Show Circuit Diagram** draws a chip as a schematic next to its code: inputs on the
+  left, outputs on the right, gates as gate shapes, other chips as boxes. A wire is bright
+  when it is 1; a bus shows its value.
+- Click an input to flip it or type a value. After each change the wires light up in the
+  order the signal travels through the chip.
+- Double-click a part that is one of your own chips to look inside it, with live values.
+  The path at the top takes you back up.
+- Click a part or a wire to find it in the HDL. Put the cursor on a part statement and the
+  diagram marks that part.
+- If the chip simulator shows the same chip, the two share one simulation: flip an input
+  in either and both change.
+- **Export…** saves the diagram as SVG or PNG.
+
+![The circuit diagram of a chip beside its HDL source, with two inputs on](docs/images/circuit-diagram.png)
+
 ### Run programs: assembly, VM code, Jack
 
 - **Run Program** runs a `.asm` or `.hack` file on the Hack computer, and a `.vm` file or a

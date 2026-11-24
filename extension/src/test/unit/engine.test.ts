@@ -8,6 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import { WasmEngine } from '../../engine/wasm';
+import { ENGINES_PER_WORKER, MAX_WORKERS, SESSIONS_PER_ENGINE, firstSession } from '../../runtime/protocol';
 import { ignoresCase, pathKey, samePath } from '../../paths';
 import { cellValue, formatValue, parseCompare, typedValue } from '../../values';
 
@@ -268,4 +269,26 @@ test('a compare file is split into cells and long ones are cut', () => {
     assert.equal(long.rows.length, 256);
     assert.equal(long.more, 44);
     assert.equal(parseCompare('  \n', 256), null);
+});
+
+test('each worker and engine numbers its sessions from a range of its own', () => {
+    // The first engine of the first worker starts at 1, as the engine does by itself.
+    assert.equal(firstSession(0, 0), 1);
+    const starts = [firstSession(0, 0), firstSession(0, 1), firstSession(1, 0), firstSession(1, 1), firstSession(MAX_WORKERS - 1, ENGINES_PER_WORKER - 1)];
+    for (let i = 1; i < starts.length; i++) {
+        assert.ok(starts[i] - starts[i - 1] >= SESSIONS_PER_ENGINE, `${starts[i - 1]} and ${starts[i]} overlap`);
+    }
+    // The engine takes first sessions up to 2^52.
+    assert.ok(starts[starts.length - 1] <= 2 ** 52 && Number.isSafeInteger(starts[starts.length - 1] + SESSIONS_PER_ENGINE));
+
+    // A replacement worker's engine: a session number from the old one has ended there.
+    const dir = scratch();
+    const old = new WasmEngine(wasm);
+    const fresh = new WasmEngine(wasm);
+    assert.equal(fresh.call({ op: 'start', firstSession: firstSession(1, 0) }).error, undefined);
+    const before = old.call({ op: 'chip.open', path: path.join(dir, 'Majority.hdl') });
+    const after = fresh.call({ op: 'chip.open', path: path.join(dir, 'Majority.hdl') });
+    assert.equal(before.session, 1);
+    assert.ok(after.session >= firstSession(1, 0), String(after.session));
+    assert.match(fresh.call({ op: 'chip.state', session: before.session }).error?.message ?? '', /session has ended/);
 });

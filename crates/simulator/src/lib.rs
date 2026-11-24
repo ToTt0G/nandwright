@@ -17,7 +17,7 @@ pub mod program;
 pub mod runner;
 pub mod vm_machine;
 
-pub use circuit::{Circuit, SimError, Time};
+pub use circuit::{Circuit, InstanceView, SimError, Time};
 pub use cpu_machine::CpuMachine;
 pub use machine::{HardwareMachine, Machine, Observed, Role};
 pub use primitives::{BuiltinRegistry, Primitive};

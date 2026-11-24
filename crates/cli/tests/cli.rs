@@ -86,7 +86,7 @@ fn test_runs_the_fixture_chips() {
     let (code, stdout, stderr) = n2t(&["test", dir.to_str().unwrap()]);
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(code, 0, "{stdout}{stderr}");
-    assert!(stdout.contains("6 passed, 0 failed"), "{stdout}");
+    assert!(stdout.contains("7 passed, 0 failed"), "{stdout}");
 }
 
 #[test]

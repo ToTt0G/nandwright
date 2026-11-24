@@ -1,6 +1,32 @@
 // Messages between the extension and its runtime worker, and the shapes the
 // engine returns. These mirror `crates/wasm`.
 
+/**
+ * Session numbers. Every engine numbers its sessions from a range of its
+ * own, so a session number kept from an engine that crashed, or from a
+ * worker that was replaced, can never name a session of the engine or
+ * worker that took over: it gets "this session has ended".
+ *
+ * Engine `e` of worker `w` (both counted from 0) starts at
+ * `(w * ENGINES_PER_WORKER + e) * SESSIONS_PER_ENGINE + 1`. The engine takes
+ * first sessions up to 2^52, which these sizes fill exactly.
+ */
+export const SESSIONS_PER_ENGINE = 2 ** 24;
+export const ENGINES_PER_WORKER = 2 ** 14;
+export const MAX_WORKERS = 2 ** 14;
+
+/** What the extension gives each worker it starts. */
+export interface WorkerStart {
+    /** Which worker this is, from 0. */
+    worker: number;
+}
+
+/** The first session number of engine `engine` of worker `worker`. */
+export function firstSession(worker: number, engine: number): number {
+    const index = (worker % MAX_WORKERS) * ENGINES_PER_WORKER + (engine % ENGINES_PER_WORKER);
+    return index * SESSIONS_PER_ENGINE + 1;
+}
+
 export type ToWorker =
     | { type: 'call'; id: number; request: Record<string, unknown> }
     | { type: 'runTest'; id: number; request: TestRunRequest }
@@ -120,6 +146,8 @@ export interface TestInspection {
 
 export interface ChipState {
     session?: number;
+    /** Which build of the chip this is: 1 when opened, +1 on each reset that loads. */
+    revision?: number;
     chip: string;
     clocked: boolean;
     time: string;
@@ -163,10 +191,30 @@ export interface ChipTest {
     actual?: Record<number, string[]>;
 }
 
+/**
+ * The circuit diagram ops of a chip session (docs/CIRCUIT_DIAGRAM.md):
+ * `chip.diagram` replies with a `ChipDiagram`, `chip.values` with
+ * `ChipValues`, for the composite instance at `path` (`[]` = the chip).
+ */
+export interface ChipDiagramRequest {
+    op: 'chip.diagram' | 'chip.values';
+    session: number;
+    path: number[];
+}
+export type { Diagram as ChipDiagram, Values as ChipValues } from '../webview/circuitTypes';
+
 export interface TruthTable {
     inputs: { name: string; width: number }[];
     outputs: { name: string; width: number }[];
     rows: { inputs: number[]; outputs: number[] }[];
+}
+
+/**
+ * A reply saying the worker replaced its engine after a trap: every session
+ * of the old engine is gone, as when a worker stops.
+ */
+export function endsSessions(reply: unknown): boolean {
+    return isError(reply) && reply.error.crashed === true;
 }
 
 export function isError(reply: unknown): reply is EngineError {

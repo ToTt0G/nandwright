@@ -9,11 +9,13 @@ import {
     TransportKind,
 } from 'vscode-languageclient/node';
 import { ChipPanels } from './chipPanel';
+import { ChipSessions } from './chipSessions';
+import { CircuitPanels } from './circuitPanel';
 import { ComputerPanels } from './computerPanel';
 import { Outputs } from './outputs';
 import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
-import { Runtime } from './runtime/client';
+import { Runtime, crashWorkerForTests } from './runtime/client';
 import { ScriptResult, TestExplorer } from './testing';
 import { addedFiles, handInFolder, planZip, projectFiles, writeProjectZip, zipPlaces, zipProject, zipSettings } from './zipProject';
 import { SetupUi, offerSetup, runSetup, setupPlaces, vscodeSetupUi } from './setup';
@@ -22,9 +24,17 @@ const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
 const BUILTIN_SCHEME = 'n2t-builtin';
 
 /** What the extension exposes to its own integration tests. */
+export interface TestHooks {
+    /** Stops the runtime worker as if it had crashed. */
+    crashWorker(): Promise<void>;
+    /** The shared chip sessions (hubs) of the panels. */
+    sessions: ChipSessions;
+}
+
 export interface NandwrightApi {
     tests: TestExplorer;
     chips: ChipPanels;
+    circuits: CircuitPanels;
     computers: ComputerPanels;
     outputs: Outputs;
     progress: Progress;
@@ -42,6 +52,8 @@ export interface NandwrightApi {
     setup: { run: (ui: SetupUi) => Promise<string[]>; offerShown: boolean };
     runtime: Runtime;
     client: LanguageClient;
+    /** Only when the extension runs under test (`ExtensionMode.Test`); never in a user's editor. */
+    testHooks?: TestHooks;
 }
 
 function startLanguageClient(context: vscode.ExtensionContext, output: vscode.LogOutputChannel): LanguageClient {
@@ -296,12 +308,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const client = startLanguageClient(context, output);
     registerBuiltinDocuments(context, client);
     const tests = new TestExplorer(runtime, debugScript, context.workspaceState);
-    const chips = new ChipPanels(context.extensionUri, runtime, tests);
+    // Edits and saves of chip files: a reload after the same edit is done once for all panels.
+    let generation = 0;
+    const edited = (document: vscode.TextDocument) => {
+        if (/\.hdl$/i.test(document.fileName)) {
+            generation++;
+        }
+    };
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument((event) => event.contentChanges.length > 0 && edited(event.document)),
+        vscode.workspace.onDidSaveTextDocument(edited),
+    );
+    const sessions = new ChipSessions(runtime, { generation: () => generation, log: (line) => output.appendLine(line) });
+    const chips = new ChipPanels(context.extensionUri, sessions, tests);
+    const circuits = new CircuitPanels(context.extensionUri, sessions, context.workspaceState, output);
     const computers = new ComputerPanels(context.extensionUri, runtime);
     const outputs = new Outputs(runtime);
     const progress = new Progress(tests);
     registerDebugger(context, runtime);
-    context.subscriptions.push(runtime, tests, chips, computers, outputs, progress);
+    context.subscriptions.push(runtime, tests, chips, circuits, sessions, computers, outputs, progress);
 
     // The result of the last run is shown in the editor, beside Run test, so
     // nobody has to open the Test Results view to see whether a chip passes.
@@ -342,6 +367,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                 return undefined;
             }
             return chips.open(uri);
+        }),
+        vscode.commands.registerCommand('nandwright.showCircuit', async (argument?: unknown) => {
+            let uri = targetUri(argument);
+            if (uri && isTst(uri)) {
+                uri = await chipForScript(uri);
+            }
+            if (!uri || !isHdl(uri)) {
+                void vscode.window.showInformationMessage('Open a chip (.hdl) to see its circuit diagram.');
+                return undefined;
+            }
+            return circuits.open(uri);
         }),
         vscode.commands.registerCommand('nandwright.runProgram', async (argument?: unknown) => {
             const uri = targetUri(argument);
@@ -474,6 +510,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     return {
         tests,
         chips,
+        circuits,
         computers,
         outputs,
         progress,
@@ -481,6 +518,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         setup: { run: (ui: SetupUi) => runSetup(ui, setupPlaces()), offerShown },
         runtime,
         client,
+        ...(context.extensionMode === vscode.ExtensionMode.Test ? { testHooks: { crashWorker: () => crashWorkerForTests(runtime), sessions } } : {}),
     };
 }
 

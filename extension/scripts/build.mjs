@@ -46,17 +46,47 @@ const builds = [
         entryPoints: ['src/webview/computer.ts'],
         outfile: 'dist/webview/computer.js',
     },
+    {
+        ...common,
+        platform: 'browser',
+        target: 'es2022',
+        format: 'iife',
+        entryPoints: ['src/webview/circuit.ts'],
+        outfile: 'dist/webview/circuit.js',
+    },
 ];
 
 if (process.argv.includes('--tests')) {
     builds.length = 0;
-    builds.push({
-        ...node,
-        entryPoints: ['src/test/unit/engine.test.ts', 'src/test/unit/zip.test.ts', 'src/test/unit/results.test.ts', 'src/test/unit/zipName.test.ts', 'src/test/unit/textCompare.test.ts', 'src/test/unit/zipFiles.test.ts', 'src/test/unit/offer.test.ts'],
-        outdir: 'dist-test/unit',
-        outExtension: { '.js': '.cjs' },
-        sourcemap: 'inline',
-    });
+    builds.push(
+        {
+            ...node,
+            entryPoints: [
+                'src/test/unit/engine.test.ts',
+                'src/test/unit/zip.test.ts',
+                'src/test/unit/results.test.ts',
+                'src/test/unit/zipName.test.ts',
+                'src/test/unit/textCompare.test.ts',
+                'src/test/unit/zipFiles.test.ts',
+                'src/test/unit/offer.test.ts',
+                'src/test/unit/circuitLayout.test.ts',
+                'src/test/unit/circuitExport.test.ts',
+                'src/test/unit/chipSessions.test.ts',
+                'src/test/unit/chipWebview.test.ts',
+            ],
+            outdir: 'dist-test/unit',
+            outExtension: { '.js': '.cjs' },
+            sourcemap: 'inline',
+        },
+        {
+            ...common,
+            platform: 'browser',
+            target: 'es2022',
+            format: 'iife',
+            entryPoints: ['src/webview/chip.ts'],
+            outfile: 'dist-test/webview/chip.js',
+        },
+    );
 }
 
 if (!existsSync(join(extension, 'dist', 'engine.wasm'))) {

@@ -4,6 +4,7 @@
 // internal pins, which follow. The extension owns the simulation; this file
 // only draws the state it is sent and reports what the student does.
 
+import type { Build } from '../chipSessions';
 import type { ChipState, ChipTest, ClockStep, Expected, Pin, TruthTable } from '../runtime/protocol';
 import { Radix, cellValue, formatValue, toBigInt, typedValue } from '../values';
 
@@ -17,35 +18,113 @@ export type ToPanel =
     | {
           type: 'state';
           state: ChipState | null;
+          /** The build `state` is of (`{session, revision}`), echoed back on `set` and `setAll`. */
+          build: Build | null;
+          /** Names the chip file currently targeted; echoed back on inputs and actions. */
+          target: number;
           table: TruthTable | null;
           problem: string | null;
           expected: Expected | null;
           test: ChipTest | null;
           history: ClockStep[];
           historyCapped: boolean;
+          /** The simulator stopped for good: offer Retry next to the problem. */
+          retry?: boolean;
       }
-    | { type: 'rejected'; pin: string; message: string };
+    | { type: 'rejected'; pin: string; message: string }
+    | { type: 'note'; message: string };
 
 export type FromPanel =
     | { type: 'ready' }
     | { type: 'openExpected' }
     | { type: 'runTest' }
     | { type: 'clearHistory' }
-    | { type: 'set'; pin: string; value: string | number }
-    | { type: 'setAll'; values: Record<string, number> }
-    | { type: 'action'; action: 'eval' | 'tick' | 'tock' | 'step' | 'reset' };
+    | { type: 'retry' }
+    | { type: 'set'; pin: string; value: string | number; build: Build; target: number }
+    | { type: 'setAll'; values: Record<string, number>; build: Build; target: number }
+    | { type: 'action'; action: 'eval' | 'tick' | 'tock' | 'step' | 'reset'; target: number };
 
 const vscode = acquireVsCodeApi();
 const send = (message: FromPanel) => vscode.postMessage(message);
 
+/** How long per-pin rejected-input feedback stays visible if the student does not edit that pin again. */
+const REJECTED_MS = 5000;
+/** How long a short non-modal note stays visible. */
+const NOTE_MS = 4000;
+
 let radix: Radix = vscode.getState()?.radix ?? 'dec';
 let current: ChipState | null = null;
+let currentBuild: Build | null = null;
+let currentTarget = 0;
 let table: TruthTable | null = null;
 let expected: Expected | null = null;
 let test: ChipTest | null = null;
 let history: ClockStep[] = [];
 let historyCapped = false;
 let previous = new Map<string, string>();
+/** The problem shown, kept for a redraw (a radix change). */
+let shownProblem: { problem: string | null; retry: boolean } = { problem: null, retry: false };
+/** Active rejected-input messages per pin, preserved across redraws until next edit or timeout. */
+const rejectedPins = new Map<string, { message: string; timer: ReturnType<typeof setTimeout> }>();
+/** Active non-modal note, preserved across redraws until timeout. */
+let activeNote: { message: string; timer: ReturnType<typeof setTimeout> } | null = null;
+
+function setRejection(pin: string, message: string): void {
+    const prior = rejectedPins.get(pin);
+    if (prior) {
+        clearTimeout(prior.timer);
+    }
+    const timer = setTimeout(() => clearRejection(pin), REJECTED_MS);
+    rejectedPins.set(pin, { message, timer });
+    const slot = root.querySelector(`.rejected[data-for="${CSS.escape(pin)}"]`);
+    if (slot) {
+        slot.textContent = message;
+    }
+}
+
+function clearRejection(pin: string): void {
+    const prior = rejectedPins.get(pin);
+    if (!prior) {
+        return;
+    }
+    clearTimeout(prior.timer);
+    rejectedPins.delete(pin);
+    const slot = root.querySelector(`.rejected[data-for="${CSS.escape(pin)}"]`);
+    if (slot) {
+        slot.textContent = '';
+    }
+}
+
+function clearAllFeedback(): void {
+    for (const entry of rejectedPins.values()) {
+        clearTimeout(entry.timer);
+    }
+    rejectedPins.clear();
+    if (activeNote) {
+        clearTimeout(activeNote.timer);
+        activeNote = null;
+    }
+}
+
+function setNote(message: string): void {
+    if (activeNote) {
+        clearTimeout(activeNote.timer);
+    }
+    const timer = setTimeout(() => {
+        activeNote = null;
+        const box = root.querySelector('.note');
+        if (box) {
+            box.textContent = '';
+        }
+    }, NOTE_MS);
+    activeNote = { message, timer };
+    const box = root.querySelector('.note');
+    if (box) {
+        box.textContent = message;
+    } else {
+        render(shownProblem.problem, shownProblem.retry);
+    }
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -70,7 +149,7 @@ function widthLabel(pin: { width: number }): string {
     return pin.width > 1 ? `[${pin.width}]` : '';
 }
 
-function pinRow(pin: Pin, editable: boolean): HTMLElement {
+function pinRow(pin: Pin, editable: boolean, build: Build | null, target: number): HTMLElement {
     const value = String(pin.bits);
     const changed = previous.has(pin.name) && previous.get(pin.name) !== value;
     const row = element('div', { class: `pin${changed ? ' changed' : ''}`, role: 'row' });
@@ -96,8 +175,15 @@ function pinRow(pin: Pin, editable: boolean): HTMLElement {
             },
             on ? '1' : '0',
         );
-        toggle.addEventListener('click', () => send({ type: 'set', pin: pin.name, value: on ? 0 : 1 }));
-        row.append(element('span', { role: 'cell' }, toggle));
+        toggle.addEventListener('click', () => {
+            clearRejection(pin.name);
+            if (build) {
+                send({ type: 'set', pin: pin.name, value: on ? 0 : 1, build, target });
+            }
+        });
+        const cell = element('span', { role: 'cell', class: 'bit-cell' }, toggle);
+        cell.append(element('span', { class: 'rejected', 'aria-live': 'polite', 'data-for': pin.name }, rejectedPins.get(pin.name)?.message ?? ''));
+        row.append(cell);
     } else if (editable) {
         const input = element('input', {
             class: 'bus',
@@ -111,20 +197,23 @@ function pinRow(pin: Pin, editable: boolean): HTMLElement {
         const shown = input.value;
         const commit = () => {
             const text = input.value.trim();
-            if (text !== shown) {
-                send({ type: 'set', pin: pin.name, value: typedValue(text, radix) });
+            if (text !== shown && build) {
+                clearRejection(pin.name);
+                send({ type: 'set', pin: pin.name, value: typedValue(text, radix), build, target });
             }
         };
+        input.addEventListener('input', () => clearRejection(pin.name));
         input.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') {
                 commit();
             } else if (event.key === 'Escape') {
+                clearRejection(pin.name);
                 input.value = shown;
             }
         });
         input.addEventListener('blur', commit);
         const cell = element('span', { role: 'cell', class: 'bus-cell' }, input);
-        cell.append(element('span', { class: 'rejected', 'aria-live': 'polite', 'data-for': pin.name }));
+        cell.append(element('span', { class: 'rejected', 'aria-live': 'polite', 'data-for': pin.name }, rejectedPins.get(pin.name)?.message ?? ''));
         row.append(cell);
     } else {
         const text = formatValue(pin.bits, pin.width, radix);
@@ -138,7 +227,7 @@ function pinRow(pin: Pin, editable: boolean): HTMLElement {
     return row;
 }
 
-function section(title: string, pins: Pin[], editable: boolean, emptyText?: string): HTMLElement | null {
+function section(title: string, pins: Pin[], editable: boolean, build: Build | null, target: number, emptyText?: string): HTMLElement | null {
     if (pins.length === 0 && !emptyText) {
         return null;
     }
@@ -149,7 +238,7 @@ function section(title: string, pins: Pin[], editable: boolean, emptyText?: stri
         return block;
     }
     const grid = element('div', { class: 'pins', role: 'table', 'aria-label': title });
-    pins.forEach((pin) => grid.append(pinRow(pin, editable)));
+    pins.forEach((pin) => grid.append(pinRow(pin, editable, build, target)));
     block.append(grid);
     return block;
 }
@@ -170,16 +259,16 @@ function radixPicker(): HTMLElement {
         button.addEventListener('click', () => {
             radix = value;
             vscode.setState({ radix });
-            render(null);
+            render(shownProblem.problem, shownProblem.retry);
         });
         group.append(button);
     }
     return group;
 }
 
-function actionButton(label: string, action: 'eval' | 'tick' | 'tock' | 'step' | 'reset', title: string, primary = false): HTMLElement {
+function actionButton(label: string, action: 'eval' | 'tick' | 'tock' | 'step' | 'reset', title: string, target: number, primary = false): HTMLElement {
     const button = element('button', { type: 'button', class: primary ? 'primary' : 'secondary', title }, label);
-    button.addEventListener('click', () => send({ type: 'action', action }));
+    button.addEventListener('click', () => send({ type: 'action', action, target }));
     return button;
 }
 
@@ -228,7 +317,7 @@ function testBar(run: ChipTest): HTMLElement {
 
 const MARKS = { match: '✓', differ: '✗', unreached: '–' } as const;
 
-function expectedTable(state: ChipState, file: Expected): HTMLElement {
+function expectedTable(state: ChipState, file: Expected, build: Build | null, target: number): HTMLElement {
     const block = element('section', {});
     block.append(element('h2', {}, 'Expected output'));
     const open = element('button', { type: 'button', class: 'link' }, file.name);
@@ -311,7 +400,11 @@ function expectedTable(state: ChipState, file: Expected): HTMLElement {
             }
         });
         if (settable) {
-            const apply = () => send({ type: 'setAll', values });
+            const apply = () => {
+                if (build) {
+                    send({ type: 'setAll', values, build, target });
+                }
+            };
             tr.addEventListener('click', apply);
             tr.addEventListener('keydown', (event) => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -371,7 +464,7 @@ function clockHistory(state: ChipState): HTMLElement {
     return block;
 }
 
-function truthTable(state: ChipState, truth: TruthTable): HTMLElement {
+function truthTable(state: ChipState, truth: TruthTable, build: Build | null, target: number): HTMLElement {
     const block = element('section', {});
     block.append(element('h2', {}, 'Truth table'));
     block.append(element('p', { class: 'hint' }, 'Every input combination. Select a row to apply it.'));
@@ -404,9 +497,12 @@ function truthTable(state: ChipState, truth: TruthTable): HTMLElement {
             ),
         );
         const apply = () => {
+            if (!build) {
+                return;
+            }
             const values: Record<string, number> = {};
             truth.inputs.forEach((pin, i) => (values[pin.name] = row.inputs[i]));
-            send({ type: 'setAll', values });
+            send({ type: 'setAll', values, build, target });
         };
         tr.addEventListener('click', apply);
         tr.addEventListener('keydown', (event) => {
@@ -422,18 +518,33 @@ function truthTable(state: ChipState, truth: TruthTable): HTMLElement {
     return block;
 }
 
-function render(problem: string | null): void {
+function render(problem: string | null, retry = false): void {
+    const build = currentBuild;
+    const target = currentTarget;
     const focused = (document.activeElement as HTMLElement | null)?.getAttribute('data-pin');
     root.replaceChildren();
     if (problem) {
         const banner = element('div', { class: 'problem', role: 'alert' });
-        banner.append(element('strong', {}, current ? 'The chip has an error. Showing the last version that loaded.' : 'This chip cannot be simulated yet.'));
+        const heading = retry
+            ? 'The simulator stopped.'
+            : current
+              ? 'The chip has an error. Showing the last version that loaded.'
+              : 'This chip cannot be simulated yet.';
+        banner.append(element('strong', {}, heading));
         banner.append(element('pre', {}, problem));
+        if (retry) {
+            const again = element('button', { type: 'button', class: 'primary retry' }, 'Retry');
+            again.addEventListener('click', () => send({ type: 'retry' }));
+            banner.append(again);
+        }
         root.append(banner);
     }
     if (!current) {
         if (!problem) {
             root.append(element('p', { class: 'hint' }, 'Loading the chip…'));
+        }
+        if (activeNote) {
+            root.append(element('div', { class: 'note', role: 'status', 'aria-live': 'polite' }, activeNote.message));
         }
         return;
     }
@@ -461,26 +572,29 @@ function render(problem: string | null): void {
     if (state.clocked) {
         const high = state.time.endsWith('+');
         toolbar.append(
-            actionButton('Tick', 'tick', 'Raise the clock: clocked chips read their inputs', !high),
-            actionButton('Tock', 'tock', 'Lower the clock: clocked chips show their new outputs', high),
-            actionButton('Full cycle', 'step', 'Tick, then tock'),
+            actionButton('Tick', 'tick', 'Raise the clock: clocked chips read their inputs', target, !high),
+            actionButton('Tock', 'tock', 'Lower the clock: clocked chips show their new outputs', target, high),
+            actionButton('Full cycle', 'step', 'Tick, then tock', target),
         );
     }
-    toolbar.append(actionButton('Reset', 'reset', 'Reload the chip and clear its state. Inputs are kept.'));
+    toolbar.append(actionButton('Reset', 'reset', 'Reload the chip and clear its state. Inputs are kept.', target));
     toolbar.append(element('span', { class: 'spacer' }));
     toolbar.append(radixPicker());
     root.append(toolbar);
+    root.append(element('div', { class: 'note', role: 'status', 'aria-live': 'polite' }, activeNote?.message ?? ''));
 
     const inputs = state.pins.filter((pin) => pin.role === 'input');
     const outputs = state.pins.filter((pin) => pin.role === 'output');
     const internal = state.pins.filter((pin) => pin.role === 'internal');
     for (const block of [
-        section('Inputs', inputs, true, 'This chip has no inputs.'),
-        section('Outputs', outputs, false, 'This chip has no outputs.'),
+        section('Inputs', inputs, true, build, target, 'This chip has no inputs.'),
+        section('Outputs', outputs, false, build, target, 'This chip has no outputs.'),
         section(
             'Internal pins',
             internal,
             false,
+            build,
+            target,
             'None yet. Pins you create by connecting parts to each other appear here.',
         ),
     ]) {
@@ -495,10 +609,10 @@ function render(problem: string | null): void {
         root.append(block);
     }
     if (table && !state.clocked) {
-        root.append(truthTable(state, table));
+        root.append(truthTable(state, table, build, target));
     }
     if (expected) {
-        root.append(expectedTable(state, expected));
+        root.append(expectedTable(state, expected, build, target));
     }
     if (scroller) {
         // The newest step is the one to see.
@@ -513,9 +627,17 @@ function render(problem: string | null): void {
 window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
     const message = event.data;
     if (message.type === 'state') {
+        const switched = currentTarget !== 0 && currentTarget !== message.target;
+        currentTarget = message.target;
+        currentBuild = message.build;
+        if (switched) {
+            previous = new Map();
+            clearAllFeedback();
+        }
         if (message.state) {
             if (current && current.chip !== message.state.chip) {
                 previous = new Map();
+                clearAllFeedback();
             }
             current = message.state;
             table = message.table;
@@ -534,12 +656,12 @@ window.addEventListener('message', (event: MessageEvent<ToPanel>) => {
             historyCapped = false;
             previous = new Map();
         }
-        render(message.problem);
+        shownProblem = { problem: message.problem, retry: message.retry === true };
+        render(shownProblem.problem, shownProblem.retry);
     } else if (message.type === 'rejected') {
-        const slot = root.querySelector(`.rejected[data-for="${CSS.escape(message.pin)}"]`);
-        if (slot) {
-            slot.textContent = message.message;
-        }
+        setRejection(message.pin, message.message);
+    } else if (message.type === 'note') {
+        setNote(message.message);
     }
 });
 
