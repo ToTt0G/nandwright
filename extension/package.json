@@ -1,7 +1,7 @@
 {
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
-  "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
+  "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator and live circuit diagrams for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
   "version": "0.5.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
@@ -34,6 +34,8 @@
     "nand to tetris",
     "hdl",
     "hardware simulator",
+    "circuit diagram",
+    "schematic",
     "hack assembly",
     "cpu emulator",
     "vm emulator",
@@ -252,7 +254,7 @@
         "nandwright.simulator.followEditor": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "The chip simulator shows the chip you are editing: switch to another `.hdl` file and the simulator switches with you. Turn this off to keep a separate simulator for each chip, fixed to the chip it was opened for."
+          "markdownDescription": "The chip simulator and circuit diagram show the chip you are editing: switch to another `.hdl` file and the panel switches with you. Turn this off to keep a separate panel for each chip, fixed to the chip it was opened for."
         },
         "nandwright.test.pressKeys": {
           "type": "boolean",
@@ -625,12 +627,13 @@
           {
             "id": "debug",
             "title": "See why a test fails",
-            "description": "A failing test shows the expected and actual rows side by side, with the value of every internal pin at that step. Open the chip in the simulator to try inputs yourself, or step through the test script line by line.\n[Open the chip in the simulator](command:nandwright.openChip)",
+            "description": "A failing test shows the expected and actual rows side by side, with the value of every internal pin at that step. Open the chip in the simulator, draw its live circuit diagram, or step through the test script line by line.\n[Open the chip in the simulator](command:nandwright.openChip)\n[Show circuit diagram](command:nandwright.showCircuit)",
             "media": {
               "markdown": "media/walkthrough/debug.md"
             },
             "completionEvents": [
-              "onCommand:nandwright.openChip"
+              "onCommand:nandwright.openChip",
+              "onCommand:nandwright.showCircuit"
             ]
           },
           {

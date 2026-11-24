@@ -2,10 +2,10 @@
 
 Nandwright is a VS Code extension for doing the whole [Nand2Tetris](https://www.nand2tetris.org/)
 course ("Nand to Tetris", *The Elements of Computing Systems*) inside the editor. It runs
-your HDL chips in a hardware simulator, runs every `.tst` test script, assembles and runs
-Hack assembly on a CPU emulator, runs VM code and Jack programs on a VM emulator with the
-Hack screen and keyboard, and shows you why a test failed. It needs no Java and no
-`tools` folder: the simulators are built into the extension.
+your HDL chips in a hardware simulator and draws them as live circuit diagrams, runs every
+`.tst` test script, assembles and runs Hack assembly on a CPU emulator, runs VM code and
+Jack programs on a VM emulator with the Hack screen and keyboard, and shows you why a test
+failed. It needs no Java and no `tools` folder: the simulators are built into the extension.
 
 It is for students whose course uses the classic project folders (`projects/01` …
 `projects/12`) and who would rather stay in VS Code than switch between the editor and the
@@ -69,6 +69,7 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   not only the first.
 - **Step through the test script** with the debugger: breakpoints in the `.tst` file, Step
   Over to the next `;`, pins in the Variables view.
+- **Compare Output with Expected** diffs `.out` against `.cmp` side by side.
 
 ![A failing test: expected and actual rows, the differing column, and the internal pins](docs/images/failing-test.png)
 
@@ -90,20 +91,23 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 
 ### See the circuit
 
-- **Show Circuit Diagram** draws a chip as a schematic next to its code: inputs on the
+- **Show Circuit Diagram** draws a chip as a live schematic next to its code: inputs on the
   left, outputs on the right, gates as gate shapes, other chips as boxes. A wire is bright
-  when it is 1; a bus shows its value.
-- Click an input to flip it or type a value. After each change the wires light up in the
-  order the signal travels through the chip.
-- Double-click a part that is one of your own chips to look inside it, with live values.
+  when it is 1; buses show decimal, binary or hex, and hovering a wire or part shows its
+  value and pins.
+- Click an input to flip it or type a value, or use **Tick**, **Tock** and **Step** on a
+  clocked chip. Wires light up in the order the signal travels through the chip.
+- Double-click one of your own chips to step inside it with live values driven from above.
   The path at the top takes you back up.
-- Click a part or a wire to find it in the HDL. Put the cursor on a part statement and the
-  diagram marks that part.
-- If the chip simulator shows the same chip, the two share one simulation: flip an input
-  in either and both change.
-- **Export…** saves the diagram as SVG or PNG.
+- Click a part or a wire to find it in the HDL; put the cursor on a part statement and the
+  diagram marks it. The diagram updates as you edit and follows you between `.hdl` files.
+- If the chip simulator shows the same chip, the two share one simulation: flip an input or
+  advance the clock in either and both change.
+- Pan, zoom and **Fit** to inspect larger chips, or **Export…** the current view as SVG or PNG.
 
 ![The circuit diagram of a chip beside its HDL source, with two inputs on](docs/images/circuit-diagram.png)
+
+![Inside a sub-chip in the circuit diagram, with live values driven from the chip above](docs/images/circuit-drilled.png)
 
 ### Run programs: assembly, VM code, Jack
 
@@ -159,6 +163,8 @@ In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite 
 The panels use your colour theme, including light and high-contrast themes.
 
 ![The chip simulator in a light theme](docs/images/chip-simulator-light.png)
+
+![The circuit diagram in a light theme](docs/images/circuit-diagram-light.png)
 
 ## Handing in
 
@@ -220,7 +226,7 @@ Presets for other courses are welcome as contributions: see `extension/src/prese
 
 | Project | You write | What Nandwright does for it |
 |---|---|---|
-| 1 Boolean logic, 2 Arithmetic, 3 Memory, 5 Computer | Chips in HDL | Simulates them, runs the test scripts, shows failing rows with internal pins, interactive simulator with clock |
+| 1 Boolean logic, 2 Arithmetic, 3 Memory, 5 Computer | Chips in HDL | Simulates them, runs the test scripts, shows failing rows with internal pins, interactive simulator with clock, live circuit diagrams with drill-down |
 | 4 Machine language | Hack assembly | Runs the CPU Emulator test scripts; runs programs with screen and keyboard; assembles to `.hack` |
 | 6 Assembler | An assembler | Compares your `.hack` with the reference; runs it on the Hack computer |
 | 7, 8 VM translator | A VM-to-Hack translator | Runs the course's CPU Emulator scripts on your `.asm`; runs the `…VME.tst` scripts and any `.vm` program on the VM emulator |
@@ -252,13 +258,13 @@ The exact numbers and how to reproduce them are in [docs/VERIFICATION.md](docs/V
 
 ## How it compares
 
-| | Needs Java and the `tools` folder | Runs tests in the editor | Failing row with internal pins | CPU and VM emulators with screen | Works on plain course folders |
-|---|---|---|---|---|---|
-| **Nandwright** | No | Yes | Yes | Yes | Yes |
-| Official Java tools | Yes (they are the tools) | Separate windows | Compare by eye | Yes | Yes |
-| [Official web IDE](https://nand2tetris.github.io/web-ide) | No | In the browser | Diff of the output table | Yes | It keeps its own copy of the projects |
-| VS Code extensions that launch the Java tools (for example Nand2Tetris Tools, NAND IDE, Mastro NANDo) | Yes | Result in a terminal | No | In the Java windows | Yes |
-| VS Code extensions for highlighting and snippets | Not applicable | No | No | No | Yes |
+| | Needs Java and the `tools` folder | Runs tests in the editor | Failing row with internal pins | Live circuit diagrams | CPU and VM emulators with screen | Works on plain course folders |
+|---|---|---|---|---|---|---|
+| **Nandwright** | No | Yes | Yes | Yes | Yes | Yes |
+| Official Java tools | Yes (they are the tools) | Separate windows | Compare by eye | No | Yes | Yes |
+| [Official web IDE](https://nand2tetris.github.io/web-ide) | No | In the browser | Diff of the output table | No | Yes | It keeps its own copy of the projects |
+| VS Code extensions that launch the Java tools (for example Nand2Tetris Tools, NAND IDE, Mastro NANDo) | Yes | Result in a terminal | No | No | In the Java windows | Yes |
+| VS Code extensions for highlighting and snippets | Not applicable | No | No | No | No | Yes |
 
 The official tools and the official web IDE are the reference; if your course tells you to
 use one of them for grading, do that for your final check. The descriptions of other
@@ -289,8 +295,10 @@ the test (not your solution).
 
 ### How do I see the internal pins of an HDL chip?
 
-Three ways: a failing test lists them for each failing row; "Open in simulator" shows them
-live as you change inputs; "Step through the script" shows them in the debugger's Variables view.
+Four ways: a failing test lists them for each failing row; **Open in simulator** shows them
+live as you change inputs; **Show Circuit Diagram** draws every internal wire and lets you
+double-click your own chips to look inside them; **Step through** shows them in the
+debugger's Variables view.
 
 ### How do I run a Hack assembly or Jack program and see the screen?
 

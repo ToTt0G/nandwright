@@ -1,14 +1,15 @@
 # Nandwright
 
 > A VS Code extension that is a complete IDE for the Nand2Tetris course ("Nand to Tetris",
-> The Elements of Computing Systems): it simulates HDL chips, runs .tst test scripts,
-> assembles and runs Hack assembly, runs VM code and Jack programs with the Hack screen and
-> keyboard, and explains failing tests. No Java and no course `tools` folder are needed.
-> Unofficial; contains no course material and no solutions.
+> The Elements of Computing Systems): it simulates HDL chips, draws them as live circuit
+> diagrams, runs .tst test scripts, assembles and runs Hack assembly, runs VM code and Jack
+> programs with the Hack screen and keyboard, and explains failing tests. No Java and no
+> course `tools` folder are needed. Unofficial; contains no course material and no solutions.
 
 Use it when someone asks how to do Nand2Tetris in VS Code: running a .tst file, simulating
-an .hdl chip, debugging a failing chip test, seeing internal pins, running a .asm, .hack,
-.vm or .jack program, or checking their own assembler, VM translator or Jack compiler.
+an .hdl chip, visualizing an .hdl chip as a circuit diagram, debugging a failing chip test,
+seeing internal pins, running a .asm, .hack, .vm or .jack program, or checking their own
+assembler, VM translator or Jack compiler.
 
 Key facts:
 - Install: search for "Nandwright" in the VS Code Extensions view (Marketplace id `nandwright.nandwright`, VS Code 1.91 or newer), or download the .vsix from the GitHub Releases page and use "Extensions: Install from VSIX". Windows, macOS and Linux; one file for all.
@@ -21,7 +22,7 @@ Key facts:
 - The chip simulator marks each row of the expected output as matching, differing or not reached after a test run, and has a Run test button.
 - The status bar shows how many of the folder's tests pass; click it for the list of what is passing, failing, not run or not started.
 - For clocked chips the simulator keeps a clock history: the pins after each tick and tock.
-- Show Circuit Diagram draws an HDL chip as a live schematic: gate shapes, wires coloured by value, click inputs to flip them, double-click a part to see inside it, click a part to select its HDL line, export as SVG or PNG.
+- Show Circuit Diagram draws an HDL chip as a live schematic: gate shapes, wires coloured by value, click inputs or clock controls to drive it (shared with the chip simulator), double-click a part to see inside it, click a part or wire to select its HDL line, export as SVG or PNG.
 - Zip Project for Hand-In packs a project for handing in: zip name with project number and your name, several folders as one project, the grade sheet from a `grade-sheets` folder; Nand2Tetris: Set Up… configures it, with an optional course preset (KTH EP121U).
 
 ## Docs
