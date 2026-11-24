@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.2
+
+- Zip Project Files: a new setting, `nandwright.zip.fileName`, sets the name the zip gets.
+  `{folder}` is the folder's name, `{n}` the number in it and `{nn}` that number with two
+  digits. `Project{nn}-familyname-firstname` gives `Project01-familyname-firstname.zip` for
+  a folder named `01`. The gear button in the file list opens the setting.
+- Zip Project Files: the `+` button in the file list adds files from another folder, such as
+  a grade sheet. They go at the top level of the zip.
+- Zip Project Files no longer offers Office lock files (`~$Project1.xlsx`, there while the
+  sheet is open in Excel), `Thumbs.db`, `desktop.ini` or the `__MACOSX` folder.
+
 ## 0.3.1
 
 - Test results are never shown for an older version of your work: results from overlapping
