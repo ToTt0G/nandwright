@@ -1041,3 +1041,77 @@ fn a_chip_with_a_keyboard_waits_for_its_key_unless_keys_are_off() {
     assert_eq!(status["outcome"]["kind"], "limit", "{status}");
     assert!(status["commands"].as_u64().unwrap() < 20, "{status}");
 }
+
+/// A made-up chip that uses what a course's hints describe: a constant on
+/// one bit of a part's bus pin (`b[0]=true`), one output pin of a part
+/// sent to two signals (`out=nx, out=notX`), one input feeding several
+/// parts, and parts that have no `.hdl` file in the folder.
+const SPREAD: &str = "\
+CHIP Spread {
+    IN x, y;
+    OUT lo, hi, nx, either, odd;
+
+    PARTS:
+    And16(a[0]=x, a[1]=x, b[0]=true, b[1]=false, out[0]=lo, out[1]=hi);
+    Not(in=x, out=nx, out=notX);
+    Or(a=notX, b=y, out=either);
+    Xor(a=x, b=y, out=odd);
+}
+";
+
+/// Each output's column of the chip's truth table, rows in the order
+/// x,y = 00, 01, 10, 11.
+fn spread_columns(engine: &mut Engine, path: &str) -> Vec<Vec<u64>> {
+    let chip = call(engine, json!({"op": "chip.open", "path": path}));
+    assert!(
+        chip["session"].is_string() || chip["session"].is_number(),
+        "{chip}"
+    );
+    let table = call(
+        engine,
+        json!({"op": "chip.table", "session": chip["session"]}),
+    );
+    let rows = table["rows"].as_array().expect("a truth table");
+    assert_eq!(rows.len(), 4, "{table}");
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(row["inputs"], json!([i >> 1, i & 1]), "{table}");
+    }
+    (0..5)
+        .map(|o| {
+            rows.iter()
+                .map(|r| r["outputs"][o].as_u64().unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn course_hints_work_and_a_folders_own_chip_comes_before_the_built_in_one() {
+    let (mut engine, host) = engine();
+    let path = format!("{DIR}/Spread.hdl");
+    host.insert(&path, SPREAD);
+    // No And16, Not, Or or Xor in the folder: the built-in chips are used.
+    assert_eq!(
+        spread_columns(&mut engine, &path),
+        [
+            vec![0, 0, 1, 1], // lo = x: b[0]=true
+            vec![0, 0, 0, 0], // hi = 0: b[1]=false
+            vec![1, 1, 0, 0], // nx = not x
+            vec![1, 1, 0, 1], // either = not x or y, from the second copy of Not's out
+            vec![0, 1, 1, 0], // odd: the built-in Xor
+        ]
+    );
+    // A Xor.hdl in the folder is used instead of the built-in chip, as in
+    // the official simulator, even while it has no parts yet.
+    host.insert(
+        &format!("{DIR}/Xor.hdl"),
+        "CHIP Xor {\n    IN a, b;\n    OUT out;\n\n    PARTS:\n}\n",
+    );
+    let columns = spread_columns(&mut engine, &path);
+    assert_eq!(
+        columns[4],
+        vec![0, 0, 0, 0],
+        "odd now comes from the folder's Xor"
+    );
+    assert_eq!(columns[3], vec![1, 1, 0, 1]);
+}
