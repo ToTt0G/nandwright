@@ -5,6 +5,7 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { followsEditor } from './followEditor';
 import { Build, CLOCK_OPS, ChipHub, ChipSessions, HubError, HubEvent, HubMember, HubRequest, isTransport } from './chipSessions';
 import { sourceHash } from './sourceHash';
 import { panelHtml } from './panelHtml';
@@ -22,11 +23,6 @@ const RADIX_KEY = 'nandwright.circuit.radix';
 
 /** Messages kept for tests. */
 const LOG_SIZE = 50;
-
-/** Whether the panels follow the chip being edited (the simulator's setting). */
-function followsEditor(): boolean {
-    return vscode.workspace.getConfiguration('nandwright.simulator').get<boolean>('followEditor', true);
-}
 
 const chipName = (uri: vscode.Uri) => path.basename(uri.fsPath, path.extname(uri.fsPath));
 
@@ -660,6 +656,7 @@ export class CircuitPanels implements vscode.Disposable {
     });
     /** The editor and selection a reveal just made, so its own selection event is not read as the student's. */
     private revealed: { editor: vscode.TextEditor; selection: vscode.Selection } | undefined;
+    private readonly revealing = new Set<vscode.Uri>();
     private decorated: vscode.TextEditor | undefined;
 
     constructor(
@@ -675,9 +672,13 @@ export class CircuitPanels implements vscode.Disposable {
                 if (!uri || uri.scheme !== 'file' || !/\.hdl$/i.test(uri.fsPath) || !followsEditor()) {
                     return;
                 }
-                // A file drilled into is shown already; the panel stays on its chip.
+                // Opening a statement from the diagram keeps its drill path.
+                if ([...this.revealing].some((file) => samePath(file.fsPath, uri.fsPath))) {
+                    return;
+                }
                 const panel = this.followed();
-                if (panel && !this.showing(uri) && !this.drilledInto(panel, uri)) {
+                if (panel && !this.showing(uri)) {
+                    this.clearDecoration();
                     void panel.showChip(uri);
                 }
             }),
@@ -696,11 +697,6 @@ export class CircuitPanels implements vscode.Disposable {
 
     private showing(uri: vscode.Uri): CircuitPanel | undefined {
         return [...this.panels].find((panel) => samePath(panel.target.fsPath, uri.fsPath));
-    }
-
-    private drilledInto(panel: CircuitPanel, uri: vscode.Uri): boolean {
-        const file = panel.snapshot().diagram?.file;
-        return !!file && samePath(file, uri.fsPath);
     }
 
     /** Opens (or reveals) the circuit diagram of a chip file. */
@@ -823,11 +819,18 @@ export class CircuitPanels implements vscode.Disposable {
         const here = panel.panel.viewColumn;
         const shown = vscode.window.visibleTextEditors.find((e) => e.document === document);
         const other = vscode.window.tabGroups.all.find((group) => group.viewColumn !== here)?.viewColumn;
-        const editor = await vscode.window.showTextDocument(document, {
-            viewColumn: shown?.viewColumn ?? other ?? vscode.ViewColumn.Beside,
-            preserveFocus: true,
-            preview: false,
-        });
+        const source = vscode.Uri.file(diagram.file);
+        this.revealing.add(source);
+        let editor: vscode.TextEditor;
+        try {
+            editor = await vscode.window.showTextDocument(document, {
+                viewColumn: shown?.viewColumn ?? other ?? vscode.ViewColumn.Beside,
+                preserveFocus: true,
+                preview: false,
+            });
+        } finally {
+            this.revealing.delete(source);
+        }
         if (!stillCurrent()) {
             return;
         }

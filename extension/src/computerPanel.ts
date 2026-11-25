@@ -6,14 +6,19 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { followsEditor } from './followEditor';
 import { panelHtml } from './panelHtml';
-import { pathKey } from './paths';
+import { pathKey, samePath } from './paths';
 import { Runtime } from './runtime/client';
 import { EngineError, MachineState, isError } from './runtime/protocol';
-import type { FromComputer, ToComputer } from './webview/computer';
+import type { ComputerCommand, FromComputer, ToComputer } from './webview/computer';
 
 /** Memory cells shown at a time. */
 const WINDOW = 16;
+
+export const isProgram = (uri: vscode.Uri): boolean => /\.(asm|hack|vm|jack)$/i.test(uri.fsPath);
+const machineKind = (uri: vscode.Uri) => /\.(vm|jack)$/i.test(uri.fsPath) ? 'vm' : 'cpu';
+const panelTitle = (uri: vscode.Uri) => `${path.basename(uri.fsPath)} · ${machineKind(uri) === 'vm' ? 'VM emulator' : 'Hack computer'}`;
 
 class ComputerPanel {
     private session: number | undefined;
@@ -27,29 +32,67 @@ class ComputerPanel {
     private disposed = false;
     private readonly disposables: vscode.Disposable[] = [];
     private queue: Promise<void> = Promise.resolve();
-    private readonly title: string;
+    private target = 0;
+    private readonly revealing = new Set<vscode.Uri>();
     private readonly shown = new Set<vscode.TextEditor>();
 
     constructor(
-        readonly uri: vscode.Uri,
-        readonly kind: 'cpu' | 'vm',
+        private program: vscode.Uri,
         readonly panel: vscode.WebviewPanel,
         private readonly runtime: Runtime,
         private readonly highlight: vscode.TextEditorDecorationType,
         private readonly onDispose: () => void,
     ) {
-        this.title = path.basename(uri.fsPath);
-        panel.webview.onDidReceiveMessage((message: FromComputer) => this.enqueue(() => this.handle(message)), null, this.disposables);
+        panel.webview.onDidReceiveMessage((message: FromComputer) => {
+            if (message.type === 'ready' || message.program === this.target) {
+                this.enqueue(() => this.handle(message));
+            }
+        }, null, this.disposables);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
         this.disposables.push(vscode.window.onDidChangeVisibleTextEditors(() => this.showLine()));
     }
 
+    get uri(): vscode.Uri {
+        return this.program;
+    }
+
+    private get kind(): 'cpu' | 'vm' {
+        return machineKind(this.program);
+    }
+
+    isRevealing(uri: vscode.Uri): boolean {
+        return [...this.revealing].some((source) => samePath(source.fsPath, uri.fsPath));
+    }
+
+    /** Retargets the existing webview, invalidating old frames and queued actions. */
+    showProgram(uri: vscode.Uri): Promise<void> {
+        if (this.disposed || samePath(uri.fsPath, this.program.fsPath)) {
+            return this.settled();
+        }
+        this.target++;
+        this.program = uri;
+        this.state = null;
+        this.lastScreen = null;
+        this.problem = null;
+        this.running?.stop();
+        this.panel.title = panelTitle(uri);
+        this.post();
+        return this.load();
+    }
+
+    private isCurrent(target: number): boolean {
+        return !this.disposed && this.target === target;
+    }
+
     private enqueue(work: () => Promise<void>): void {
+        const target = this.target;
         this.queue = this.queue
-            .then(() => (this.disposed ? undefined : work()))
+            .then(() => (this.isCurrent(target) ? work() : undefined))
             .catch((error) => {
-                this.problem = error instanceof Error ? error.message : String(error);
-                this.post();
+                if (this.isCurrent(target)) {
+                    this.problem = error instanceof Error ? error.message : String(error);
+                    this.post();
+                }
             });
     }
 
@@ -63,10 +106,11 @@ class ComputerPanel {
         }
         const message: ToComputer = {
             type: 'state',
+            target: this.target,
             state: this.state,
-            running: this.running !== undefined,
+            running: this.state !== null && this.running !== undefined,
             problem: this.problem,
-            title: this.title,
+            title: path.basename(this.program.fsPath),
         };
         void this.panel.webview.postMessage(message);
         this.showLine();
@@ -97,6 +141,7 @@ class ComputerPanel {
 
     /** Opens the file the program stopped in, if it is not on screen. */
     private async reveal(): Promise<void> {
+        const target = this.target;
         const file = this.state?.file;
         if (!file || this.running || this.disposed) {
             return;
@@ -105,12 +150,22 @@ class ComputerPanel {
             (editor) => editor.document.uri.scheme === 'file' && pathKey(editor.document.uri.fsPath) === pathKey(file),
         );
         if (!visible) {
+            const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+            if (!this.isCurrent(target)) {
+                return;
+            }
             const beside = vscode.window.visibleTextEditors.find((editor) => editor.viewColumn !== this.panel.viewColumn);
-            await vscode.window.showTextDocument(vscode.Uri.file(file), {
-                viewColumn: beside?.viewColumn ?? vscode.ViewColumn.One,
-                preserveFocus: true,
-                preview: true,
-            });
+            const source = vscode.Uri.file(file);
+            this.revealing.add(source);
+            try {
+                await vscode.window.showTextDocument(document, {
+                    viewColumn: beside?.viewColumn ?? vscode.ViewColumn.One,
+                    preserveFocus: true,
+                    preview: true,
+                });
+            } finally {
+                this.revealing.delete(source);
+            }
             this.showLine();
         }
     }
@@ -164,11 +219,18 @@ class ComputerPanel {
 
     /** Loads the program, or loads it again from the editor's current text. */
     private async reload(): Promise<void> {
+        const target = this.target;
         await this.stop();
-        await this.runtime.syncUnsaved();
+        if (!this.isCurrent(target)) {
+            return;
+        }
         if (this.session !== undefined) {
             this.runtime.close(this.session);
             this.session = undefined;
+        }
+        await this.runtime.syncUnsaved();
+        if (!this.isCurrent(target)) {
+            return;
         }
         const reply = await this.runtime.tryCall<MachineState>({
             op: `${this.kind}.open`,
@@ -176,9 +238,8 @@ class ComputerPanel {
             ram: this.window,
             screen: true,
         });
-        if (this.disposed) {
-            // The panel was closed while the program was loading: the
-            // session that has just been made has no owner.
+        if (!this.isCurrent(target)) {
+            // The panel was closed or switched while this session was opening.
             if (!isError(reply) && reply.session !== undefined) {
                 this.runtime.close(reply.session);
             }
@@ -188,6 +249,7 @@ class ComputerPanel {
             this.session = reply.session;
         } else {
             this.state = null;
+            this.lastScreen = null;
         }
         this.post();
     }
@@ -204,6 +266,7 @@ class ComputerPanel {
         if (this.session === undefined || this.running || this.state?.status === 'error' || this.state?.status === 'halted') {
             return;
         }
+        const target = this.target;
         const run = this.runtime.runMachine(
             {
                 kind: this.kind,
@@ -214,7 +277,7 @@ class ComputerPanel {
                 ram: this.window,
             },
             (frame) => {
-                if (this.running === handle) {
+                if (this.isCurrent(target) && this.running === handle) {
                     this.take(frame);
                     this.post();
                 }
@@ -226,9 +289,11 @@ class ComputerPanel {
                 if (this.running === handle) {
                     this.running = undefined;
                 }
-                this.accept(final);
-                this.post();
-                void this.reveal();
+                if (this.isCurrent(target)) {
+                    this.accept(final);
+                    this.post();
+                    void this.reveal().catch(() => {});
+                }
             }),
         };
         this.running = handle;
@@ -239,6 +304,7 @@ class ComputerPanel {
         if (this.session === undefined) {
             return;
         }
+        const target = this.target;
         const reply = await this.runtime.tryCall<MachineState>({
             screen: true,
             ...request,
@@ -247,11 +313,12 @@ class ComputerPanel {
             ram: this.window,
             now: Math.floor(performance.now()),
         });
+        if (!this.isCurrent(target)) {
+            return;
+        }
         if (isError(reply) && request.op === 'set') {
-            if (!this.disposed) {
-                const rejected: ToComputer = { type: 'rejected', message: reply.error.message };
-                void this.panel.webview.postMessage(rejected);
-            }
+            const rejected: ToComputer = { type: 'rejected', message: reply.error.message, target };
+            void this.panel.webview.postMessage(rejected);
             return;
         }
         this.accept(isError(reply) || request.op !== 'state' ? reply : this.refreshed(reply));
@@ -282,14 +349,17 @@ class ComputerPanel {
         return reply;
     }
 
-    private async handle(message: FromComputer): Promise<void> {
+    private async handle(message: ComputerCommand): Promise<void> {
+        const target = this.target;
         switch (message.type) {
             case 'ready':
-                if (this.state || this.problem) {
+                this.memoryStart = message.memoryStart ?? this.memoryStart;
+                this.speed = message.speed ?? this.speed;
+                if (this.session !== undefined) {
                     // A fresh page for a program already loaded: send it everything.
                     await this.call({ op: 'state', screen: 'force' });
                 } else {
-                    await this.reload();
+                    this.post();
                 }
                 return;
             case 'run':
@@ -300,8 +370,12 @@ class ComputerPanel {
                 return;
             case 'step':
                 await this.stop();
-                await this.call({ op: 'step', unit: message.unit ?? 'command' });
-                await this.reveal();
+                if (this.isCurrent(target)) {
+                    await this.call({ op: 'step', unit: message.unit ?? 'command' });
+                }
+                if (this.isCurrent(target)) {
+                    await this.reveal();
+                }
                 return;
             case 'reset':
                 await this.reload();
@@ -310,7 +384,9 @@ class ComputerPanel {
                 this.speed = message.speed;
                 if (this.running) {
                     await this.stop();
-                    this.start();
+                    if (this.isCurrent(target)) {
+                        this.start();
+                    }
                 }
                 return;
             }
@@ -323,7 +399,9 @@ class ComputerPanel {
                 this.memoryStart = message.start;
                 if (this.running) {
                     await this.stop();
-                    this.start();
+                    if (this.isCurrent(target)) {
+                        this.start();
+                    }
                 } else {
                     await this.call({ op: 'state' });
                 }
@@ -338,11 +416,11 @@ class ComputerPanel {
     /** For tests: what the panel shows now. */
     snapshot(): { state: MachineState | null; running: boolean; problem: string | null } {
         const state = this.state ? { ...this.state, screen: this.lastScreen } : null;
-        return { state, running: this.running !== undefined, problem: this.problem };
+        return { state, running: this.state !== null && this.running !== undefined, problem: this.problem };
     }
 
     /** For tests: handles a message as if the panel had sent it. */
-    async simulate(message: FromComputer): Promise<void> {
+    async simulate(message: ComputerCommand): Promise<void> {
         this.enqueue(() => this.handle(message));
         await this.queue;
     }
@@ -372,7 +450,8 @@ class ComputerPanel {
 }
 
 export class ComputerPanels implements vscode.Disposable {
-    private readonly panels = new Map<string, ComputerPanel>();
+    private readonly panels = new Set<ComputerPanel>();
+    private readonly subscription: vscode.Disposable;
     private readonly highlight = vscode.window.createTextEditorDecorationType({
         isWholeLine: true,
         backgroundColor: new vscode.ThemeColor('editor.stackFrameHighlightBackground'),
@@ -383,13 +462,29 @@ export class ComputerPanels implements vscode.Disposable {
     constructor(
         private readonly extensionUri: vscode.Uri,
         private readonly runtime: Runtime,
-    ) {}
+    ) {
+        this.subscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
+            const uri = editor?.document.uri;
+            if (!uri || uri.scheme !== 'file' || !isProgram(uri) || !followsEditor()) {
+                return;
+            }
+            if (!this.get(uri) && ![...this.panels].some((panel) => panel.isRevealing(uri))) {
+                void this.followed()?.showProgram(uri);
+            }
+        });
+    }
+
+    private followed(): ComputerPanel | undefined {
+        return [...this.panels].pop();
+    }
 
     /** Opens (or reveals) the computer for a program: `.asm`, `.hack`, `.vm` or `.jack`. */
     async open(uri: vscode.Uri): Promise<ComputerPanel> {
-        const kind = /\.(vm|jack)$/i.test(uri.fsPath) ? 'vm' : 'cpu';
-        const key = uri.toString();
-        const existing = this.panels.get(key);
+        let existing = this.get(uri);
+        if (!existing && followsEditor()) {
+            existing = this.followed();
+            void existing?.showProgram(uri);
+        }
         if (existing) {
             existing.panel.reveal(undefined, true);
             await existing.settled();
@@ -398,7 +493,7 @@ export class ComputerPanels implements vscode.Disposable {
         const name = path.basename(uri.fsPath);
         const panel = vscode.window.createWebviewPanel(
             'nandwright.computer',
-            `${name} · ${kind === 'vm' ? 'VM emulator' : 'Hack computer'}`,
+            panelTitle(uri),
             { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
             {
                 enableScripts: true,
@@ -409,18 +504,19 @@ export class ComputerPanels implements vscode.Disposable {
             },
         );
         panel.webview.html = panelHtml(panel.webview, this.extensionUri, 'computer.js', `${name} running`, COMPUTER_STYLE);
-        const computer = new ComputerPanel(uri, kind, panel, this.runtime, this.highlight, () => this.panels.delete(key));
-        this.panels.set(key, computer);
+        const computer: ComputerPanel = new ComputerPanel(uri, panel, this.runtime, this.highlight, () => this.panels.delete(computer));
+        this.panels.add(computer);
         await computer.load();
         return computer;
     }
 
     get(uri: vscode.Uri): ComputerPanel | undefined {
-        return this.panels.get(uri.toString());
+        return [...this.panels].find((panel) => samePath(panel.uri.fsPath, uri.fsPath));
     }
 
     dispose(): void {
-        for (const panel of [...this.panels.values()]) {
+        this.subscription.dispose();
+        for (const panel of this.panels) {
             panel.panel.dispose();
         }
         this.highlight.dispose();

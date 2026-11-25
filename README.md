@@ -114,6 +114,9 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 - **Run Program** runs a `.asm` or `.hack` file on the Hack computer, and a `.vm` file or a
   Jack program on the VM emulator, with the **screen**, the **keyboard**, registers, the
   stack, the call stack and memory. Run, pause, step, choose the speed.
+- Switch to another `.asm`, `.hack`, `.vm` or `.jack` tab to load it in the same panel. The
+  previous program stops and the new program starts paused. Turn off
+  `nandwright.simulator.followEditor` to keep individual panels fixed to their files.
 - **Breakpoints** set in the editor pause the program; the line about to run is highlighted.
   Jack programs step by Jack line.
 - Jack runs with a built-in OS (`Math`, `String`, `Array`, `Output`, `Screen`, `Keyboard`,

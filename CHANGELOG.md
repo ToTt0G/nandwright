@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- The Hack computer and VM emulator now follow the active `.asm`, `.hack`, `.vm` or `.jack`
+  file in the same panel. Switching files stops the previous program and loads the new
+  one paused. Turn off `nandwright.simulator.followEditor` to pin panels to individual files.
+- Switching to the HDL tab of a chip you drilled into now opens that chip as the root of
+  the circuit diagram. Clicking a part or wire in the diagram still preserves the drill path.
+
 ## 0.5.0
 
 - **Show Circuit Diagram** draws a chip as a live schematic beside its code: gate shapes,

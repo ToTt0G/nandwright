@@ -11,7 +11,7 @@ import {
 import { ChipPanels } from './chipPanel';
 import { ChipSessions } from './chipSessions';
 import { CircuitPanels } from './circuitPanel';
-import { ComputerPanels } from './computerPanel';
+import { ComputerPanels, isProgram } from './computerPanel';
 import { Outputs } from './outputs';
 import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
@@ -381,7 +381,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
         }),
         vscode.commands.registerCommand('nandwright.runProgram', async (argument?: unknown) => {
             const uri = targetUri(argument);
-            if (!uri || !/\.(asm|hack|vm|jack)$/i.test(uri.fsPath)) {
+            if (!uri || !isProgram(uri)) {
                 void vscode.window.showInformationMessage(
                     'Open a program to run it: Hack assembly (.asm), machine code (.hack), VM code (.vm) or Jack (.jack).',
                 );

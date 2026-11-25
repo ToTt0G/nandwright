@@ -13,11 +13,11 @@ declare function acquireVsCodeApi(): {
 };
 
 export type ToComputer =
-    | { type: 'state'; state: MachineState | null; running: boolean; problem: string | null; title: string }
-    | { type: 'rejected'; message: string };
+    | { type: 'state'; target: number; state: MachineState | null; running: boolean; problem: string | null; title: string }
+    | { type: 'rejected'; target: number; message: string };
 
-export type FromComputer =
-    | { type: 'ready' }
+type Ready = { type: 'ready'; memoryStart?: number; speed?: number };
+type ComputerAction =
     | { type: 'run' }
     | { type: 'pause' }
     | { type: 'step'; unit?: 'command' | 'line' }
@@ -27,8 +27,16 @@ export type FromComputer =
     | { type: 'memory'; start: number }
     | { type: 'set'; target: string; address?: number; value: string };
 
+export type ComputerCommand = Ready | ComputerAction;
+export type FromComputer = Ready | (ComputerAction & { program: number });
+
 const vscode = acquireVsCodeApi();
-const send = (message: FromComputer) => vscode.postMessage(message);
+let target: number | undefined;
+function send(message: ComputerAction): void {
+    if (target !== undefined) {
+        vscode.postMessage({ ...message, program: target });
+    }
+}
 
 const WIDTH = 512;
 const HEIGHT = 256;
@@ -293,11 +301,12 @@ addressInput.addEventListener('keydown', (event) => {
 function cellInput(label: string, value: number, onCommit: (text: string) => void): HTMLInputElement {
     const input = element('input', { class: 'cell', type: 'text', spellcheck: 'false', autocomplete: 'off', 'aria-label': label });
     const shown = formatValue(value, 16, radix);
+    const program = target;
     input.value = shown;
     input.disabled = running;
     const commit = () => {
         const text = input.value.trim();
-        if (text !== shown) {
+        if (program === target && text !== shown) {
             onCommit(typedValue(text, radix));
         }
     };
@@ -340,6 +349,12 @@ function update(): void {
     runButton.title = running ? 'Pause the program' : 'Run the program';
     stepButton.disabled = running;
     if (!state) {
+        badge.textContent = '';
+        runButton.disabled = stepButton.disabled = true;
+        stepLineButton.hidden = true;
+        framesTitle.hidden = frames.hidden = stackTitle.hidden = stack.hidden = true;
+        registers.replaceChildren();
+        memoryBody.replaceChildren();
         status.textContent = problem ? '' : 'Loading the program…';
         return;
     }
@@ -455,9 +470,22 @@ function symbolFor(address: number): string {
 window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
     const message = event.data;
     if (message.type === 'rejected') {
-        rejected.textContent = message.message;
+        if (message.target === target) {
+            rejected.textContent = message.message;
+        }
         return;
     }
+    if (target !== undefined && message.target < target) {
+        return;
+    }
+    if (target !== message.target || !message.state) {
+        state = null;
+        heldKey = 0;
+        pixels.fill(WHITE);
+        context.putImageData(image, 0, 0);
+        updateKeyboard();
+    }
+    target = message.target;
     rejected.textContent = '';
     title.textContent = message.title;
     running = message.running;
@@ -483,6 +511,4 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
 build();
 update();
 updateKeyboard();
-send({ type: 'ready' });
-send({ type: 'memory', start: memoryStart });
-send({ type: 'speed', speed });
+vscode.postMessage({ type: 'ready', memoryStart, speed } satisfies Ready);

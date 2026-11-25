@@ -3,6 +3,7 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
+import { followsEditor } from './followEditor';
 import { BUILD_OPS, Build, CLOCK_OPS, ChipHub, ChipSessions, HubError, HubEvent, HubMember, HubRequest, isTransport } from './chipSessions';
 import { ChipState, ChipTest, ClockStep, Expected, TruthTable } from './runtime/protocol';
 import { panelHtml } from './panelHtml';
@@ -569,11 +570,6 @@ export class ChipPanel implements HubMember {
         this.disposables.forEach((d) => d.dispose());
         this.onDispose();
     }
-}
-
-/** Whether the simulator follows the chip being edited (read when it matters). */
-function followsEditor(): boolean {
-    return vscode.workspace.getConfiguration('nandwright.simulator').get<boolean>('followEditor', true);
 }
 
 export class ChipPanels implements vscode.Disposable {

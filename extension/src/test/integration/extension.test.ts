@@ -1259,6 +1259,25 @@ describe('Nandwright', function () {
             panel.panel.dispose();
         });
 
+        it('follows HDL tabs, including a chip already displayed through drill-down', async () => {
+            const nandwright = await api();
+            const editor = await open('chips', 'Veto.hdl');
+            const panel = await nandwright.circuits.open(editor.document.uri);
+            await panel.simulate({ type: 'drill', path: [0] });
+            assert.deepEqual(panel.snapshot().path, [0]);
+            // Explicitly selecting the other file makes it the root of the diagram.
+            for (const chip of ['Majority', 'Veto', 'Parity4']) {
+                const document = await vscode.workspace.openTextDocument(file('chips', `${chip}.hdl`));
+                await vscode.window.showTextDocument(document, { viewColumn: editor.viewColumn });
+                await until(`the root diagram of ${chip}`, () => {
+                    const shown = panel.snapshot();
+                    return shown.diagram?.chip === chip && shown.path.length === 0;
+                });
+            }
+            assert.equal(panel.panel.title, 'Parity4 · circuit');
+            assert.equal(nandwright.circuits.get(file('chips', 'Parity4.hdl')), panel);
+        });
+
         it('takes inputs and sends the new values', async () => {
             const nandwright = await api();
             const panel = await nandwright.circuits.open(file('chips', 'Veto.hdl'));
@@ -1378,6 +1397,7 @@ describe('Nandwright', function () {
             await panel.simulate({ type: 'drill', path: [0] });
             await panel.simulate({ type: 'reveal', part: 3 });
             await until('the Or statement of Majority to be selected', () => selected('Majority.hdl')?.startsWith('Or(a=ab, b=ac, out=abOrAc)'));
+            assert.deepEqual(panel.snapshot().path, [0]);
             panel.panel.dispose();
         });
 
@@ -2284,6 +2304,75 @@ describe('Nandwright', function () {
     });
 
     describe('Hack computer', () => {
+        it('follows open program tabs in one panel and stops the previous program', async () => {
+            const nandwright = await api();
+            const editor = await open('programs', 'Diagonal.asm');
+            const panel = await nandwright.computers.open(editor.document.uri);
+            await panel.simulate({ type: 'speed', speed: 5 });
+            await panel.simulate({ type: 'run' });
+            assert.equal(panel.snapshot().running, true);
+            const show = async (uri: vscode.Uri) => {
+                await vscode.window.showTextDocument(uri, { viewColumn: editor.viewColumn, preview: false });
+                await until(`the computer to load ${path.basename(uri.fsPath)}`, () => {
+                    const { state, running } = panel.snapshot();
+                    return nandwright.computers.get(uri) === panel && state?.status === 'paused' && !running && state;
+                }, 20_000, shows(panel));
+                assert.equal(panel.snapshot().problem, null);
+                assert.equal(panel.snapshot().state?.steps, 0);
+            };
+            const countdown = file('programs', 'Countdown.asm');
+            await show(countdown);
+            assert.equal(vscode.window.activeTextEditor?.document.uri.fsPath, countdown.fsPath);
+            assert.equal(nandwright.computers.get(editor.document.uri), undefined);
+            assert.equal(panel.panel.title, 'Countdown.asm · Hack computer');
+            await panel.simulate({ type: 'step' });
+            assert.equal(panel.snapshot().state?.steps, 1);
+
+            const hack = file('programs', 'Follow.hack');
+            fs.writeFileSync(hack.fsPath, '0000000000000111\n');
+            try {
+                await show(hack);
+                await panel.simulate({ type: 'step' });
+                assert.equal(panel.snapshot().state?.registers.find((r) => r.name === 'A')?.value, 7);
+                await show(file('programs', 'Adder.vm'));
+                assert.equal(panel.panel.title, 'Adder.vm · VM emulator');
+                assert.equal(panel.snapshot().state?.kind, 'vm');
+                await show(file('jack', 'Main.jack'));
+                assert.equal(panel.snapshot().state?.fromJack, true);
+                const compareFile = file('programs', 'Countdown.cmp');
+                await vscode.window.showTextDocument(compareFile, { viewColumn: editor.viewColumn });
+                await panel.settled();
+                assert.equal(panel.panel.title, 'Main.jack · VM emulator');
+                const reopened = await vscode.commands.executeCommand('nandwright.runProgram', countdown);
+                assert.equal(reopened, panel);
+                assert.equal(panel.snapshot().state?.kind, 'cpu');
+            } finally {
+                panel.panel.dispose();
+                fs.rmSync(hack.fsPath, { force: true });
+            }
+        });
+
+        it('keeps individual computer panels fixed when following is disabled', async () => {
+            const nandwright = await api();
+            const settings = vscode.workspace.getConfiguration('nandwright.simulator');
+            await settings.update('followEditor', false, vscode.ConfigurationTarget.Global);
+            try {
+                const editor = await open('programs', 'Diagonal.asm');
+                const first = await nandwright.computers.open(editor.document.uri);
+                const other = file('programs', 'Countdown.asm');
+                await vscode.window.showTextDocument(other, { viewColumn: editor.viewColumn });
+                await first.settled();
+                assert.equal(first.panel.title, 'Diagonal.asm · Hack computer');
+                const second = await nandwright.computers.open(other);
+                assert.notEqual(second, first);
+                assert.equal(nandwright.computers.get(editor.document.uri), first);
+                first.panel.dispose();
+                second.panel.dispose();
+            } finally {
+                await settings.update('followEditor', undefined, vscode.ConfigurationTarget.Global);
+            }
+        });
+
         it('steps, runs, draws on the screen, pauses and resets', async () => {
             const nandwright = await api();
             const computer = await nandwright.computers.open(file('programs', 'Diagonal.asm'));
