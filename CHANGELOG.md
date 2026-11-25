@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2
+
+- Saving the open `.asm` file reloads it in the Hack computer while the machine is at reset.
+  Saving preserves emulator state once you run, step, or change it manually.
+
 ## 0.5.1
 
 - The Hack computer and VM emulator now follow the active `.asm`, `.hack`, `.vm` or `.jack`

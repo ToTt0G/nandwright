@@ -28,6 +28,8 @@ class ComputerPanel {
     private problem: string | null = null;
     private speed = 0;
     private memoryStart = 0;
+    /** A fresh machine can be reloaded until the student runs it or changes its state. */
+    private fresh = false;
     private running: { stop(): void; done: Promise<unknown> } | undefined;
     private disposed = false;
     private readonly disposables: vscode.Disposable[] = [];
@@ -49,7 +51,19 @@ class ComputerPanel {
             }
         }, null, this.disposables);
         panel.onDidDispose(() => this.dispose(), null, this.disposables);
-        this.disposables.push(vscode.window.onDidChangeVisibleTextEditors(() => this.showLine()));
+        this.disposables.push(
+            vscode.window.onDidChangeVisibleTextEditors(() => this.showLine()),
+            vscode.workspace.onDidSaveTextDocument((document) => {
+                const uri = document.uri;
+                if (uri.scheme === 'file' && /\.asm$/i.test(uri.fsPath) && samePath(uri.fsPath, this.program.fsPath)) {
+                    this.enqueue(async () => {
+                        if (this.fresh) {
+                            await this.reload();
+                        }
+                    });
+                }
+            }),
+        );
     }
 
     get uri(): vscode.Uri {
@@ -71,6 +85,7 @@ class ComputerPanel {
         }
         this.target++;
         this.program = uri;
+        this.fresh = false;
         this.state = null;
         this.lastScreen = null;
         this.problem = null;
@@ -224,6 +239,7 @@ class ComputerPanel {
         if (!this.isCurrent(target)) {
             return;
         }
+        this.fresh = true;
         if (this.session !== undefined) {
             this.runtime.close(this.session);
             this.session = undefined;
@@ -266,6 +282,7 @@ class ComputerPanel {
         if (this.session === undefined || this.running || this.state?.status === 'error' || this.state?.status === 'halted') {
             return;
         }
+        this.fresh = false;
         const target = this.target;
         const run = this.runtime.runMachine(
             {
@@ -320,6 +337,9 @@ class ComputerPanel {
             const rejected: ToComputer = { type: 'rejected', message: reply.error.message, target };
             void this.panel.webview.postMessage(rejected);
             return;
+        }
+        if (request.op === 'step' || request.op === 'set') {
+            this.fresh = false;
         }
         this.accept(isError(reply) || request.op !== 'state' ? reply : this.refreshed(reply));
         this.post();
@@ -392,6 +412,9 @@ class ComputerPanel {
             }
             case 'key':
                 if (this.session !== undefined) {
+                    if (message.code !== 0) {
+                        this.fresh = false;
+                    }
                     await this.runtime.tryCall({ op: 'key', session: this.session, code: message.code });
                 }
                 return;

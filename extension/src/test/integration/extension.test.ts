@@ -2304,6 +2304,40 @@ describe('Nandwright', function () {
     });
 
     describe('Hack computer', () => {
+        it('reloads saved assembly at reset and preserves a machine that has been used', async () => {
+            const nandwright = await api();
+            const folder = scratchCopy('reload assembly ', ['programs/Countdown.asm']);
+            const uri = vscode.Uri.file(path.join(folder, 'Countdown.asm'));
+            const editor = await vscode.window.showTextDocument(uri);
+            const computer = await nandwright.computers.open(uri);
+            const save = async (value: number) => {
+                await replaceAll(editor, `@${value}\nD=A\n`);
+                assert.ok(await editor.document.save());
+                await computer.settled();
+            };
+            try {
+                await computer.simulate({ type: 'reset' });
+                await save(17);
+                assert.equal(computer.snapshot().state?.instruction, '@17');
+                assert.equal(computer.snapshot().state?.steps, 0);
+
+                await computer.simulate({ type: 'step' });
+                await save(23);
+                assert.equal(computer.snapshot().state?.steps, 1);
+                assert.equal(computer.snapshot().state?.registers.find((r) => r.name === 'A')?.value, 17);
+
+                await computer.simulate({ type: 'reset' });
+                await computer.simulate({ type: 'set', target: 'RAM', address: 0, value: '42' });
+                await save(31);
+                assert.equal(computer.snapshot().state?.ram?.values[0], 42);
+                assert.equal(computer.snapshot().state?.instruction, '@23');
+            } finally {
+                computer.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
         it('follows open program tabs in one panel and stops the previous program', async () => {
             const nandwright = await api();
             const editor = await open('programs', 'Diagonal.asm');
