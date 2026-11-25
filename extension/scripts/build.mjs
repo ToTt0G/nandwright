@@ -73,6 +73,8 @@ if (process.argv.includes('--tests')) {
                 'src/test/unit/circuitExport.test.ts',
                 'src/test/unit/chipSessions.test.ts',
                 'src/test/unit/chipWebview.test.ts',
+                'src/test/unit/computerWebview.test.ts',
+                'src/test/unit/testLinks.test.ts',
             ],
             outdir: 'dist-test/unit',
             outExtension: { '.js': '.cjs' },
@@ -85,6 +87,14 @@ if (process.argv.includes('--tests')) {
             format: 'iife',
             entryPoints: ['src/webview/chip.ts'],
             outfile: 'dist-test/webview/chip.js',
+        },
+        {
+            ...common,
+            platform: 'browser',
+            target: 'es2022',
+            format: 'iife',
+            entryPoints: ['src/webview/computer.ts'],
+            outfile: 'dist-test/webview/computer.js',
         },
     );
 }

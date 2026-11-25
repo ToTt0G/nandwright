@@ -20,11 +20,60 @@ use crate::format::Value;
 use crate::primitives::BuiltinRegistry;
 use crate::runner::{RunError, error, load_failure};
 
+/// One source or artifact file a machine actually loaded during a test run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedInput {
+    /// Engine-form path of the loaded file.
+    pub path: String,
+    /// True when the machine assembled `.asm` or compiled `.jack` in memory
+    /// instead of loading a `.hack` or `.vm` artifact from disk.
+    pub built_from_source: bool,
+}
+
 /// Where a machine finds the files a script names.
 pub struct Files<'a> {
     pub host: &'a SharedHost,
     /// The script's folder, in engine form.
     pub dir: &'a str,
+    /// Assemble `.asm` (for `load X.hack`) or compile `.jack` (for `load` /
+    /// `load X.vm`) in memory when the built artifact does not exist yet or
+    /// its source is listed in `prefer_sources`. Never writes to disk.
+    pub build_from_source: bool,
+    /// Normalized paths of source files to build in memory even when a
+    /// `.hack` or `.vm` file already exists on disk.
+    pub prefer_sources: &'a [String],
+    /// Whether the folder's file system compares file names case-insensitively.
+    pub ignore_case: bool,
+}
+
+impl<'a> Files<'a> {
+    /// Files with strict official-tool loading (no in-memory source builds).
+    pub fn plain(host: &'a SharedHost, dir: &'a str) -> Self {
+        Self {
+            host,
+            dir,
+            build_from_source: false,
+            prefer_sources: &[],
+            ignore_case: false,
+        }
+    }
+
+    /// Whether `file` (in engine form) is marked as preferred over a built
+    /// artifact on disk.
+    pub fn prefers(&self, file: &str) -> bool {
+        let normalized = path::normalize(file);
+        let fold = self.ignore_case || looks_like_windows(&normalized);
+        self.prefer_sources.iter().any(|candidate| {
+            let candidate = path::normalize(candidate);
+            candidate == normalized || (fold && candidate.eq_ignore_ascii_case(&normalized))
+        })
+    }
+}
+
+fn looks_like_windows(normalized: &str) -> bool {
+    let bytes = normalized.as_bytes();
+    normalized.starts_with("//")
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 /// What kind of thing an observed value is, for display.
@@ -83,6 +132,11 @@ pub trait Machine {
         Vec::new()
     }
 
+    /// The source or artifact files the machine actually loaded.
+    fn loaded_inputs(&self) -> Vec<LoadedInput> {
+        Vec::new()
+    }
+
     /// Presses (or with `0` releases) a key on the machine's keyboard.
     /// Returns `false` if the machine has no keyboard.
     fn set_key(&mut self, code: u16) -> bool;
@@ -105,6 +159,7 @@ pub struct HardwareMachine {
     registry: BuiltinRegistry,
     circuit: Option<Circuit>,
     loaded: Option<String>,
+    loaded_file: Option<String>,
     probes: bool,
 }
 
@@ -115,6 +170,7 @@ impl HardwareMachine {
             registry: BuiltinRegistry::standard(),
             circuit: None,
             loaded: None,
+            loaded_file: None,
             probes: false,
         }
     }
@@ -375,7 +431,7 @@ impl Machine for HardwareMachine {
         Dialect::Hardware
     }
 
-    fn load(&mut self, _files: &Files<'_>, file: &FileName) -> Result<(), RunError> {
+    fn load(&mut self, files: &Files<'_>, file: &FileName) -> Result<(), RunError> {
         if !file
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("hdl"))
@@ -386,7 +442,9 @@ impl Machine for HardwareMachine {
             ));
         }
         let name = file.stem().to_string();
-        self.load_chip(&name, &file.name, file.span)
+        self.load_chip(&name, &file.name, file.span)?;
+        self.loaded_file = Some(path::join(files.dir, &file.name));
+        Ok(())
     }
 
     fn execute(&mut self, files: &Files<'_>, statement: &SimpleStatement) -> Result<(), RunError> {
@@ -494,6 +552,16 @@ impl Machine for HardwareMachine {
                 },
                 width: pin.width,
                 bits: circuit.read(pin),
+            })
+            .collect()
+    }
+
+    fn loaded_inputs(&self) -> Vec<LoadedInput> {
+        self.loaded_file
+            .iter()
+            .map(|p| LoadedInput {
+                path: p.clone(),
+                built_from_source: false,
             })
             .collect()
     }

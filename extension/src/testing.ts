@@ -22,8 +22,22 @@ import {
     isError,
 } from './runtime/protocol';
 import { ignoresCase, pathKey, samePath } from './paths';
-import { FolderListing, StoredResult, countRows, replaces, restore, toSave } from './resultStore';
+import { FolderListing, RunInput, StoredResult, countRows, replaces, restore, resultMatchesFile, toSave } from './resultStore';
+import {
+    compareFilesForScript,
+    findByStem,
+    isForeverScript,
+    orderScriptCandidates,
+    parseScriptLinks,
+    scriptTestsFile,
+    scriptUsesSavedFile,
+} from './testLinks';
 import { describePin, keyName } from './values';
+
+export { commandFiles, namedFiles, withoutComments } from './testLinks';
+
+/** Maximum `.out` snapshot retained in memory for exact run diffs. */
+const MAX_OUTPUT_SNAPSHOT_BYTES = 512 * 1024;
 
 /** A script is stopped after this many commands. The longest official test
  * runs a few million; a script still going after this is stuck in a loop. */
@@ -68,15 +82,20 @@ export class TestExplorer implements vscode.Disposable {
     readonly onDidFinishScript = this.resultEmitter.event;
     private ready: Promise<void> | undefined;
     private readonly results = new Map<string, { uri: vscode.Uri; result: StoredResult }>();
+    /** Per-(script, loaded-input) results so a source build never masquerades as an artifact run. */
+    private readonly resultsByTarget = new Map<string, { uri: vscode.Uri; result: StoredResult }>();
     private readonly running = new Map<string, number>();
     /** When an engine file in a folder last changed, by folder key. */
     private readonly changedAt = new Map<string, number>();
+    /** Recent in-editor save times of source/artifact files to break coarse-FS mtime ties. */
+    private readonly savedFileAt = new Map<string, number>();
     private readonly statusEmitter = new vscode.EventEmitter<vscode.Uri | undefined>();
     /** Fires when a script starts or finishes, or results go stale (with no script). */
     readonly onDidChangeStatus = this.statusEmitter.event;
     private readonly saveTimers = new Map<string, { timer: NodeJS.Timeout; saved: vscode.Uri[] }>();
     private readonly autoRuns = new Map<string, { source: vscode.CancellationTokenSource; pending: Map<string, vscode.Uri>; done: Promise<unknown> }>();
     private readonly foreverCache = new Map<string, boolean>();
+    private readonly requestSources = new WeakMap<vscode.TestRunRequest, vscode.Uri[]>();
     private persistTimer: NodeJS.Timeout | undefined;
 
     constructor(
@@ -140,10 +159,12 @@ export class TestExplorer implements vscode.Disposable {
             }
         };
         // A file event can arrive well after the change (and after a run that
-        // already saw it): the file's own time says when it changed.
+        // already saw it): the file's own time says when it changed, clamped to
+        // `Date.now()` so a file with a future mtime (e.g. zip/clock skew) does
+        // not mark every later run in the folder stale.
         const onDisk = (uri: vscode.Uri) => {
             fs.promises.stat(uri.fsPath).then(
-                (stat) => changed(uri, stat.mtimeMs),
+                (stat) => changed(uri, Math.min(stat.mtimeMs, Date.now())),
                 () => changed(uri, Date.now()),
             );
         };
@@ -160,31 +181,69 @@ export class TestExplorer implements vscode.Disposable {
                 }
             }),
             vscode.workspace.onDidSaveTextDocument((document) => {
-                changed(document.uri, Date.now());
+                const now = Date.now();
+                if (document.uri.scheme === 'file' && ENGINE_FILE.test(document.fileName)) {
+                    this.savedFileAt.set(pathKey(document.uri.fsPath), now);
+                }
+                changed(document.uri, now);
                 this.saved(document);
             }),
         );
     }
 
-    /** The last result of a script and whether it still holds. */
-    statusOf(script: vscode.Uri): ScriptStatus {
+    /**
+     * The last result of a script and whether it still holds. When `forFile` is
+     * provided (e.g. a `.hack` editor or panel), only a run that actually tested
+     * that file is returned, so a source build of `double.asm` never shows a
+     * passing result for a broken `Double.hack`.
+     */
+    statusOf(script: vscode.Uri, forFile?: vscode.Uri): ScriptStatus {
         const key = pathKey(script.fsPath);
-        const entry = this.results.get(key)?.result;
+        let entry: StoredResult | undefined;
+        if (forFile) {
+            const targetKey = `${key}\n${pathKey(forFile.fsPath)}`;
+            const specific = this.resultsByTarget.get(targetKey)?.result;
+            const main = this.results.get(key)?.result;
+            if (specific) {
+                entry = specific;
+            } else if (main && resultMatchesFile(main, forFile.fsPath, ignoresCase(forFile.fsPath))) {
+                entry = main;
+            }
+        } else {
+            entry = this.results.get(key)?.result;
+        }
         if (this.running.has(key)) {
             return { status: 'running', result: entry };
         }
         if (!entry) {
             return { status: 'none' };
         }
-        const changed = this.changedAt.get(pathKey(path.dirname(script.fsPath))) ?? 0;
+        const scriptChanged = this.changedAt.get(pathKey(path.dirname(script.fsPath))) ?? 0;
+        const fileChanged = forFile ? (this.changedAt.get(pathKey(path.dirname(forFile.fsPath))) ?? 0) : 0;
+        const changed = Math.max(scriptChanged, fileChanged);
         // From the start of the run: an edit made while it ran is not in its result.
         return { status: changed > entry.started ? 'stale' : 'current', result: entry };
     }
 
+    private indexTargets(uri: vscode.Uri, result: StoredResult): void {
+        const scriptKey = pathKey(uri.fsPath);
+        for (const input of result.inputs ?? []) {
+            const targetKey = `${scriptKey}\n${pathKey(input.path)}`;
+            if (replaces(this.resultsByTarget.get(targetKey)?.result, result)) {
+                this.resultsByTarget.set(targetKey, { uri, result });
+            }
+        }
+    }
+
     private store(uri: vscode.Uri, result: StoredResult): void {
         const key = pathKey(uri.fsPath);
+        let updated = false;
         if (replaces(this.results.get(key)?.result, result)) {
             this.results.set(key, { uri, result });
+            updated = true;
+        }
+        this.indexTargets(uri, result);
+        if (updated) {
             this.persist();
         }
     }
@@ -218,7 +277,9 @@ export class TestExplorer implements vscode.Disposable {
     /** Results of earlier sessions that still hold. */
     private load(): void {
         for (const { path: file, result } of restore(this.state?.get(STORE_KEY), listFolder)) {
-            this.results.set(pathKey(file), { uri: vscode.Uri.file(file), result });
+            const uri = vscode.Uri.file(file);
+            this.results.set(pathKey(file), { uri, result });
+            this.indexTargets(uri, result);
         }
         this.persist();
     }
@@ -321,7 +382,12 @@ export class TestExplorer implements vscode.Disposable {
             }
             // Only this run's own results count as done: a manual run of the
             // same script finishing meanwhile does not finish it here.
-            const results = await this.runScripts(tests, { quiet: true, token: source.token });
+            const savedSources = saved.filter((uri) => /\.(asm|jack|hack|vm)$/i.test(uri.fsPath));
+            const results = await this.runScripts(tests, {
+                quiet: true,
+                token: source.token,
+                ...(savedSources.length > 0 ? { source: savedSources } : {}),
+            });
             for (const result of results) {
                 if (result.outcome.kind !== 'cancelled') {
                     pending.delete(pathKey(result.uri.fsPath));
@@ -456,13 +522,16 @@ export class TestExplorer implements vscode.Disposable {
      */
     async runScripts(
         uris: vscode.Uri[],
-        options: { quiet?: boolean; token?: vscode.CancellationToken } = {},
+        options: { quiet?: boolean; token?: vscode.CancellationToken; source?: vscode.Uri | vscode.Uri[] } = {},
     ): Promise<ScriptResult[]> {
         const items = uris.map((uri) => this.add(uri));
         const request =
             options.quiet === undefined
                 ? new vscode.TestRunRequest(items)
                 : new vscode.TestRunRequest(items, undefined, undefined, options.quiet, options.quiet);
+        if (options.source) {
+            this.requestSources.set(request, Array.isArray(options.source) ? options.source : [options.source]);
+        }
         return this.run(request, options.token ?? new vscode.CancellationTokenSource().token);
     }
 
@@ -478,11 +547,13 @@ export class TestExplorer implements vscode.Disposable {
         const results: ScriptResult[] = [];
         const scripts = this.scripts(request);
         scripts.forEach((item) => run.enqueued(item));
+        const explicitSource = this.requestSources.get(request);
         try {
-            // Every script of the run sees the files as they are now: a change
-            // after this moment is not in any of its results.
+            // Capture unsaved buffers synchronously once for this run; each
+            // `test.open` passes this exact snapshot atomically with its
+            // `preferSources` so concurrent edits or panel reloads cannot race.
             const synced = Date.now();
-            await this.runtime.syncUnsaved();
+            const overlay = this.runtime.captureUnsaved();
             for (const item of scripts) {
                 if (token.isCancellationRequested) {
                     run.skipped(item);
@@ -491,7 +562,7 @@ export class TestExplorer implements vscode.Disposable {
                 this.setRunning(item.uri!, 1);
                 let result: ScriptResult;
                 try {
-                    result = await this.runOne(run, item, token, synced);
+                    result = await this.runOne(run, item, token, synced, overlay, explicitSource);
                 } finally {
                     this.setRunning(item.uri!, -1);
                 }
@@ -513,6 +584,8 @@ export class TestExplorer implements vscode.Disposable {
         item: vscode.TestItem,
         token: vscode.CancellationToken,
         synced: number,
+        overlay: { path: string; text: string; ignoreCase: boolean }[],
+        explicitSources?: vscode.Uri[],
     ): Promise<ScriptResult> {
         const uri = item.uri!;
         const name = path.basename(uri.fsPath);
@@ -520,36 +593,61 @@ export class TestExplorer implements vscode.Disposable {
         const started = Date.now();
         run.started(item);
         const notes: string[] = [];
+        const explicitOnlyArtifacts =
+            explicitSources !== undefined
+            && explicitSources.length > 0
+            && explicitSources.every((u) => /\.(hack|vm)$/i.test(u.fsPath));
+        const fallbackErrorInputs = (): RunInput[] | undefined => {
+            if (!explicitSources || explicitSources.length === 0) {
+                return undefined;
+            }
+            return explicitSources.map((u) => ({
+                path: u.fsPath,
+                builtFromSource: /\.(asm|jack)$/i.test(u.fsPath),
+            }));
+        };
         const remember = (kind: TestOutcome['kind'], details: Partial<StoredResult> = {}) =>
             this.store(uri, { kind, comparedLines: 0, failureCount: 0, failures: [], notes, started: synced, finished: Date.now(), ...details });
 
-        const errored = (message: string, range: Range | null, kind: 'error' | 'limit' = 'error'): ScriptResult => {
+        const errored = (message: string, range: Range | null, kind: 'error' | 'limit' = 'error', inputs?: RunInput[]): ScriptResult => {
             const testMessage = new vscode.TestMessage(message);
             if (range) {
                 testMessage.location = new vscode.Location(uri, toRange(range));
             }
             run.errored(item, testMessage, Date.now() - started);
             say(`✗ ${name}: ${message}`);
-            remember(kind, { message });
+            remember(kind, { message, ...(inputs && inputs.length > 0 ? { inputs } : {}) });
             return { uri, outcome: { kind: 'error', message, range: null }, failures: [], keysPressed: [] };
         };
 
         let session: number | undefined;
         try {
+            const config = vscode.workspace.getConfiguration('nandwright');
+            const buildSources = !explicitOnlyArtifacts && config.get<boolean>('test.buildSources', true);
+            const preferSources = buildSources
+                ? await preferredSources(uri, explicitSources, overlay, this.savedFileAt)
+                : [];
             const opened = await this.runtime.call<TestOpened>({
                 op: 'test.open',
                 path: uri.fsPath,
                 crlf: process.platform === 'win32',
                 collectAll: true,
-                autoKeyboard: vscode.workspace.getConfiguration('nandwright').get('test.pressKeys', true),
+                autoKeyboard: config.get('test.pressKeys', true),
                 // Nobody can press a key in the Testing view: a wait that nothing can end is not worth 200 million commands.
                 stopEndlessWaits: true,
+                buildSources,
+                preferSources,
+                ignoreCase: ignoresCase(uri.fsPath),
+                overlay,
                 maxCommands: MAX_COMMANDS,
             });
             session = opened.session;
             if (opened.runsForever) {
-                const reason =
-                    'This script repeats forever by design (it has a `repeat` without a count), so it has no result to report. It is meant to be watched: use "Step Through the Script" to run it.';
+                const how =
+                    opened.dialect === 'hardware'
+                        ? 'use "Step Through the Script" to run it.'
+                        : 'open the program with "Run Program" to interact with it, or use "Step Through the Script".';
+                const reason = `This script repeats forever by design (it has a \`repeat\` without a count), so it has no result to report. It is meant to be watched: ${how}`;
                 run.skipped(item);
                 say(`- ${name}: skipped. ${reason}`);
                 remember('skipped', { message: reason });
@@ -588,10 +686,35 @@ export class TestExplorer implements vscode.Disposable {
             }
             const outcome = status.outcome!;
             const duration = Date.now() - started;
+            const inspectMeta = async (): Promise<{
+                inspection: TestInspection;
+                meta: Pick<StoredResult, 'inputs' | 'comparePath' | 'outputPath' | 'outputText'>;
+            }> => {
+                const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
+                const outputText =
+                    inspection.output !== null && Buffer.byteLength(inspection.output, 'utf8') <= MAX_OUTPUT_SNAPSHOT_BYTES
+                        ? inspection.output
+                        : undefined;
+                return {
+                    inspection,
+                    meta: {
+                        ...(inspection.loaded && inspection.loaded.length > 0 ? { inputs: inspection.loaded } : {}),
+                        ...(inspection.comparePath ? { comparePath: inspection.comparePath } : {}),
+                        ...(inspection.outputPath ? { outputPath: inspection.outputPath } : {}),
+                        ...(outputText !== undefined ? { outputText } : {}),
+                    },
+                };
+            };
             switch (outcome.kind) {
                 case 'passed': {
+                    const { meta } = await inspectMeta();
                     run.passed(item, duration);
-                    remember('passed', { comparedLines: outcome.comparedLines, rows: Math.max(0, outcome.comparedLines - 1), differingRows: 0 });
+                    remember('passed', {
+                        ...meta,
+                        comparedLines: outcome.comparedLines,
+                        rows: Math.max(0, outcome.comparedLines - 1),
+                        differingRows: 0,
+                    });
                     say(`✓ ${name}: comparison ended successfully (${outcome.comparedLines} lines compared)`);
                     if (outcome.unreachedLines > 0) {
                         say(
@@ -601,18 +724,20 @@ export class TestExplorer implements vscode.Disposable {
                     break;
                 }
                 case 'unchecked': {
+                    const { meta } = await inspectMeta();
                     run.passed(item, duration);
                     const reason = 'the script ran to its end. It has no compare-to, so nothing was checked.';
-                    remember('unchecked', { message: reason });
+                    remember('unchecked', { ...meta, message: reason });
                     say(`✓ ${name}: ${reason}`);
                     break;
                 }
                 case 'failed': {
-                    const inspection = await this.runtime.call<TestInspection>({ op: 'test.inspect', session });
+                    const { inspection, meta } = await inspectMeta();
                     run.failed(item, failureMessages(uri, failures, inspection, notes), duration);
                     // Every line the script wrote was compared, up to the end of the compare file.
                     const comparedLines = Math.min(lines.length, inspection.expected?.length ?? lines.length);
                     remember('failed', {
+                        ...meta,
                         comparedLines,
                         ...countRows(inspection.expected ?? [], comparedLines, failures.map((failure) => failure.line)),
                         failureCount: outcome.failureCount,
@@ -627,16 +752,21 @@ export class TestExplorer implements vscode.Disposable {
                     say(comparisonTable(inspection.expected ?? [], lines));
                     break;
                 }
-                case 'error':
-                    return errored(outcome.message, outcome.range);
-                case 'limit':
+                case 'error': {
+                    const { meta } = await inspectMeta();
+                    return errored(outcome.message, outcome.range, 'error', meta.inputs ?? fallbackErrorInputs());
+                }
+                case 'limit': {
+                    const { meta } = await inspectMeta();
                     return errored(
                         `The script was still running after ${outcome.commands.toLocaleString('en-US')} commands, so it was stopped.` +
                             (outcome.echo ? ` Its last message was: "${outcome.echo}".` : '') +
                             ' A script that loops forever or waits for input is meant to be used interactively.',
                         null,
                         'limit',
+                        meta.inputs ?? fallbackErrorInputs(),
                     );
+                }
                 case 'cancelled':
                     run.skipped(item);
                     say(`- ${name}: cancelled`);
@@ -765,51 +895,269 @@ export async function textOf(file: string): Promise<string | null> {
     }
 }
 
-/** A script's text without comments: a command named only in a comment does not count. */
-export function withoutComments(text: string): string {
-    return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-}
+/**
+ * Source files (`.asm` or `.jack`) loaded by `script` that should be built in
+ * memory even when a `.hack` or `.vm` artifact already exists on disk:
+ * - the explicit `.asm`/`.jack` source file(s) the student ran or saved;
+ * - any source file present in the captured unsaved `overlay`;
+ * - any source file whose modification time is newer than the actual loaded
+ *   artifact (or tied on a coarse-timestamp filesystem after a recent source save).
+ *
+ * Launching from a single `.jack` file only prefers THAT `.jack` file (plus
+ * dirty/newer siblings), never forcing unrelated untouched `.jack` files over
+ * valid `.vm` artifacts. When the built `.hack` or `.vm` artifact is newer than
+ * an untouched source (project 6/11 own tool outputs), the source is NOT listed.
+ */
+export async function preferredSources(
+    script: vscode.Uri,
+    explicitSource?: vscode.Uri | vscode.Uri[],
+    overlay?: { path: string; text: string; ignoreCase: boolean }[],
+    savedFileAt?: Map<string, number>,
+): Promise<string[]> {
+    const scriptDir = path.dirname(script.fsPath);
+    const scriptText = (await textOf(script.fsPath)) ?? '';
+    const parsed = parseScriptLinks(scriptText);
 
-/** The files a script names in one kind of command; a name may be in double quotes. */
-export function commandFiles(script: string, command: 'load' | 'compare-to'): string[] {
-    const pattern = new RegExp(`\\b${command}\\s+(?:"([^"\\r\\n]+)"|([^\\s,;"]+))`, 'g');
-    return [...withoutComments(script).matchAll(pattern)].map((match) => match[1] ?? match[2]);
-}
+    const dirty = new Set(
+        overlay
+            ? overlay.map((buf) => pathKey(buf.path, buf.ignoreCase))
+            : vscode.workspace.textDocuments
+                  .filter((doc) => doc.isDirty && doc.uri.scheme === 'file')
+                  .map((doc) => pathKey(doc.uri.fsPath)),
+    );
+    const explicitList = explicitSource ? (Array.isArray(explicitSource) ? explicitSource : [explicitSource]) : [];
+    const explicitKeys = new Set(
+        explicitList
+            .filter((u) => /\.(asm|jack)$/i.test(u.fsPath))
+            .map((u) => pathKey(u.fsPath)),
+    );
 
-/** The files a script names in `load` and `compare-to` commands. */
-export function namedFiles(script: string): string[] {
-    return [...commandFiles(script, 'load'), ...commandFiles(script, 'compare-to')];
+    const preferred: string[] = [];
+    const added = new Set<string>();
+    const addPreferred = (filePath: string) => {
+        const key = pathKey(filePath);
+        if (!added.has(key)) {
+            added.add(key);
+            preferred.push(filePath);
+        }
+    };
+
+    const isSourceFresher = async (sourcePath: string, artifactPath: string): Promise<boolean> => {
+        try {
+            const [sourceStat, artifactStat] = await Promise.all([
+                fs.promises.stat(sourcePath),
+                fs.promises.stat(artifactPath),
+            ]);
+            if (sourceStat.mtimeMs > artifactStat.mtimeMs) {
+                return true;
+            }
+            if (sourceStat.mtimeMs === artifactStat.mtimeMs && savedFileAt) {
+                const sourceSaved = savedFileAt.get(pathKey(sourcePath)) ?? 0;
+                const artifactSaved = savedFileAt.get(pathKey(artifactPath)) ?? 0;
+                if (sourceSaved > artifactSaved) {
+                    return true;
+                }
+            }
+        } catch {
+            // Unreadable or missing artifact: leave missing-artifact fallback to the engine.
+        }
+        return false;
+    };
+
+    const checkDir = async (dir: string, explicitArtifactByStem?: Map<string, string>, allowAsm = true) => {
+        let names: string[];
+        try {
+            names = await fs.promises.readdir(dir);
+        } catch {
+            return;
+        }
+        const ignoreCase = ignoresCase(path.join(dir, names[0] ?? 'x'));
+        for (const name of names) {
+            const isAsm = allowAsm && /\.asm$/i.test(name);
+            const isJack = /\.jack$/i.test(name);
+            if (!isAsm && !isJack) {
+                continue;
+            }
+            const full = path.join(dir, name);
+            const key = pathKey(full, ignoreCase);
+            if (explicitKeys.has(key) || dirty.has(key)) {
+                addPreferred(full);
+                continue;
+            }
+            const stem = name.replace(/\.[^.]*$/, '');
+            const artifactExt = isAsm ? 'hack' : 'vm';
+            const mappedArtifact = explicitArtifactByStem?.get(
+                (isAsm || ignoreCase) ? stem.toLowerCase() : stem,
+            );
+            const artifactName =
+                mappedArtifact
+                ?? findByStem(names, stem, artifactExt, ignoreCase, isAsm);
+            if (!artifactName) {
+                continue;
+            }
+            if (await isSourceFresher(full, path.join(dir, artifactName))) {
+                addPreferred(full);
+            }
+        }
+    };
+
+    // Map explicit `load X.hack` / `load X.vm` targets so freshness is always
+    // measured against the exact artifact the script actually loads.
+    const explicitArtifacts = new Map<string, string>();
+    const scriptIgnoreCase = ignoresCase(script.fsPath);
+    for (const target of parsed.loads) {
+        const dot = target.lastIndexOf('.');
+        const ext = dot > 0 ? target.slice(dot + 1).toLowerCase() : '';
+        if (ext === 'hack' || ext === 'vm') {
+            const stem = target.slice(0, dot);
+            const mapKey = (ext === 'hack' || scriptIgnoreCase) ? stem.toLowerCase() : stem;
+            if (!explicitArtifacts.has(mapKey)) {
+                explicitArtifacts.set(mapKey, target);
+            }
+        }
+    }
+
+    await checkDir(scriptDir, explicitArtifacts, true);
+    for (const subFolder of parsed.loadFolders) {
+        await checkDir(path.join(scriptDir, subFolder), undefined, false);
+    }
+    return preferred;
 }
 
 /**
- * The scripts in a file's folder that test it: the file itself if it is a
- * script, scripts with the same name, and scripts that load it or compare
- * with it. Names are compared as the folder's file system compares them.
+ * The `.tst` scripts that test `file` (`.hdl`, `.asm`, `.hack`, `.vm` or
+ * `.jack`): scripts in the same folder, plus (for `.vm`/`.jack`) scripts in
+ * the parent folder that `load <thisFolder>`. Forever demonstration scripts
+ * (such as `Fill.tst`) are omitted by default.
+ */
+export async function scriptsForFile(
+    file: vscode.Uri,
+    options: { includeForever?: boolean } = {},
+): Promise<vscode.Uri[]> {
+    const dir = path.dirname(file.fsPath);
+    const fileName = path.basename(file.fsPath);
+    const ignoreCase = ignoresCase(file.fsPath);
+    const found: vscode.Uri[] = [];
+    const seen = new Set<string>();
+    const scanDir = async (scanPath: string, subfolderName?: string) => {
+        let names: string[];
+        try {
+            names = await fs.promises.readdir(scanPath);
+        } catch {
+            return;
+        }
+        const entriesForCheck = subfolderName ? [] : names;
+        for (const name of names.sort((a, b) => a.localeCompare(b))) {
+            if (!/\.tst$/i.test(name)) {
+                continue;
+            }
+            const script = path.join(scanPath, name);
+            const key = pathKey(script);
+            if (seen.has(key)) {
+                continue;
+            }
+            const text = await textOf(script);
+            if (text === null) {
+                continue;
+            }
+            if (!options.includeForever && isForeverScript(text)) {
+                continue;
+            }
+            if (scriptTestsFile(text, fileName, entriesForCheck, ignoreCase, subfolderName)) {
+                seen.add(key);
+                found.push(vscode.Uri.file(script));
+            }
+        }
+    };
+    await scanDir(dir);
+    if (/\.(vm|jack)$/i.test(fileName)) {
+        const parent = path.dirname(dir);
+        const folderName = path.basename(dir);
+        if (parent !== dir && folderName) {
+            await scanDir(parent, folderName);
+        }
+    }
+    return found;
+}
+
+/**
+ * Ranks a file's test scripts consistently across ComputerPanel, Step Through
+ * and Compare Output (current failure → readable `.cmp` → exact stem → name).
+ */
+export async function rankScriptsForFile(
+    scripts: vscode.Uri[],
+    file: vscode.Uri,
+    tests: TestExplorer,
+): Promise<vscode.Uri[]> {
+    const candidates = await Promise.all(
+        scripts.map(async (script) => {
+            const st = tests.statusOf(script, file);
+            const currentFailure = st.status === 'current' && st.result.kind === 'failed';
+            const text = await textOf(script.fsPath);
+            let hasCompare = false;
+            if (text !== null) {
+                const { comparePath } = compareFilesForScript(text, script.fsPath);
+                if (comparePath) {
+                    try {
+                        const stat = await fs.promises.stat(comparePath);
+                        hasCompare = stat.isFile();
+                    } catch {
+                        // Compare file absent.
+                    }
+                }
+            }
+            return {
+                item: script,
+                scriptName: path.basename(script.fsPath),
+                currentFailure,
+                hasCompare,
+            };
+        }),
+    );
+    return orderScriptCandidates(candidates, path.basename(file.fsPath));
+}
+
+/**
+ * The scripts that use `file` when saved: the file itself if it is a script,
+ * scripts in the same folder that test/compare it, plus (for `.vm`/`.jack`)
+ * scripts in the parent folder that `load <thisFolder>`.
  */
 export async function scriptsUsing(file: vscode.Uri): Promise<vscode.Uri[]> {
     const dir = path.dirname(file.fsPath);
-    const fold = ignoresCase(file.fsPath) ? (name: string) => name.toLowerCase() : (name: string) => name;
-    const savedName = fold(path.basename(file.fsPath));
-    const stem = (name: string) => name.replace(/\.[^.]*$/, '');
-    let names: string[];
-    try {
-        names = await fs.promises.readdir(dir);
-    } catch {
-        return [];
-    }
+    const savedName = path.basename(file.fsPath);
+    const ignoreCase = ignoresCase(file.fsPath);
     const found: vscode.Uri[] = [];
-    for (const name of names.sort()) {
-        if (!/\.tst$/i.test(name)) {
-            continue;
+    const seen = new Set<string>();
+    const scanDir = async (scanPath: string, subfolderName?: string) => {
+        let names: string[];
+        try {
+            names = await fs.promises.readdir(scanPath);
+        } catch {
+            return;
         }
-        const script = path.join(dir, name);
-        let uses = fold(name) === savedName || stem(fold(name)) === stem(savedName);
-        if (!uses) {
+        const entriesForCheck = subfolderName ? [] : names;
+        for (const name of names.sort()) {
+            if (!/\.tst$/i.test(name)) {
+                continue;
+            }
+            const script = path.join(scanPath, name);
+            const key = pathKey(script);
+            if (seen.has(key)) {
+                continue;
+            }
             const text = await textOf(script);
-            uses = text !== null && namedFiles(text).some((named) => fold(named) === savedName);
+            if (text !== null && scriptUsesSavedFile(text, name, savedName, entriesForCheck, ignoreCase, subfolderName)) {
+                seen.add(key);
+                found.push(vscode.Uri.file(script));
+            }
         }
-        if (uses) {
-            found.push(vscode.Uri.file(script));
+    };
+    await scanDir(dir);
+    if (/\.(vm|jack)$/i.test(savedName)) {
+        const parent = path.dirname(dir);
+        const folderName = path.basename(dir);
+        if (parent !== dir && folderName) {
+            await scanDir(parent, folderName);
         }
     }
     return found;

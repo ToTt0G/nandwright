@@ -47,7 +47,7 @@ the `.out` file (line endings aside) are compared.
 | A program of exactly 32768 instructions | The assembler crashes and leaves a truncated `.hack`. | An error: a program can have at most 32767 instructions, which is the most Java assembles. | |
 | Exit status and missing output | The assembler exits with status 0 even on an error, and writes nothing if any folder in the path contains a `.` | Errors are errors; paths are paths. | |
 | Surprising assembly that Java accepts (`@-1`, a label defined twice, `D<tab>JGT` losing its jump, …) | Accepted silently. | Accepted with the same machine code, plus a warning. | Same output, but you are told. |
-| A test loads `Prog.hack` while `Prog.asm` next to it assembles to something else | Runs the `.hack`. | Runs the `.hack` too, and adds a note to the test output. | The usual cause is forgetting to assemble again. |
+| A test loads `Prog.hack` while `Prog.asm` (or `prog.asm`) is next to it | Requires `Prog.hack` on disk and runs it as-is. | `n2t test` matches Java (requires `Prog.hack`, runs it, and adds a note if the sibling `.asm` assembles to something else). `n2t test --build` assembles a sibling `.asm` in memory only when `Prog.hack` is missing on disk (never replaces an existing `.hack`). In VS Code (`nandwright.test.buildSources`, on by default), Nandwright assembles the sibling `.asm` in memory when `.hack` is missing, older than `.asm`, or `.asm` has unsaved edits or was explicitly run — without writing `.hack` to disk. Running explicitly from `.hack` always tests the `.hack` file directly, and a newer `.hack` (for example from a project 6 assembler) is tested as-is. | In project 4 (`Mult.tst`, `FillAutomatic.tst`), the official scripts load `.hack` while students edit `.asm` (and the course ships lowercase `mult.asm`). Assembling in memory removes the manual assemble-and-overwrite loop without ever clobbering project 6 `.hack` files. |
 | State after a run-time error (an address out of range) | Cannot be observed: the script stops. | The failing instruction changes nothing. | |
 
 ## VM emulator
@@ -80,12 +80,15 @@ deliberately meaningless.
 
 - **Output files have your platform's line endings**, as with the Java tools
   (CRLF on Windows, LF elsewhere).
-- **Running Jack does not write `.vm` files.** The official flow is to compile
+- **Running or testing Jack does not write `.vm` files.** The official flow is to compile
   to `.vm` files and then load the folder in the VM Emulator. Nandwright
-  compiles in memory when you run a `.jack` file, because in projects 10 and 11
-  the `.vm` files in the folder are your own compiler's output. "Compile Jack to
-  VM Files" writes them when you ask, and asks before replacing a file whose
-  content differs.
+  compiles in memory when you run a `.jack` file. For VM Emulator test scripts (`load X.vm`
+  or bare `load,`), `n2t test --build` compiles `.jack` in memory only when the matching
+  `.vm` file is missing; in VS Code (`nandwright.test.buildSources`, on by default), it also
+  compiles `.jack` in memory when `.jack` is newer than `.vm`, has unsaved edits, or was
+  explicitly run, while explicit runs from `.vm` and up-to-date `.vm` files (such as your
+  own project 11 compiler's output) are tested as-is and never overwritten. "Compile Jack to
+  VM Files" writes them when you ask, and asks before replacing a file whose content differs.
 - **The formatter** has no counterpart in the official tools. It changes only
   whitespace (indentation, spacing, runs of blank lines), never joins two
   lines or splits one, and checks that the formatted text has the same tokens

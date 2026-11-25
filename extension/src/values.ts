@@ -159,11 +159,32 @@ export function rawCells(line: string): string[] {
 }
 
 /**
+ * Whether a raw (untrimmed) output cell matches the expected compare-file cell
+ * using the simulator engine's exact rule: same character count, and every
+ * character matches unless the expected character is `*` (single-character
+ * wildcard).
+ */
+export function cellMatchesExpected(expectedRawCell: string, actualRawCell: string): boolean {
+    if (expectedRawCell.length !== actualRawCell.length) {
+        return false;
+    }
+    for (let i = 0; i < expectedRawCell.length; i++) {
+        if (expectedRawCell[i] !== '*' && expectedRawCell[i] !== actualRawCell[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * The lines of a compare file as cells, at most `limit` rows after the
  * header, with the line of the file each row is on (from 1, as the test
  * engine counts them: a blank line is a line, but not a row).
  */
-export function parseCompare(text: string, limit: number): { header: string[]; rows: string[][]; lines: number[]; more: number } | null {
+export function parseCompare(
+    text: string,
+    limit: number,
+): { header: string[]; rows: string[][]; rawRows: string[][]; lines: number[]; more: number } | null {
     const numbered = text
         .split(/\r?\n/)
         .map((line, i) => ({ line, number: i + 1 }))
@@ -173,10 +194,12 @@ export function parseCompare(text: string, limit: number): { header: string[]; r
     }
     const cells = (line: string): string[] => rawCells(line).map((piece) => piece.trim());
     const rows = numbered.slice(1);
+    const shown = rows.slice(0, limit);
     return {
         header: cells(numbered[0].line),
-        rows: rows.slice(0, limit).map(({ line }) => cells(line)),
-        lines: rows.slice(0, limit).map(({ number }) => number),
+        rows: shown.map(({ line }) => cells(line)),
+        rawRows: shown.map(({ line }) => rawCells(line)),
+        lines: shown.map(({ number }) => number),
         more: Math.max(0, rows.length - limit),
     };
 }

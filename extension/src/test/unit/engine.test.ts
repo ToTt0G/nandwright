@@ -199,10 +199,9 @@ test('paths are compared as the file system holding them compares names', () => 
     const sameFile = fs.existsSync(upper);
     assert.equal(ignoresCase(lower), sameFile);
     assert.equal(ignoresCase(upper), sameFile);
-    // Keys fold case only where the platform's usual file systems do.
-    const folds = process.platform === 'win32' || process.platform === 'darwin';
-    assert.equal(pathKey(lower) === pathKey(upper), folds);
-    assert.equal(samePath(lower, upper), folds);
+    // Keys fold case according to whether the volume holding the files ignores case.
+    assert.equal(pathKey(lower) === pathKey(upper), sameFile);
+    assert.equal(samePath(lower, upper), sameFile);
     // Spelling the same file differently is always one path.
     assert.equal(samePath(lower, path.join(dir, '.', 'sub', '..', 'chip.hdl')), true);
     assert.equal(samePath(lower, path.join(dir, 'other.hdl')), false);
@@ -264,7 +263,13 @@ test('compare file cells are read as numbers the way the tools write them', () =
 
 test('a compare file is split into cells and long ones are cut', () => {
     const parsed = parseCompare('|  a  |  out |\r\n|  0  |   1  |\n\n|  1  |  0  |\n', 256)!;
-    assert.deepEqual(parsed, { header: ['a', 'out'], rows: [['0', '1'], ['1', '0']], lines: [2, 4], more: 0 });
+    assert.deepEqual(parsed, {
+        header: ['a', 'out'],
+        rows: [['0', '1'], ['1', '0']],
+        rawRows: [['  0  ', '   1  '], ['  1  ', '  0  ']],
+        lines: [2, 4],
+        more: 0,
+    });
     const long = parseCompare(['| a |', ...Array.from({ length: 300 }, () => '| 0 |')].join('\n'), 256)!;
     assert.equal(long.rows.length, 256);
     assert.equal(long.more, 44);

@@ -22,7 +22,7 @@ use n2t_core::source::{LineIndex, Span};
 use n2t_core::tst::ast::*;
 
 use crate::format::{self, Comparator, Mismatch, Value};
-use crate::machine::{Files, HardwareMachine, Machine, Observed};
+use crate::machine::{Files, HardwareMachine, LoadedInput, Machine, Observed};
 
 pub use crate::program::parse_hack;
 
@@ -69,6 +69,17 @@ pub struct RunnerOptions {
     /// the command limit. A script being debugged does not: the student may
     /// be changing the chip while it waits.
     pub stop_endless_waits: bool,
+    /// Assemble `.asm` (for `load X.hack`) or compile `.jack` (for `load` /
+    /// `load X.vm`) in memory when the built artifact does not exist yet or
+    /// its source is listed in `prefer_sources`. Never writes `.hack` or `.vm`
+    /// files to disk.
+    pub build_from_source: bool,
+    /// Normalized source file paths that should be built in memory even when
+    /// a `.hack` or `.vm` file already exists on disk (e.g. an unsaved editor
+    /// buffer or a source edited after the built file).
+    pub prefer_sources: Vec<String>,
+    /// Whether the script's folder ignores case in file names.
+    pub ignore_case: bool,
 }
 
 /// An error that stops a run.
@@ -399,6 +410,11 @@ impl ScriptRunner {
     /// The lines of the compare file, if one is open.
     pub fn expected_lines(&self) -> Option<&[String]> {
         self.compare.as_ref().map(|(_, c)| c.expected_lines())
+    }
+
+    /// The source or artifact files loaded by the machine so far.
+    pub fn loaded_inputs(&self) -> Vec<LoadedInput> {
+        self.machine.loaded_inputs()
     }
 
     /// Every comparison failure seen so far. With
@@ -799,6 +815,9 @@ impl ScriptRunner {
                 let files = Files {
                     host: &self.host,
                     dir: &self.dir,
+                    build_from_source: self.options.build_from_source,
+                    prefer_sources: &self.options.prefer_sources,
+                    ignore_case: self.options.ignore_case,
                 };
                 let loaded = self.machine.load(&files, file);
                 for note in self.machine.take_notes() {
@@ -872,6 +891,9 @@ impl ScriptRunner {
                 let files = Files {
                     host: &self.host,
                     dir: &self.dir,
+                    build_from_source: self.options.build_from_source,
+                    prefer_sources: &self.options.prefer_sources,
+                    ignore_case: self.options.ignore_case,
                 };
                 self.machine.execute(&files, statement)?;
             }

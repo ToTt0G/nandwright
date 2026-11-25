@@ -8,7 +8,7 @@ use n2t_core::tst::ast::*;
 use n2t_hack::Cpu;
 
 use crate::format::Value;
-use crate::machine::{Files, Machine, Observed, Role};
+use crate::machine::{Files, LoadedInput, Machine, Observed, Role};
 use crate::runner::{RunError, error};
 
 /// The last data-memory address: the keyboard register.
@@ -29,6 +29,8 @@ pub struct LoadedProgram {
     /// For each ROM address, the zero-based source line of its instruction
     /// (for a `.hack` file, the line of the word).
     pub lines: Vec<u32>,
+    /// Whether this program was assembled from `.asm` in memory for a `.hack` load.
+    pub built_from_source: bool,
 }
 
 impl Default for CpuMachine {
@@ -58,76 +60,167 @@ impl CpuMachine {
         self.program.as_ref()
     }
 
+    /// Finds a `.asm` file in `dir` matching `stem`, returning the actual
+    /// directory entry spelling so preference checks match on case-insensitive
+    /// macOS/Linux volumes too. Exact case first, then a unique case-insensitive
+    /// match (the classic course distribution ships `mult.asm` beside `Mult.tst`).
+    fn find_sibling_asm(files: &Files<'_>, dir: &str, stem: &str) -> Option<String> {
+        if let Ok(entries) = files.host.list(dir) {
+            let candidates: Vec<String> = entries
+                .into_iter()
+                .filter(|e| !e.is_dir && path::has_extension(&e.name, "asm"))
+                .map(|e| e.name)
+                .collect();
+            if let Some(exact) = candidates.iter().find(|n| path::stem(n) == stem) {
+                return Some(path::join(dir, exact));
+            }
+            let folded: Vec<&String> = candidates
+                .iter()
+                .filter(|n| path::stem(n).eq_ignore_ascii_case(stem))
+                .collect();
+            return match folded.as_slice() {
+                [one] => Some(path::join(dir, one)),
+                _ => None,
+            };
+        }
+        let exact = path::join(dir, &format!("{stem}.asm"));
+        files.host.read(&exact).is_ok().then_some(exact)
+    }
+
+    fn assemble_source(name: &str, text: &str) -> Result<(Vec<u16>, Vec<u32>), String> {
+        let assembly = n2t_hack::assemble(text);
+        if let Some(d) = assembly.diagnostics.iter().find(|d| d.is_error()) {
+            let index = LineIndex::new(text);
+            let at = d.span.map_or(String::new(), |span| {
+                let (line, column) = index.line_col_one_based(text, span.start);
+                format!(":{line}:{column}")
+            });
+            return Err(format!(
+                "`{name}` does not assemble:\n  {name}{at}: {}",
+                d.message
+            ));
+        }
+        let index = LineIndex::new(text);
+        let lines = assembly
+            .source_map
+            .iter()
+            .map(|span| index.position(span.start).line)
+            .collect();
+        Ok((assembly.words, lines))
+    }
+
     /// Loads a `.asm` or `.hack` file. The error is a message for the user.
     pub fn load_file(&mut self, files: &Files<'_>, file: &str) -> Result<(), String> {
         let name = path::file_name(file);
+        let dir = path::dir(file);
+        let stem = path::stem(file);
         let is_hack = path::has_extension(file, "hack");
-        // The assembly a `.hack` file was (presumably) made from.
-        let sibling = path::join(path::dir(file), &format!("{}.asm", path::stem(file)));
-        let assembly_source = if is_hack {
-            n2t_core::host::read_text(files.host.as_ref(), &sibling).ok()
+        let is_asm = path::has_extension(file, "asm");
+
+        if is_asm {
+            let (resolved, text) = match n2t_core::host::read_text(files.host.as_ref(), file) {
+                Ok(found) => (file.to_string(), found.text),
+                Err(n2t_core::host::HostError::NotFound) if files.build_from_source => {
+                    if let Some(alt) = Self::find_sibling_asm(files, dir, stem) {
+                        let found = n2t_core::host::read_text(files.host.as_ref(), &alt)
+                            .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(&alt)))?;
+                        (alt, found.text)
+                    } else {
+                        return Err(format!(
+                            "cannot read `{name}`: {}",
+                            n2t_core::host::HostError::NotFound
+                        ));
+                    }
+                }
+                Err(e) => return Err(format!("cannot read `{name}`: {e}")),
+            };
+            let (words, lines) = Self::assemble_source(path::file_name(&resolved), &text)?;
+            self.cpu.load_rom(&words);
+            self.program = Some(LoadedProgram {
+                file: resolved,
+                lines,
+                built_from_source: false,
+            });
+            return Ok(());
+        }
+
+        // Loading a `.hack` file: find any sibling `.asm` (case-insensitively
+        // so `mult.asm` is found for `load Mult.hack` on Linux too).
+        let sibling = if is_hack {
+            Self::find_sibling_asm(files, dir, stem)
         } else {
             None
         };
-        let text = n2t_core::host::read_text(files.host.as_ref(), file)
-            .map_err(|e| match (&e, &assembly_source) {
+        let hack_file = n2t_core::host::read_text(files.host.as_ref(), file);
+
+        if is_hack
+            && files.build_from_source
+            && let Some(asm_path) = &sibling
+        {
+            let hack_missing = matches!(hack_file, Err(n2t_core::host::HostError::NotFound));
+            if hack_missing || files.prefers(asm_path) {
+                let asm_name = path::file_name(asm_path);
+                let asm_text = n2t_core::host::read_text(files.host.as_ref(), asm_path)
+                    .map_err(|e| format!("cannot read `{asm_name}`: {e}"))?
+                    .text;
+                let (words, lines) = Self::assemble_source(asm_name, &asm_text)?;
+                if let Ok(existing) = &hack_file
+                    && let Ok(existing_words) = n2t_hack::parse_hack(&existing.text)
+                    && existing_words != words
+                {
+                    self.notes.push(format!(
+                        "Assembled `{asm_name}` in memory (newer than `{name}` on disk)."
+                    ));
+                }
+                self.cpu.load_rom(&words);
+                self.program = Some(LoadedProgram {
+                    file: asm_path.clone(),
+                    lines,
+                    built_from_source: true,
+                });
+                return Ok(());
+            }
+        }
+
+        let text = hack_file
+            .map_err(|e| match (&e, &sibling) {
                 // The official emulator needs the `.hack` file too.
-                (n2t_core::host::HostError::NotFound, Some(_)) => format!(
+                (n2t_core::host::HostError::NotFound, Some(asm_path)) => format!(
                     "`{name}` does not exist yet. Assemble `{}` first (\"Assemble to .hack File\"), as you would with the official Assembler.",
-                    path::file_name(&sibling)
+                    path::file_name(asm_path)
                 ),
                 _ => format!("cannot read `{name}`: {e}"),
             })?
             .text;
-        let (words, lines) = if path::has_extension(file, "asm") {
-            let assembly = n2t_hack::assemble(&text);
-            if let Some(d) = assembly.diagnostics.iter().find(|d| d.is_error()) {
-                let index = LineIndex::new(&text);
-                let at = d.span.map_or(String::new(), |span| {
-                    let (line, column) = index.line_col_one_based(&text, span.start);
-                    format!(":{line}:{column}")
-                });
-                return Err(format!(
-                    "`{name}` does not assemble:\n  {name}{at}: {}",
-                    d.message
+        let words = n2t_hack::parse_hack(&text).map_err(|diagnostics| {
+            let detail = diagnostics.first().map_or_else(
+                || "it is not a Hack program".to_string(),
+                |d| d.message.clone(),
+            );
+            format!("`{name}`: {detail}")
+        })?;
+        let lines = text
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(|(number, _)| number as u32)
+            .collect();
+        if let Some(asm_path) = &sibling
+            && let Ok(source) = n2t_core::host::read_text(files.host.as_ref(), asm_path)
+        {
+            let assembly = n2t_hack::assemble(&source.text);
+            if !assembly.diagnostics.iter().any(|d| d.is_error()) && assembly.words != words {
+                self.notes.push(format!(
+                    "`{name}` is not what `{}` assembles to. If you changed the assembly, assemble it again: the test runs the `.hack` file.",
+                    path::file_name(asm_path)
                 ));
             }
-            let index = LineIndex::new(&text);
-            let lines = assembly
-                .source_map
-                .iter()
-                .map(|span| index.position(span.start).line)
-                .collect();
-            (assembly.words, lines)
-        } else {
-            let words = n2t_hack::parse_hack(&text).map_err(|diagnostics| {
-                let detail = diagnostics.first().map_or_else(
-                    || "it is not a Hack program".to_string(),
-                    |d| d.message.clone(),
-                );
-                format!("`{name}`: {detail}")
-            })?;
-            let lines = text
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| !line.trim().is_empty())
-                .map(|(number, _)| number as u32)
-                .collect();
-            if let Some(source) = &assembly_source {
-                let assembly = n2t_hack::assemble(&source.text);
-                if !assembly.diagnostics.iter().any(|d| d.is_error()) && assembly.words != words {
-                    self.notes.push(format!(
-                        "`{name}` is not what `{}` assembles to. If you changed the assembly, assemble it again: the test runs the `.hack` file.",
-                        path::file_name(&sibling)
-                    ));
-                }
-            }
-            (words, lines)
-        };
+        }
         self.cpu.load_rom(&words);
         self.program = Some(LoadedProgram {
             file: file.to_string(),
             lines,
+            built_from_source: false,
         });
         Ok(())
     }
@@ -291,6 +384,16 @@ impl Machine for CpuMachine {
 
     fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    fn loaded_inputs(&self) -> Vec<LoadedInput> {
+        self.program
+            .iter()
+            .map(|p| LoadedInput {
+                path: p.file.clone(),
+                built_from_source: p.built_from_source,
+            })
+            .collect()
     }
 
     fn set_key(&mut self, code: u16) -> bool {

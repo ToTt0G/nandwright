@@ -8,4 +8,5 @@ repository.workspace = true
 [dependencies]
 n2t-core.workspace = true
 n2t-hack.workspace = true
+n2t-jack.workspace = true
 n2t-vm.workspace = true

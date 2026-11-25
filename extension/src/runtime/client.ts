@@ -236,20 +236,27 @@ export class Runtime implements vscode.Disposable {
     }
 
     /**
-     * Gives the engine the text of every unsaved document, so a run uses what
-     * the student sees in the editor and not what was last saved. The buffers
-     * are replaced in one request: nothing can read between "the old ones
-     * are gone" and "the new ones are there".
+     * Captures the text of every unsaved engine document synchronously, so a
+     * request can snapshot editor buffers and preference decisions together.
      */
-    async syncUnsaved(): Promise<void> {
-        const files = vscode.workspace.textDocuments
+    captureUnsaved(): { path: string; text: string; ignoreCase: boolean }[] {
+        return vscode.workspace.textDocuments
             .filter((document) => document.isDirty && document.uri.scheme === 'file' && ENGINE_FILE.test(document.fileName))
             .map((document) => ({
                 path: document.uri.fsPath,
                 text: document.getText(),
                 ignoreCase: ignoresCase(document.uri.fsPath),
             }));
-        await this.call({ op: 'overlay.replace', files });
+    }
+
+    /**
+     * Gives the engine the text of every unsaved document, so a run uses what
+     * the student sees in the editor and not what was last saved. The buffers
+     * are replaced in one request: nothing can read between "the old ones
+     * are gone" and "the new ones are there".
+     */
+    async syncUnsaved(): Promise<void> {
+        await this.call({ op: 'overlay.replace', files: this.captureUnsaved() });
     }
 
     close(session: number): void {

@@ -66,7 +66,7 @@ impl OverlayHost {
 
     pub fn set(&self, buffer: Buffer) {
         if let Ok(mut buffers) = self.buffers.lock() {
-            buffers.retain(|b| b.path != buffer.path);
+            buffers.retain(|b| !b.is(&buffer.path) && !buffer.is(&b.path));
             buffers.push(buffer);
         }
     }
@@ -95,6 +95,15 @@ impl OverlayHost {
             buffers: Mutex::new(self.buffers.lock().map(|b| b.clone()).unwrap_or_default()),
         }
     }
+
+    /// An isolated overlay over the same underlying disk with explicit buffers,
+    /// used when a request supplies its own atomic buffer snapshot.
+    pub fn with_buffers(&self, buffers: Vec<Buffer>) -> OverlayHost {
+        OverlayHost {
+            inner: self.inner.clone(),
+            buffers: Mutex::new(buffers),
+        }
+    }
 }
 
 impl Host for OverlayHost {
@@ -114,7 +123,41 @@ impl Host for OverlayHost {
     }
 
     fn list(&self, dir: &str) -> Result<Vec<DirEntry>, HostError> {
-        self.inner.list(dir)
+        let normalized_dir = path::normalize(dir);
+        let base = self.inner.list(dir);
+        let extra: Vec<(String, bool)> = self
+            .buffers
+            .lock()
+            .map(|buffers| {
+                buffers
+                    .iter()
+                    .filter(|b| {
+                        let parent = path::dir(&b.path);
+                        parent == normalized_dir
+                            || (b.ignore_case && parent.eq_ignore_ascii_case(&normalized_dir))
+                    })
+                    .map(|b| (path::file_name(&b.path).to_string(), b.ignore_case))
+                    .filter(|(name, _)| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut entries = match base {
+            Ok(entries) => entries,
+            Err(HostError::NotFound) if !extra.is_empty() => Vec::new(),
+            Err(err) => return Err(err),
+        };
+        for (name, ignore_case) in extra {
+            let exists = entries.iter().any(|e| {
+                !e.is_dir && (e.name == name || (ignore_case && e.name.eq_ignore_ascii_case(&name)))
+            });
+            if !exists {
+                entries.push(DirEntry {
+                    name,
+                    is_dir: false,
+                });
+            }
+        }
+        Ok(entries)
     }
 
     fn write(&self, file: &str, data: &[u8]) -> Result<(), HostError> {

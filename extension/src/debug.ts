@@ -7,9 +7,10 @@
 
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { pathKey, samePath } from './paths';
+import { ignoresCase, pathKey, samePath } from './paths';
 import { Runtime, RuntimeError } from './runtime/client';
 import { Pin, Range, TestEvent, TestInspection, TestOpened, TestOutcome, TestStatus } from './runtime/protocol';
+import { preferredSources } from './testing';
 import { formatValue, keyName } from './values';
 
 const THREAD = 1;
@@ -232,13 +233,24 @@ class ScriptDebugSession implements vscode.DebugAdapter {
         this.script = script;
         this.stopOnEntry = args.stopOnEntry !== false;
         try {
-            await this.runtime.syncUnsaved();
+            const overlay = this.runtime.captureUnsaved();
+            const config = vscode.workspace.getConfiguration('nandwright');
+            const explicitSource = typeof args.source === 'string' ? vscode.Uri.file(args.source) : undefined;
+            const explicitArtifact = explicitSource !== undefined && /\.(hack|vm)$/i.test(explicitSource.fsPath);
+            const buildSources = !explicitArtifact && config.get<boolean>('test.buildSources', true);
+            const preferSources = buildSources
+                ? await preferredSources(vscode.Uri.file(script), explicitSource, overlay)
+                : [];
             const opened = await this.runtime.call<TestOpened>({
                 op: 'test.open',
                 path: script,
                 crlf: process.platform === 'win32',
                 collectAll: false,
-                autoKeyboard: vscode.workspace.getConfiguration('nandwright').get('test.pressKeys', true),
+                autoKeyboard: config.get('test.pressKeys', true),
+                buildSources,
+                preferSources,
+                ignoreCase: ignoresCase(script),
+                overlay,
             });
             if (this.ended) {
                 // The editor ended the session while the script was being
@@ -463,11 +475,12 @@ export function registerDebugger(context: vscode.ExtensionContext, runtime: Runt
 }
 
 /** Starts stepping through a script. */
-export function debugScript(uri: vscode.Uri): Thenable<boolean> {
+export function debugScript(uri: vscode.Uri, source?: vscode.Uri): Thenable<boolean> {
     return vscode.debug.startDebugging(vscode.workspace.getWorkspaceFolder(uri), {
         type: 'nandwright',
         request: 'launch',
         name: `Step through ${path.basename(uri.fsPath)}`,
         script: uri.fsPath,
+        ...(source ? { source: source.fsPath } : {}),
     });
 }

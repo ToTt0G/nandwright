@@ -10,16 +10,17 @@ use n2t_core::tst::ast::*;
 use n2t_vm::{ParsedVm, Program, StepStatus, Vm};
 
 use crate::format::Value;
-use crate::machine::{Files, Machine, Observed, Role};
+use crate::machine::{Files, LoadedInput, Machine, Observed, Role};
 use crate::runner::{RunError, error};
 
 pub struct VmMachine {
     vm: Option<Box<Vm>>,
-    /// Engine-form paths of the loaded `.vm` files, by file stem.
-    files: Vec<(String, String)>,
+    /// Loaded `(stem, engine-form path, built_from_source)` entries.
+    files: Vec<(String, String, bool)>,
     /// Scripts have no clock. Time moves only when the program sleeps, and
     /// then jumps straight to the moment it wakes: a test never waits.
     now_ms: u64,
+    notes: Vec<String>,
 }
 
 impl Default for VmMachine {
@@ -34,6 +35,7 @@ impl VmMachine {
             vm: None,
             files: Vec::new(),
             now_ms: 0,
+            notes: Vec::new(),
         }
     }
 
@@ -49,16 +51,139 @@ impl VmMachine {
     pub fn file_path(&self, stem: &str) -> Option<&str> {
         self.files
             .iter()
-            .find(|(s, _)| s == stem)
-            .map(|(_, p)| p.as_str())
+            .find(|(s, _, _)| s == stem)
+            .map(|(_, p, _)| p.as_str())
     }
 
-    /// Loads one `.vm` file, or every `.vm` file of a folder. The error is a
-    /// message for the user.
+    fn same_stem(a: &str, b: &str, ignore_case: bool) -> bool {
+        if ignore_case {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    }
+
+    fn find_sibling_jack(files: &Files<'_>, dir: &str, stem: &str) -> Option<String> {
+        if let Ok(entries) = files.host.list(dir) {
+            let candidates: Vec<String> = entries
+                .into_iter()
+                .filter(|e| !e.is_dir && path::has_extension(&e.name, "jack"))
+                .map(|e| e.name)
+                .collect();
+            if let Some(exact) = candidates.iter().find(|n| path::stem(n) == stem) {
+                return Some(path::join(dir, exact));
+            }
+            if files.ignore_case {
+                let folded: Vec<&String> = candidates
+                    .iter()
+                    .filter(|n| path::stem(n).eq_ignore_ascii_case(stem))
+                    .collect();
+                if let [one] = folded.as_slice() {
+                    return Some(path::join(dir, one));
+                }
+            }
+            return None;
+        }
+        let exact = path::join(dir, &format!("{stem}.jack"));
+        files.host.read(&exact).is_ok().then_some(exact)
+    }
+
+    /// Compiles only the selected `.jack` files together in memory, so an
+    /// unfinished `.jack` file whose `.vm` artifact was chosen does not fail
+    /// the build.
+    fn compile_jack_files(
+        files: &Files<'_>,
+        selected: &[(String, String)],
+    ) -> Result<Vec<(String, String, String)>, String> {
+        let mut texts: Vec<(String, String, String)> = Vec::with_capacity(selected.len());
+        for (stem, file) in selected {
+            let text = read_text(files.host.as_ref(), file)
+                .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(file)))?
+                .text;
+            texts.push((stem.clone(), file.clone(), text));
+        }
+        let inputs: Vec<(&str, &str)> = texts
+            .iter()
+            .map(|(stem, _, text)| (stem.as_str(), text.as_str()))
+            .collect();
+        let program = n2t_jack::compile_program(&inputs);
+        let mut compiled = Vec::with_capacity(texts.len());
+        for (output, (stem, file, text)) in program.files.iter().zip(texts) {
+            let Some(vm_text) = &output.compiled.vm else {
+                let name = path::file_name(&file);
+                let message = output
+                    .compiled
+                    .diagnostics
+                    .iter()
+                    .find(|d| d.is_error())
+                    .map_or_else(
+                        || format!("`{name}` does not compile"),
+                        |d| {
+                            let at = d.span.map_or(String::new(), |span| {
+                                let (line, column) =
+                                    LineIndex::new(&text).line_col_one_based(&text, span.start);
+                                format!(":{line}:{column}")
+                            });
+                            format!("`{name}` does not compile:\n  {name}{at}: {}", d.message)
+                        },
+                    );
+                return Err(message);
+            };
+            compiled.push((stem, file, vm_text.clone()));
+        }
+        Ok(compiled)
+    }
+
+    /// Loads one `.vm` file, or every `.vm` (or `.jack`, when `build_from_source`
+    /// is enabled) file of a folder. The error is a message for the user.
     pub fn load_path(&mut self, files: &Files<'_>, target: &str) -> Result<(), String> {
-        let mut sources: Vec<(String, String)> = Vec::new();
+        let mut loaded_files: Vec<(String, String, bool)> = Vec::new();
+        let mut parsed: Vec<ParsedVm> = Vec::new();
+
         if path::has_extension(target, "vm") {
-            sources.push((path::stem(target).to_string(), target.to_string()));
+            let dir = path::dir(target);
+            let stem = path::stem(target);
+            let sibling_jack = if files.build_from_source {
+                Self::find_sibling_jack(files, dir, stem)
+            } else {
+                None
+            };
+            let existing_vm = read_text(files.host.as_ref(), target);
+            if let Some(jack_path) = &sibling_jack
+                && (matches!(existing_vm, Err(HostError::NotFound)) || files.prefers(jack_path))
+            {
+                let selected = vec![(path::stem(jack_path).to_string(), jack_path.clone())];
+                let compiled = Self::compile_jack_files(files, &selected)?;
+                let Some((compiled_stem, source_path, vm_text)) = compiled.into_iter().next()
+                else {
+                    return Err(format!("cannot compile `{}`", path::file_name(jack_path)));
+                };
+                if let Ok(disk_vm) = &existing_vm
+                    && !same_lines(&disk_vm.text, &vm_text)
+                {
+                    self.notes.push(format!(
+                        "Compiled `{}` in memory (newer than `{}` on disk).",
+                        path::file_name(&source_path),
+                        path::file_name(target)
+                    ));
+                }
+                let unit = n2t_vm::parse(&compiled_stem, &vm_text);
+                if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
+                    return Err(describe(path::file_name(&source_path), &vm_text, d));
+                }
+                loaded_files.push((compiled_stem, source_path, true));
+                parsed.push(unit);
+            } else {
+                let text = existing_vm
+                    .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(target)))?
+                    .text;
+                let unit = n2t_vm::parse(stem, &text);
+                if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
+                    return Err(describe(path::file_name(target), &text, d));
+                }
+                loaded_files.push((stem.to_string(), target.to_string(), false));
+                parsed.push(unit);
+            }
         } else {
             let entries = files.host.list(target).map_err(|e| match e {
                 HostError::NotFound => {
@@ -69,39 +194,105 @@ impl VmMachine {
                     path::file_name(target)
                 ),
             })?;
+            let mut vm_sources: Vec<(String, String)> = Vec::new();
+            let mut jack_sources: Vec<(String, String)> = Vec::new();
             for entry in entries {
                 if !entry.is_dir && path::has_extension(&entry.name, "vm") {
-                    sources.push((
+                    vm_sources.push((
+                        path::stem(&entry.name).to_string(),
+                        path::join(target, &entry.name),
+                    ));
+                } else if !entry.is_dir && path::has_extension(&entry.name, "jack") {
+                    jack_sources.push((
                         path::stem(&entry.name).to_string(),
                         path::join(target, &entry.name),
                     ));
                 }
             }
-            sources.sort();
-            if sources.is_empty() {
-                return Err(format!(
-                    "there are no `.vm` files in `{}`; compile the Jack program or write the VM code first",
-                    path::file_name(target)
-                ));
+            vm_sources.sort();
+            jack_sources.sort();
+
+            let selected_jacks: Vec<(String, String)> = if files.build_from_source {
+                jack_sources
+                    .iter()
+                    .filter(|(stem, jack_path)| {
+                        let has_vm = vm_sources
+                            .iter()
+                            .any(|(vm_stem, _)| Self::same_stem(vm_stem, stem, files.ignore_case));
+                        !has_vm || files.prefers(jack_path)
+                    })
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            if !selected_jacks.is_empty() {
+                let compiled = Self::compile_jack_files(files, &selected_jacks)?;
+                let mut units: Vec<(String, String, String, bool)> = Vec::new();
+                for (stem, jack_path, vm_text) in compiled {
+                    if let Some((_, disk_vm_path)) = vm_sources
+                        .iter()
+                        .find(|(vm_stem, _)| Self::same_stem(vm_stem, &stem, files.ignore_case))
+                        && let Ok(disk_vm) = read_text(files.host.as_ref(), disk_vm_path)
+                        && !same_lines(&disk_vm.text, &vm_text)
+                    {
+                        self.notes.push(format!(
+                            "Compiled `{}` in memory (newer than `{}` on disk).",
+                            path::file_name(&jack_path),
+                            path::file_name(disk_vm_path)
+                        ));
+                    }
+                    units.push((stem, jack_path, vm_text, true));
+                }
+                for (stem, vm_path) in &vm_sources {
+                    let replaced = selected_jacks
+                        .iter()
+                        .any(|(jack_stem, _)| Self::same_stem(jack_stem, stem, files.ignore_case));
+                    if !replaced {
+                        let text = read_text(files.host.as_ref(), vm_path)
+                            .map_err(|e| {
+                                format!("cannot read `{}`: {e}", path::file_name(vm_path))
+                            })?
+                            .text;
+                        units.push((stem.clone(), vm_path.clone(), text, false));
+                    }
+                }
+                units.sort_by(|a, b| a.0.cmp(&b.0));
+                for (stem, source_path, vm_text, built_from_source) in units {
+                    let unit = n2t_vm::parse(&stem, &vm_text);
+                    if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
+                        return Err(describe(path::file_name(&source_path), &vm_text, d));
+                    }
+                    loaded_files.push((stem, source_path, built_from_source));
+                    parsed.push(unit);
+                }
+            } else {
+                if vm_sources.is_empty() {
+                    return Err(format!(
+                        "there are no `.vm` files in `{}`; compile the Jack program or write the VM code first",
+                        path::file_name(target)
+                    ));
+                }
+                for (stem, file) in vm_sources {
+                    let text = read_text(files.host.as_ref(), &file)
+                        .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(&file)))?
+                        .text;
+                    let unit = n2t_vm::parse(&stem, &text);
+                    if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
+                        return Err(describe(path::file_name(&file), &text, d));
+                    }
+                    loaded_files.push((stem, file, false));
+                    parsed.push(unit);
+                }
             }
-        }
-        let mut parsed: Vec<ParsedVm> = Vec::new();
-        for (stem, file) in &sources {
-            let text = read_text(files.host.as_ref(), file)
-                .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(file)))?
-                .text;
-            let unit = n2t_vm::parse(stem, &text);
-            if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
-                return Err(describe(path::file_name(file), &text, d));
-            }
-            parsed.push(unit);
         }
         let (program, diagnostics) = Program::link(parsed);
         if let Some(d) = diagnostics.iter().find(|d| d.is_error()) {
             return Err(format!("the program does not link: {}", d.message));
         }
         self.vm = Some(Box::new(Vm::new(program)));
-        self.files = sources;
+        self.files = loaded_files;
         self.now_ms = 0;
         Ok(())
     }
@@ -245,6 +436,20 @@ impl Machine for VmMachine {
         values
     }
 
+    fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
+
+    fn loaded_inputs(&self) -> Vec<LoadedInput> {
+        self.files
+            .iter()
+            .map(|(_, p, built_from_source)| LoadedInput {
+                path: p.clone(),
+                built_from_source: *built_from_source,
+            })
+            .collect()
+    }
+
     fn set_key(&mut self, code: u16) -> bool {
         match self.vm.as_deref_mut() {
             Some(vm) => {
@@ -266,6 +471,12 @@ impl Machine for VmMachine {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+fn same_lines(a: &str, b: &str) -> bool {
+    a.lines()
+        .map(str::trim_end)
+        .eq(b.lines().map(str::trim_end))
 }
 
 /// The emulator's own wording for a variable problem, with what to write

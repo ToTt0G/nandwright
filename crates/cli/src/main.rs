@@ -66,6 +66,10 @@ enum Command {
         /// tools require a person to).
         #[arg(long)]
         no_keys: bool,
+        /// Assemble `.asm` (for `load X.hack`) or compile `.jack` (for `load`
+        /// / `load X.vm`) in memory when the built artifact does not exist yet.
+        #[arg(long)]
+        build: bool,
         /// Write `.out` files with CRLF line endings, as the official tools do on Windows.
         #[arg(long)]
         crlf: bool,
@@ -116,6 +120,7 @@ fn main() -> ExitCode {
             require_compare,
             strict_pauses,
             no_keys,
+            build,
             crlf,
             json,
         } => test(
@@ -125,6 +130,7 @@ fn main() -> ExitCode {
                 require_compare,
                 strict_pauses,
                 auto_keyboard: !no_keys,
+                build_from_source: build,
                 crlf,
                 json,
             },
@@ -336,6 +342,7 @@ struct TestOptions {
     require_compare: bool,
     strict_pauses: bool,
     auto_keyboard: bool,
+    build_from_source: bool,
     crlf: bool,
     json: bool,
 }
@@ -371,6 +378,7 @@ fn test(paths: &[PathBuf], options: &TestOptions) -> Result<bool, String> {
             },
             auto_keyboard: options.auto_keyboard,
             stop_endless_waits: true,
+            build_from_source: options.build_from_source,
             ..Default::default()
         };
         let mut runner = match ScriptRunner::open(host(), script, runner_options) {

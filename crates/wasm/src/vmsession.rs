@@ -45,6 +45,7 @@ impl LoadedFile {
 pub struct VmSession {
     host: SharedHost,
     target: String,
+    ignore_case: bool,
     vm: Box<Vm>,
     files: Vec<LoadedFile>,
     from_jack: bool,
@@ -54,10 +55,22 @@ pub struct VmSession {
 
 /// What `open` loads for a path the student launched from.
 enum Source {
-    /// These `.vm` files.
+    /// These `.vm` files only.
     Vm(Vec<String>),
-    /// The `.jack` files of this folder, compiled in memory.
-    Jack(Vec<String>),
+    /// These `.jack` files compiled in memory, plus any sibling `.vm` files
+    /// whose class has no `.jack` source (for mixed project 12 folders).
+    Jack {
+        jack: Vec<String>,
+        extra_vm: Vec<String>,
+    },
+}
+
+fn same_stem(a: &str, b: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
 }
 
 fn list(host: &SharedHost, dir: &str, extension: &str) -> Result<Vec<String>, Failure> {
@@ -82,9 +95,21 @@ fn defines_entry(text: &str) -> bool {
     })
 }
 
-fn choose(host: &SharedHost, target: &str) -> Result<Source, Failure> {
+fn choose(host: &SharedHost, target: &str, ignore_case: bool) -> Result<Source, Failure> {
     if path::has_extension(target, "jack") {
-        return Ok(Source::Jack(list(host, path::dir(target), "jack")?));
+        let dir = path::dir(target);
+        let jack = list(host, dir, "jack")?;
+        let vm = list(host, dir, "vm")?;
+        let extra_vm = vm
+            .into_iter()
+            .filter(|v| {
+                let v_stem = path::stem(v);
+                !jack
+                    .iter()
+                    .any(|j| same_stem(path::stem(j), v_stem, ignore_case))
+            })
+            .collect();
+        return Ok(Source::Jack { jack, extra_vm });
     }
     if path::has_extension(target, "vm") {
         // A file of a program (a folder with `Sys.init` or `Main.main`) runs
@@ -113,7 +138,10 @@ fn choose(host: &SharedHost, target: &str) -> Result<Source, Failure> {
             path::file_name(target)
         ));
     }
-    Ok(Source::Jack(jack))
+    Ok(Source::Jack {
+        jack,
+        extra_vm: Vec::new(),
+    })
 }
 
 fn at(text: &str, span: Option<n2t_core::Span>) -> String {
@@ -123,8 +151,12 @@ fn at(text: &str, span: Option<n2t_core::Span>) -> String {
     })
 }
 
-fn load(host: &SharedHost, target: &str) -> Result<(Vm, Vec<LoadedFile>, bool), Failure> {
-    let source = choose(host, target)?;
+fn load(
+    host: &SharedHost,
+    target: &str,
+    ignore_case: bool,
+) -> Result<(Vm, Vec<LoadedFile>, bool), Failure> {
+    let source = choose(host, target, ignore_case)?;
     let read = |file: &String| -> Result<String, Failure> {
         read_text(host.as_ref(), file)
             .map(|f| f.text)
@@ -132,31 +164,41 @@ fn load(host: &SharedHost, target: &str) -> Result<(Vm, Vec<LoadedFile>, bool), 
     };
     let mut loaded = Vec::new();
     let mut parsed: Vec<ParsedVm> = Vec::new();
-    let from_jack = matches!(source, Source::Jack(_));
+    let from_jack = matches!(source, Source::Jack { .. });
+    let parse_vm_files = |vm_files: &[String],
+                          loaded: &mut Vec<LoadedFile>,
+                          parsed: &mut Vec<ParsedVm>|
+     -> Result<(), Failure> {
+        for file in vm_files {
+            let text = read(file)?;
+            let stem = path::stem(file).to_string();
+            let unit = n2t_vm::parse(&stem, &text);
+            if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
+                let name = path::file_name(file);
+                return Err(format!(
+                    "`{name}` has an error:\n  {name}{}: {}",
+                    at(&text, d.span),
+                    d.message
+                ));
+            }
+            loaded.push(LoadedFile {
+                stem,
+                source_path: file.clone(),
+                vm_lines: text.lines().map(|l| l.trim().to_string()).collect(),
+                jack_lines: None,
+            });
+            parsed.push(unit);
+        }
+        Ok(())
+    };
     match source {
         Source::Vm(files) => {
-            for file in &files {
-                let text = read(file)?;
-                let stem = path::stem(file).to_string();
-                let unit = n2t_vm::parse(&stem, &text);
-                if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
-                    let name = path::file_name(file);
-                    return Err(format!(
-                        "`{name}` has an error:\n  {name}{}: {}",
-                        at(&text, d.span),
-                        d.message
-                    ));
-                }
-                loaded.push(LoadedFile {
-                    stem,
-                    source_path: file.clone(),
-                    vm_lines: text.lines().map(|l| l.trim().to_string()).collect(),
-                    jack_lines: None,
-                });
-                parsed.push(unit);
-            }
+            parse_vm_files(&files, &mut loaded, &mut parsed)?;
         }
-        Source::Jack(files) => {
+        Source::Jack {
+            jack: files,
+            extra_vm,
+        } => {
             let texts: Vec<(String, String)> = files
                 .iter()
                 .map(|file| Ok((path::stem(file).to_string(), read(file)?)))
@@ -204,6 +246,7 @@ fn load(host: &SharedHost, target: &str) -> Result<(Vm, Vec<LoadedFile>, bool), 
                 });
                 parsed.push(n2t_vm::parse(stem, vm_text));
             }
+            parse_vm_files(&extra_vm, &mut loaded, &mut parsed)?;
         }
     }
     let (program, diagnostics) = Program::link(parsed);
@@ -217,10 +260,12 @@ impl VmSession {
     /// `{"op":"vm.open","path":…}` for a `.vm` file, a `.jack` file or a folder.
     pub fn open(host: &SharedHost, request: &Value) -> Result<Self, Failure> {
         let target = path::normalize(text(request, "path")?);
-        let (vm, files, from_jack) = load(host, &target)?;
+        let ignore_case = request["ignoreCase"].as_bool().unwrap_or(false);
+        let (vm, files, from_jack) = load(host, &target, ignore_case)?;
         Ok(Self {
             host: host.clone(),
             target,
+            ignore_case,
             vm: Box::new(vm),
             files,
             from_jack,
@@ -374,7 +419,7 @@ impl VmSession {
             "vm.reset" => {
                 // Read (and for Jack, compile) the program again.
                 let key = self.vm.key();
-                let (vm, files, from_jack) = load(&self.host, &self.target)?;
+                let (vm, files, from_jack) = load(&self.host, &self.target, self.ignore_case)?;
                 *self.vm = vm;
                 self.files = files;
                 self.from_jack = from_jack;

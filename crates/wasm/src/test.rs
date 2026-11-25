@@ -21,12 +21,21 @@ pub struct TestSession {
 
 impl TestSession {
     /// `{"op":"test.open","path":…}` with optional `autoKeyboard` (default
-    /// true), `stopEndlessWaits` (default false), `crlf`, `collectAll` (default true) and `maxCommands`.
+    /// true), `stopEndlessWaits` (default false), `buildSources` (default
+    /// false), `preferSources` (default `[]`), `crlf`, `collectAll` (default
+    /// true) and `maxCommands`.
     pub fn open(host: &SharedHost, request: &Value) -> Result<Self, Failure> {
         let script_path = path::normalize(text(request, "path")?);
         let source = read_text(host.as_ref(), &script_path)
             .map_err(|e| format!("cannot read `{}`: {e}", path::file_name(&script_path)))?
             .text;
+        let prefer_sources: Vec<String> = request["preferSources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(path::normalize)
+            .collect();
         let options = RunnerOptions {
             max_commands: request["maxCommands"].as_u64(),
             cancel: None,
@@ -38,6 +47,9 @@ impl TestSession {
             collect_all_mismatches: request["collectAll"].as_bool().unwrap_or(true),
             auto_keyboard: request["autoKeyboard"].as_bool().unwrap_or(true),
             stop_endless_waits: request["stopEndlessWaits"].as_bool().unwrap_or(false),
+            build_from_source: request["buildSources"].as_bool().unwrap_or(false),
+            prefer_sources,
+            ignore_case: request["ignoreCase"].as_bool().unwrap_or(false),
         };
         let lines = LineIndex::new(&source);
         let mut runner = ScriptRunner::new(
@@ -262,6 +274,17 @@ impl TestSession {
     }
 
     fn inspect(&self) -> Value {
+        let loaded: Vec<Value> = self
+            .runner
+            .loaded_inputs()
+            .into_iter()
+            .map(|input| {
+                json!({
+                    "path": input.path,
+                    "builtFromSource": input.built_from_source,
+                })
+            })
+            .collect();
         json!({
             "dialect": self.runner.dialect().as_str(),
             "state": observed(&self.runner.machine().observe()),
@@ -269,6 +292,7 @@ impl TestSession {
             "output": self.runner.output_text(),
             "comparePath": self.runner.compare_path(),
             "expected": self.runner.expected_lines(),
+            "loaded": loaded,
             "echo": self.runner.echo(),
             "next": self.next_range(),
             "commands": self.runner.commands_executed(),

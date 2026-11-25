@@ -132,6 +132,11 @@ export interface TestOpened {
     runsForever: boolean;
 }
 
+export interface LoadedInput {
+    path: string;
+    builtFromSource: boolean;
+}
+
 export interface TestInspection {
     dialect: string;
     state: Pin[];
@@ -139,6 +144,7 @@ export interface TestInspection {
     output: string | null;
     comparePath: string | null;
     expected: string[] | null;
+    loaded?: LoadedInput[];
     echo: string | null;
     next: Range | null;
     commands: number;
@@ -160,10 +166,19 @@ export interface Expected {
     name: string;
     header: string[];
     rows: string[][];
+    /** Untrimmed cells per row, for exact character/wildcard comparison. */
+    rawRows?: string[][];
     /** The line of the file each row is on, from 1; a blank line is a line but not a row. */
     lines: number[];
     /** Rows left out because the file is long. */
     more: number;
+}
+
+/** A reference screen image next to a program (e.g. project 12's `*Output.gif`). */
+export interface ExpectedImage {
+    path: string;
+    name: string;
+    dataUrl: string;
 }
 
 /** The pins after one clock step in the chip simulator. */
@@ -176,14 +191,21 @@ export interface ClockStep {
 export interface ChipTest {
     /** The script's file name. */
     script: string;
+    /** Full path of the script shown, echoed back in panel actions. */
+    scriptPath?: string;
     status: 'none' | 'running' | 'current' | 'stale';
     kind?: TestOutcome['kind'];
+    /** Short description of the inputs the run tested (e.g. `assembled double.asm` or `Double.hack`). */
+    sourceLabel?: string;
     /** Lines of the compare file compared, the header included. */
     comparedLines?: number;
     failureCount?: number;
     /** Data rows of the compare file the run reached, and how many of them differ. */
     comparedRows?: number;
     differingRows?: number;
+    /** First failing line and explanation when the failure falls outside data rows. */
+    firstFailureLine?: number;
+    firstFailureReason?: string;
     message?: string;
     /** One mark per data row of the compare file shown, matched to it by line. */
     rows?: ('match' | 'differ' | 'unreached')[];

@@ -3,6 +3,12 @@
 // the rows of its compare file. No `vscode` here: the unit tests run it in
 // plain Node.
 
+/** One source or artifact file a test run actually loaded. */
+export interface RunInput {
+    path: string;
+    builtFromSource: boolean;
+}
+
 /** The last result of a script, kept for the simulator, the status bar and the editor. */
 export interface StoredResult {
     kind: 'passed' | 'unchecked' | 'failed' | 'error' | 'limit' | 'skipped' | 'cancelled';
@@ -18,9 +24,54 @@ export interface StoredResult {
     notes: string[];
     /** The error message, or why there is no result (limit, skipped, cancelled, unchecked). */
     message?: string;
+    /** The exact files loaded by the engine during this run (for file provenance). */
+    inputs?: RunInput[];
+    /** Compare and output file paths used by this run. */
+    comparePath?: string;
+    outputPath?: string;
+    /** In-memory snapshot of the `.out` produced by this run (not persisted). */
+    outputText?: string;
     /** When the engine was given the files the run used. */
     started: number;
     finished: number;
+}
+
+function normalizePathForMatch(file: string, ignoreCase: boolean): string {
+    const normalized = file.replace(/\\/g, '/').replace(/\/+/g, '/');
+    return ignoreCase ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Whether `result` actually tested `filePath` (so a source build of `double.asm`
+ * never reports a green pass on a broken `Double.hack`, and vice versa).
+ */
+export function resultMatchesFile(
+    result: Pick<StoredResult, 'inputs'>,
+    filePath: string,
+    ignoreCase: boolean,
+): boolean {
+    const dot = filePath.lastIndexOf('.');
+    const ext = dot > 0 ? filePath.slice(dot + 1).toLowerCase() : '';
+    if (ext === 'hdl' || ext === 'tst') {
+        return true;
+    }
+    const inputs = result.inputs;
+    if (!inputs || inputs.length === 0) {
+        return false;
+    }
+    const target = normalizePathForMatch(filePath, ignoreCase);
+    const same = (candidate: string) => normalizePathForMatch(candidate, ignoreCase) === target;
+    switch (ext) {
+        case 'hack':
+        case 'vm':
+            return inputs.some((input) => !input.builtFromSource && same(input.path));
+        case 'asm':
+            return inputs.some((input) => same(input.path));
+        case 'jack':
+            return inputs.some((input) => input.builtFromSource && same(input.path));
+        default:
+            return true;
+    }
 }
 
 /**
@@ -73,8 +124,9 @@ export function toSave(
         if (!listing) {
             continue;
         }
+        const { outputText: _outputText, ...persisted } = result;
         saved[path] = {
-            ...result,
+            ...persisted,
             path,
             notes: result.notes.slice(0, 5),
             files: listing.map((file) => file.name).sort(),

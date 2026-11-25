@@ -207,8 +207,15 @@ impl Engine {
                 Ok(json!({}))
             }
             "test.open" => {
-                // A run sees the editor as it was when the run began.
-                let frozen: SharedHost = Arc::new(self.overlay.snapshot());
+                // A run sees either the buffers supplied atomically with this
+                // request or the editor's shared overlay as it stands now.
+                let frozen: SharedHost = match request["overlay"].as_array() {
+                    Some(files) => {
+                        let buffers = files.iter().map(buffer).collect::<Result<Vec<_>, _>>()?;
+                        Arc::new(self.overlay.with_buffers(buffers))
+                    }
+                    None => Arc::new(self.overlay.snapshot()),
+                };
                 let session = TestSession::open(&frozen, request)?;
                 let mut reply = session.describe();
                 reply["session"] = json!(self.add(Session::Test(Box::new(session))));

@@ -3,8 +3,8 @@
 // owns the emulator; this file draws what it is sent and reports what the
 // student does.
 
-import type { MachineState } from '../runtime/protocol';
-import { Radix, formatValue, hackKeyCode, keyName, typedValue } from '../values';
+import type { ChipTest, Expected, ExpectedImage, MachineState } from '../runtime/protocol';
+import { Radix, cellMatchesExpected, formatValue, hackKeyCode, keyName, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
     postMessage(message: unknown): void;
@@ -13,7 +13,17 @@ declare function acquireVsCodeApi(): {
 };
 
 export type ToComputer =
-    | { type: 'state'; target: number; state: MachineState | null; running: boolean; problem: string | null; title: string }
+    | {
+          type: 'state';
+          target: number;
+          state: MachineState | null;
+          running: boolean;
+          problem: string | null;
+          title: string;
+          expected?: Expected | null;
+          expectedImage?: ExpectedImage | null;
+          test?: ChipTest | null;
+      }
     | { type: 'rejected'; target: number; message: string };
 
 type Ready = { type: 'ready'; memoryStart?: number; speed?: number };
@@ -25,7 +35,11 @@ type ComputerAction =
     | { type: 'speed'; speed: number }
     | { type: 'key'; code: number }
     | { type: 'memory'; start: number }
-    | { type: 'set'; target: string; address?: number; value: string };
+    | { type: 'set'; target: string; address?: number; value: string }
+    | { type: 'runTest'; script?: string }
+    | { type: 'openExpected' }
+    | { type: 'openExpectedImage' }
+    | { type: 'compareOutput'; script?: string };
 
 export type ComputerCommand = Ready | ComputerAction;
 export type FromComputer = Ready | (ComputerAction & { program: number });
@@ -49,6 +63,11 @@ let memoryStart: number = saved.memoryStart ?? 0;
 let state: MachineState | null = null;
 let running = false;
 let problem: string | null = null;
+let expected: Expected | null = null;
+let expectedImage: ExpectedImage | null = null;
+let test: ChipTest | null = null;
+let expectedDirty = true;
+let imageDirty = true;
 let heldKey = 0;
 
 function remember(): void {
@@ -116,6 +135,15 @@ const screen = element(
     canvas,
 );
 const keyboardHint = element('p', { class: 'hint keyboard' });
+const expectedScreenSection = element('section', { hidden: '' });
+const expectedSection = element('section', { hidden: '' });
+const expectedHeader = element('div', {});
+const expectedScroll = element('div', { class: 'expected-scroll', tabindex: '0', role: 'region', 'aria-label': 'Expected output', hidden: '' });
+const expectedTable = element('table', { class: 'expected' });
+const expectedMore = element('p', { class: 'hint', hidden: '' });
+expectedScroll.append(expectedTable);
+expectedSection.append(element('h2', {}, 'Expected output'), expectedHeader, expectedScroll, expectedMore);
+let mountedExpectedPath: string | null = null;
 
 const registers = element('div', { class: 'registers', role: 'table', 'aria-label': 'Registers' });
 const badge = element('span', { class: 'badge' }, '');
@@ -205,6 +233,8 @@ function build(): void {
         status,
         screen,
         keyboardHint,
+        expectedScreenSection,
+        expectedSection,
         framesTitle,
         frames,
         element('h2', {}, 'Registers'),
@@ -337,7 +367,189 @@ function fileName(file: string | null): string {
     return file ? file.split(/[\\/]/).pop()! : '';
 }
 
+const MARKS = { match: '✓', differ: '✗', unreached: '–' } as const;
+
+function testSummary(run: ChipTest): { text: string; fails: boolean } {
+    const compared = run.comparedRows ?? Math.max(0, (run.comparedLines ?? 0) - 1);
+    const differing = run.differingRows ?? run.failureCount ?? 0;
+    const tag = run.sourceLabel ? `${run.script} (${run.sourceLabel})` : run.script;
+    switch (run.status) {
+        case 'none':
+            return { text: 'Not run yet.', fails: false };
+        case 'running':
+            return { text: `Running ${run.script}…`, fails: false };
+        case 'stale':
+            return { text: 'Edited since the last run. Save or press Run test to check again.', fails: false };
+    }
+    switch (run.kind) {
+        case 'passed':
+            return { text: `${tag} passes: all ${compared} rows match.`, fails: false };
+        case 'failed':
+            if (differing === 0 && run.firstFailureReason) {
+                return { text: `${tag} fails: ${run.firstFailureReason}.`, fails: true };
+            }
+            return { text: `${tag} fails: ${differing} of ${compared} rows differ.`, fails: true };
+        case 'error':
+            return { text: `${tag} stopped with an error: ${run.message ?? ''}`, fails: true };
+        default:
+            return { text: `${tag} did not give a result: ${run.message ?? ''}`, fails: false };
+    }
+}
+
+function updateExpected(): void {
+    if (imageDirty) {
+        imageDirty = false;
+        expectedScreenSection.hidden = !expectedImage;
+        if (expectedImage) {
+            const open = element('button', { type: 'button', class: 'link-inline' }, expectedImage.name);
+            open.addEventListener('click', () => send({ type: 'openExpectedImage' }));
+            const hint = element('p', { class: 'hint' }, 'From ');
+            hint.append(open, ': compare the Hack screen above with this expected image.');
+            const frame = element(
+                'div',
+                { class: 'expected-screen' },
+                element('img', { src: expectedImage.dataUrl, alt: `Expected screen output from ${expectedImage.name}` }),
+            );
+            expectedScreenSection.replaceChildren(element('h2', {}, 'Expected screen'), hint, frame);
+        } else {
+            expectedScreenSection.replaceChildren();
+        }
+    }
+
+    if (!expectedDirty) {
+        return;
+    }
+    expectedDirty = false;
+    if (!expected && !test) {
+        expectedSection.hidden = true;
+        expectedHeader.replaceChildren();
+        expectedTable.replaceChildren();
+        expectedScroll.hidden = true;
+        expectedMore.hidden = true;
+        mountedExpectedPath = null;
+        return;
+    }
+    expectedSection.hidden = false;
+
+    // Remember scroll position and button focus inside the expected section.
+    const sameFile = expected !== null && expected.path === mountedExpectedPath;
+    const savedScrollTop = sameFile ? expectedScroll.scrollTop : 0;
+    const savedScrollLeft = sameFile ? expectedScroll.scrollLeft : 0;
+    const activeAction = (document.activeElement as HTMLElement | null)?.getAttribute('data-expected-action');
+    mountedExpectedPath = expected?.path ?? null;
+
+    const headerNodes: Node[] = [];
+    if (expected) {
+        const open = element('button', { type: 'button', class: 'link-inline', 'data-expected-action': 'open' }, expected.name);
+        open.addEventListener('click', () => send({ type: 'openExpected' }));
+        const hint = element('p', { class: 'hint' }, 'From ');
+        hint.append(open, ': what the test script compares your program with.');
+        headerNodes.push(hint);
+    }
+    if (test) {
+        const scriptPath = test.scriptPath;
+        const bar = element('div', { class: 'test-run' });
+        const { text, fails } = testSummary(test);
+        bar.append(element('span', { class: `summary${fails ? ' fails' : ''}`, role: 'status' }, text));
+        if (expected && test.status === 'current' && (test.kind === 'passed' || test.kind === 'failed')) {
+            const diffButton = element(
+                'button',
+                { type: 'button', class: 'secondary', 'data-expected-action': 'diff', title: 'Compare actual .out with expected .cmp' },
+                'Diff .out ↔ .cmp',
+            );
+            diffButton.addEventListener('click', () => send({ type: 'compareOutput', ...(scriptPath ? { script: scriptPath } : {}) }));
+            bar.append(diffButton);
+        }
+        const button = element(
+            'button',
+            { type: 'button', class: 'secondary', 'data-expected-action': 'run', title: `Run ${test.script}` },
+            'Run test',
+        );
+        if (test.status === 'running') {
+            button.setAttribute('disabled', '');
+        }
+        button.addEventListener('click', () => send({ type: 'runTest', ...(scriptPath ? { script: scriptPath } : {}) }));
+        bar.append(button);
+        headerNodes.push(bar);
+    }
+    expectedHeader.replaceChildren(...headerNodes);
+
+    if (expected) {
+        const marks = test?.status === 'current' && test.rows ? test.rows : null;
+        const actualRows = (marks && test?.actual) || {};
+        const head = element('tr', {});
+        if (marks) {
+            head.append(element('th', { scope: 'col', class: 'mark', 'aria-label': 'Last test run' }));
+        }
+        expected.header.forEach((cell) => head.append(element('th', { scope: 'col' }, cell)));
+        const body = element('tbody', {});
+        for (const [index, row] of expected.rows.entries()) {
+            const tr = element('tr', {});
+            const mark = marks?.[index];
+            const produced = mark === 'differ' ? actualRows[index] : undefined;
+            const rawExpectedRow = expected.rawRows?.[index];
+            let blamedCell = false;
+            const dataCells: HTMLElement[] = [];
+            row.forEach((cell, i) => {
+                const rawActual = produced?.[i];
+                const rawExpected = rawExpectedRow?.[i];
+                const cellDiffers =
+                    rawActual !== undefined
+                    && (rawExpected !== undefined
+                        ? !cellMatchesExpected(rawExpected, rawActual)
+                        : !/^\*+$/.test(cell) && rawActual.trim() !== cell);
+                if (cellDiffers && rawActual !== undefined) {
+                    blamedCell = true;
+                    const gave = rawActual.trim();
+                    const detail = gave === cell ? 'spacing differs' : `got ${gave}`;
+                    const text = `Expected ${cell}, your program gave ${gave} (${detail})`;
+                    const td = element('td', { class: 'differs', title: text, 'aria-label': text }, `${cell} ✗`);
+                    td.append(element('span', { class: 'got' }, detail));
+                    dataCells.push(td);
+                } else {
+                    dataCells.push(element('td', {}, cell));
+                }
+            });
+            if (marks) {
+                const lineNote =
+                    mark === 'differ' && !blamedCell
+                        ? 'This row differs (line format or column count does not match).'
+                        : mark === 'differ'
+                          ? `This row differs. Your program gave: ${produced ? `|${produced.join('|')}|` : ''}`
+                          : mark === 'match'
+                            ? 'This row matches'
+                            : 'The test did not reach this row';
+                tr.append(element('td', { class: `mark ${mark ?? 'unreached'}`, title: lineNote, 'aria-label': lineNote }, MARKS[mark ?? 'unreached']));
+            }
+            tr.append(...dataCells);
+            body.append(tr);
+        }
+        expectedTable.replaceChildren(element('thead', {}, head), body);
+        expectedScroll.hidden = false;
+        expectedScroll.scrollTop = savedScrollTop;
+        expectedScroll.scrollLeft = savedScrollLeft;
+        if (expected.more > 0) {
+            expectedMore.hidden = false;
+            expectedMore.textContent = `${expected.more} more rows are in ${expected.name}.`;
+        } else {
+            expectedMore.hidden = true;
+            expectedMore.textContent = '';
+        }
+    } else {
+        expectedTable.replaceChildren();
+        expectedScroll.hidden = true;
+        expectedMore.hidden = true;
+        expectedMore.textContent = '';
+    }
+
+    if (activeAction) {
+        const refocus = expectedHeader.querySelector(`[data-expected-action="${activeAction}"]`) as HTMLElement | null;
+        refocus?.focus();
+    }
+}
+
 function update(): void {
+    updateExpected();
     banner.hidden = !problem;
     banner.replaceChildren(element('strong', {}, 'The program stopped.'), element('pre', {}, problem ?? ''));
     picker.querySelectorAll('button').forEach((button) => {
@@ -485,11 +697,30 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
         context.putImageData(image, 0, 0);
         updateKeyboard();
     }
+    if (target !== message.target) {
+        expected = null;
+        expectedImage = null;
+        test = null;
+        expectedDirty = true;
+        imageDirty = true;
+    }
     target = message.target;
     rejected.textContent = '';
     title.textContent = message.title;
     running = message.running;
     problem = message.problem;
+    if (message.expected !== undefined) {
+        expected = message.expected;
+        expectedDirty = true;
+    }
+    if (message.expectedImage !== undefined) {
+        expectedImage = message.expectedImage;
+        imageDirty = true;
+    }
+    if (message.test !== undefined) {
+        test = message.test;
+        expectedDirty = true;
+    }
     if (message.state) {
         const previous = state;
         state = message.state;

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.6.0
+
+- **Test and compare Hack assembly, VM, and Jack programs like HDL chips**:
+  - **Run Test** (`Ctrl+Alt+T` / `Cmd+Alt+T`), **Step through**, **Compare Output**, and
+    inline pass/fail CodeLenses now work directly from `.asm`, `.hack`, `.vm`, and `.jack`
+    files, plus **Compare with reference** CodeLenses on `.hack`, `.vm`, and `.xml` files
+    with a sibling source.
+  - When a test script loads a `.hack` or `.vm` file (such as project 4's `Mult.tst` and
+    `FillAutomatic.tst`, or project 12's `load,` OS tests), Nandwright assembles `.asm`
+    (including lowercase `mult.asm` on Linux) or compiles `.jack` in memory when the built
+    artifact is missing, older than the source, dirty in the editor, or explicitly run —
+    without writing `.hack` or `.vm` files to disk (setting `nandwright.test.buildSources`).
+  - Explicit runs from `.hack` or `.vm` files always test the artifact directly, and test
+    result provenance keeps source builds separate from student-generated artifacts.
+  - Automated scripts (such as `FillAutomatic.tst`) are chosen over forever demonstration
+    scripts (`Fill.tst`) for Run Test, CodeLens, and run-on-save.
+  - The Hack computer and VM emulator panels now show **Expected output** from `.cmp`
+    files with `✓`/`✗`/`–` row marks, inline diffs using the engine's wildcard/spacing
+    rules, **Run test** and **Diff `.out` ↔ `.cmp`** buttons, and an **Expected screen**
+    preview for visual OS test images (`*Output.gif` / `*Output.png`).
+  - Mixed Jack/VM folders now compile only the selected `.jack` classes in memory and link
+    remaining `.vm` files in both tests and the live VM emulator.
+  - Added `n2t test --build` to the CLI for missing-artifact in-memory builds while
+    keeping plain `n2t test` strict against the official Java tools.
+- Saving an `.asm` file while the Hack computer is at reset no longer scrolls the editor
+  back to the top of the file; explicit Reset and Step still reveal the executed line.
+
 ## 0.5.2
 
 - Saving the open `.asm` file reloads it in the Hack computer while the machine is at reset.

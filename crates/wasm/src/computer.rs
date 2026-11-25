@@ -42,10 +42,7 @@ impl ComputerSession {
 
     fn load(&mut self) -> Result<(), Failure> {
         let dir = path::dir(&self.file).to_string();
-        let files = Files {
-            host: &self.host,
-            dir: &dir,
-        };
+        let files = Files::plain(&self.host, &dir);
         let file = self.file.clone();
         self.machine.load_file(&files, &file)?;
         self.stopped = None;

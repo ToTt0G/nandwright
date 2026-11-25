@@ -2338,6 +2338,52 @@ describe('Nandwright', function () {
             }
         });
 
+        it('reloading saved assembly at reset does not scroll the editor back to the top', async () => {
+            const nandwright = await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'reload scroll '));
+            const uri = vscode.Uri.file(path.join(folder, 'Long.asm'));
+            const filler = Array.from({ length: 160 }, (_, i) => `// line ${i + 1}`).join('\n');
+            fs.writeFileSync(uri.fsPath, `@10\nD=A\n${filler}\n@20\nD=A\n`);
+            const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri), { preview: false });
+            const computer = await nandwright.computers.open(uri);
+            try {
+                await computer.simulate({ type: 'reset' });
+                const bottomLine = editor.document.lineCount - 2;
+                const bottomPos = new vscode.Position(bottomLine, 0);
+                editor.selection = new vscode.Selection(bottomPos, bottomPos);
+                editor.revealRange(new vscode.Range(bottomPos, bottomPos), vscode.TextEditorRevealType.InCenter);
+                await until('editor scrolled away from top', () => editor.visibleRanges[0].start.line > 20);
+                const beforeTop = editor.visibleRanges[0].start.line;
+
+                // Edit near the bottom (adding an extra instruction) and save while the Hack computer is at reset.
+                const beforeLen = computer.snapshot().state?.programLength ?? 0;
+                await editor.edit((edit) => edit.replace(editor.document.lineAt(bottomLine).range, '@99\nM=D'));
+                assert.ok(await editor.document.save());
+                await computer.settled();
+                await new Promise((resolve) => setTimeout(resolve, 150));
+
+                assert.equal(computer.snapshot().state?.programLength, beforeLen + 1, 'saved assembly reloaded at reset');
+                assert.ok(
+                    editor.visibleRanges[0].start.line > 20,
+                    `saving scrolled the editor from line ${beforeTop} back to line ${editor.visibleRanges[0].start.line}`,
+                );
+
+                // Explicit Reset DOES scroll back to the first instruction.
+                await computer.simulate({ type: 'reset' });
+                await until('explicit reset reveals top instruction', () => editor.visibleRanges[0].start.line <= 5);
+
+                // Scroll away again: stepping explicitly DOES reveal the executed line too.
+                editor.revealRange(new vscode.Range(bottomPos, bottomPos), vscode.TextEditorRevealType.InCenter);
+                await until('editor scrolled away again', () => editor.visibleRanges[0].start.line > 20);
+                await computer.simulate({ type: 'step' });
+                await until('stepping reveals line 1', () => editor.visibleRanges[0].start.line <= 5);
+            } finally {
+                computer.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
         it('follows open program tabs in one panel and stops the previous program', async () => {
             const nandwright = await api();
             const editor = await open('programs', 'Diagonal.asm');
@@ -2832,6 +2878,330 @@ describe('Nandwright', function () {
                     await vscode.debug.stopDebugging(vscode.debug.activeDebugSession);
                 }
                 fs.rmSync(script.fsPath, { force: true });
+            }
+        });
+    });
+
+    describe('program testing workflow (ASM, VM, Jack, expected output)', () => {
+        // Minimal valid 1x1 GIF for testing visual expected-screen previews.
+        const TINY_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+
+        it('tests lowercase .asm via a .hack-loading script, updates CodeLens and ComputerPanel expected output, and respects newer .hack files', async function () {
+            this.timeout(90_000);
+            const nandwright = await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'asm-workflow '));
+            const asmPath = path.join(folder, 'double.asm');
+            const hackPath = path.join(folder, 'Double.hack');
+            const tstPath = path.join(folder, 'Double.tst');
+            const cmpPath = path.join(folder, 'Double.cmp');
+            const outPath = path.join(folder, 'Double.out');
+            const gifPath = path.join(folder, 'DoubleTestOutput.gif');
+
+            const goodAsm = ['@R0', 'D=M', 'D=D+M', '@R1', 'M=D', '(END)', '@END', '0;JMP', ''].join('\n');
+            const badAsm = ['@R0', 'D=M', '@R1', 'M=D', '(END)', '@END', '0;JMP', ''].join('\n');
+            const tst = [
+                'load Double.hack,',
+                'output-file Double.out,',
+                'compare-to Double.cmp,',
+                'output-list RAM[0]%D2.6.2 RAM[1]%D2.6.2;',
+                'set RAM[0] 3, set RAM[1] -1;',
+                'repeat 20 { ticktock; }',
+                'output;',
+                'set PC 0, set RAM[0] 5, set RAM[1] -1;',
+                'repeat 20 { ticktock; }',
+                'output;',
+                '',
+            ].join('\n');
+            const cmp = [
+                '|  RAM[0]  |  RAM[1]  |',
+                '|       3  |       6  |',
+                '|       5  |      10  |',
+                '',
+            ].join('\n');
+
+            fs.writeFileSync(asmPath, '// empty starter file\n');
+            fs.writeFileSync(tstPath, tst);
+            fs.writeFileSync(cmpPath, cmp);
+            fs.writeFileSync(gifPath, TINY_GIF);
+
+            const asmUri = vscode.Uri.file(asmPath);
+            const tstUri = vscode.Uri.file(tstPath);
+            let computer: Awaited<ReturnType<typeof nandwright.computers.open>> | undefined;
+
+            try {
+                // Empty starter `.asm` shows as notStarted in Progress, and targets `double.asm`.
+                const initialProgress = await nandwright.progress.of(folder);
+                assert.equal(initialProgress.entries.length, 1);
+                assert.equal(initialProgress.entries[0].state, 'notStarted');
+                assert.ok(samePath(initialProgress.entries[0].target.fsPath, asmPath));
+
+                // Write working solution and run directly from `double.asm` with NO `Double.hack` on disk.
+                fs.writeFileSync(asmPath, goodAsm);
+                const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(asmUri), { preview: false });
+
+                const lensesBefore = await until('CodeLenses on double.asm', async () => {
+                    const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', asmUri);
+                    return list.some((l) => l.command?.command === 'nandwright.runTest') && list;
+                });
+                assert.ok(lensesBefore.some((l) => l.command?.command === 'nandwright.debugTest'));
+                assert.ok(lensesBefore.some((l) => l.command?.command === 'nandwright.runProgram'));
+
+                const firstRun = await vscode.commands.executeCommand<ScriptResult[]>('nandwright.runTest', asmUri);
+                assert.equal(firstRun.length, 1);
+                assert.equal(firstRun[0].outcome.kind, 'passed');
+                assert.ok(!fs.existsSync(hackPath), 'running a test must not write Double.hack to disk');
+                assert.ok(fs.existsSync(outPath), 'running a test writes Double.out');
+
+                // CodeLens updates to show passing status.
+                await until('passing CodeLens on double.asm', async () => {
+                    const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', asmUri);
+                    return list.some((l) => l.command?.title.includes('Test passes'));
+                });
+
+                // ComputerPanel shows expected output table, expected screen image, and test marks.
+                computer = await nandwright.computers.open(asmUri);
+                assert.equal(computer.snapshot().expected?.name, 'Double.cmp');
+                assert.equal(computer.snapshot().expectedImage?.name, 'DoubleTestOutput.gif');
+                assert.match(computer.snapshot().expectedImage?.dataUrl ?? '', /^data:image\/gif;base64,/);
+                assert.equal(computer.snapshot().test?.status, 'current');
+                assert.equal(computer.snapshot().test?.kind, 'passed');
+                assert.deepEqual(computer.snapshot().test?.rows, ['match', 'match']);
+
+                // Unsaved edit introducing a bug is picked up by Run test from the panel.
+                await replaceAll(editor, badAsm);
+                assert.ok(editor.document.isDirty);
+                await computer.simulate({ type: 'runTest' });
+                await until('failing test in ComputerPanel', () => {
+                    const t = computer!.snapshot().test;
+                    return t?.status === 'current' && t.kind === 'failed' && t;
+                });
+                assert.deepEqual(computer.snapshot().test?.rows, ['differ', 'differ']);
+                assert.equal(computer.snapshot().test?.actual?.[0]?.[1]?.trim(), '3');
+
+                // Saving the fixed code triggers automatic run-on-save and passes again.
+                await replaceAll(editor, goodAsm);
+                assert.ok(await editor.document.save());
+                await nandwright.tests.savedRunsSettled();
+                assert.equal(nandwright.tests.statusOf(tstUri).result?.kind, 'passed');
+
+                // Compare Output from `double.asm` resolves `Double.cmp` ↔ `Double.out` and opens diff.
+                await vscode.commands.executeCommand('nandwright.compareOutput', asmUri);
+                await until('diff editor for Double.cmp and Double.out', () =>
+                    vscode.window.tabGroups.all.some((g) =>
+                        g.tabs.some((t) => t.label.includes('Double: expected (.cmp)')),
+                    ),
+                );
+
+                // Project 4 vs Project 6: an older wrong Double.hack is ignored in favor of newer double.asm;
+                // a newer wrong Double.hack (e.g. from student's own assembler) IS tested as-is from Testing view,
+                // unless explicitly run from double.asm.
+                const brokenHack = '0000000000000000\n1110101010000111\n';
+                fs.writeFileSync(hackPath, brokenHack);
+                const now = Date.now() / 1000;
+                fs.utimesSync(asmPath, now - 10, now - 10);
+                fs.utimesSync(hackPath, now - 60, now - 60);
+                const [staleHackResult] = await nandwright.tests.runScripts([tstUri], { quiet: true });
+                assert.equal(staleHackResult.outcome.kind, 'passed', 'newer double.asm wins over stale Double.hack');
+                assert.equal(fs.readFileSync(hackPath, 'utf8'), brokenHack, 'Double.hack on disk was not modified');
+
+                fs.utimesSync(hackPath, now, now);
+                const [freshHackResult] = await nandwright.tests.runScripts([tstUri], { quiet: true });
+                assert.equal(freshHackResult.outcome.kind, 'failed', 'newer Double.hack is tested as-is from Testing view');
+
+                const [explicitAsmResult] = await nandwright.tests.runScripts([tstUri], { quiet: true, source: asmUri });
+                assert.equal(explicitAsmResult.outcome.kind, 'passed', 'explicit run from double.asm builds double.asm');
+                assert.equal(fs.readFileSync(hackPath, 'utf8'), brokenHack, 'Double.hack on disk was still not modified');
+
+                // Provenance isolation: a passing run from `double.asm` MUST NOT make broken `Double.hack` look passed.
+                const hackUri = vscode.Uri.file(hackPath);
+                await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(hackUri), { preview: false });
+                const hackLensesBefore = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', hackUri);
+                assert.ok(
+                    !hackLensesBefore.some((l) => l.command?.title.includes('Test passes')),
+                    'Double.hack must not inherit double.asm passing lens',
+                );
+                // Running explicitly from `Double.hack` ALWAYS tests the artifact itself (`buildSources: false`) and fails.
+                const hackRun = await vscode.commands.executeCommand<ScriptResult[]>('nandwright.runTest', hackUri);
+                assert.equal(hackRun.length, 1);
+                assert.equal(hackRun[0].outcome.kind, 'failed');
+                await until('failing CodeLens on Double.hack', async () => {
+                    const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', hackUri);
+                    return list.some((l) => l.command?.title.includes('Test fails'));
+                });
+                // Meanwhile `double.asm` keeps its own passing provenance result.
+                assert.equal(nandwright.tests.statusOf(tstUri, asmUri).result?.kind, 'passed');
+                assert.equal(nandwright.tests.statusOf(tstUri, hackUri).result?.kind, 'failed');
+            } finally {
+                computer?.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('ignores forever demonstration scripts in favor of automated tests for the same program', async function () {
+            this.timeout(90_000);
+            await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'asm-forever '));
+            const asmPath = path.join(folder, 'Flash.asm');
+            const foreverPath = path.join(folder, 'Flash.tst');
+            const autoPath = path.join(folder, 'FlashAutomatic.tst');
+            const cmpPath = path.join(folder, 'FlashAutomatic.cmp');
+
+            fs.writeFileSync(asmPath, ['@42', 'D=A', '@R0', 'M=D', '(LOOP)', '@LOOP', '0;JMP', ''].join('\n'));
+            fs.writeFileSync(foreverPath, 'load Flash.asm;\nrepeat {\n  ticktock;\n}\n');
+            fs.writeFileSync(
+                autoPath,
+                [
+                    'load Flash.hack,',
+                    'output-file FlashAutomatic.out,',
+                    'compare-to FlashAutomatic.cmp,',
+                    'output-list RAM[0]%D2.6.2;',
+                    'repeat 10 { ticktock; }',
+                    'output;',
+                    '',
+                ].join('\n'),
+            );
+            fs.writeFileSync(cmpPath, '|  RAM[0]  |\n|      42  |\n');
+
+            const asmUri = vscode.Uri.file(asmPath);
+            try {
+                await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(asmUri), { preview: false });
+                const lenses = await until('Run test CodeLens on Flash.asm', async () => {
+                    const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', asmUri);
+                    return list.find((l) => l.command?.command === 'nandwright.runTest') && list;
+                });
+                const runLens = lenses.find((l) => l.command?.command === 'nandwright.runTest')!;
+                assert.equal(runLens.command?.title, '$(play) Run test');
+                assert.equal(runLens.command?.tooltip, 'FlashAutomatic.tst');
+
+                const results = await vscode.commands.executeCommand<ScriptResult[]>('nandwright.runTest', asmUri);
+                assert.equal(results.length, 1);
+                assert.equal(path.basename(results[0].uri.fsPath), 'FlashAutomatic.tst');
+                assert.equal(results[0].outcome.kind, 'passed');
+            } finally {
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('tests Project 12 style Jack folders with bare load, without writing .vm files', async function () {
+            this.timeout(90_000);
+            const nandwright = await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'jack-folder-test '));
+            const mainPath = path.join(folder, 'Main.jack');
+            const calcPath = path.join(folder, 'Calc.jack');
+            const tstPath = path.join(folder, 'CalcTest.tst');
+            const cmpPath = path.join(folder, 'CalcTest.cmp');
+
+            fs.writeFileSync(
+                mainPath,
+                [
+                    'class Main {',
+                    '    function void main() {',
+                    '        var Array r;',
+                    '        let r = 8000;',
+                    '        let r[0] = Calc.triple(7);',
+                    '        return;',
+                    '    }',
+                    '}',
+                    '',
+                ].join('\n'),
+            );
+            fs.writeFileSync(
+                calcPath,
+                [
+                    'class Calc {',
+                    '    function int triple(int x) {',
+                    '        return x + x + x;',
+                    '    }',
+                    '}',
+                    '',
+                ].join('\n'),
+            );
+            fs.writeFileSync(
+                tstPath,
+                [
+                    'load,',
+                    'output-file CalcTest.out,',
+                    'compare-to CalcTest.cmp,',
+                    'output-list RAM[8000]%D2.6.1;',
+                    'repeat 500 {',
+                    '    vmstep;',
+                    '}',
+                    'output;',
+                    '',
+                ].join('\n'),
+            );
+            fs.writeFileSync(cmpPath, '|RAM[8000]|\n|      21 |\n');
+
+            const calcUri = vscode.Uri.file(calcPath);
+            let computer: Awaited<ReturnType<typeof nandwright.computers.open>> | undefined;
+            try {
+                // Progress points CalcTest.tst to Calc.jack rather than harness Main.jack.
+                const progress = await nandwright.progress.of(folder);
+                assert.equal(progress.entries.length, 1);
+                assert.ok(samePath(progress.entries[0].target.fsPath, calcPath));
+
+                await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(calcUri), { preview: false });
+                const results = await vscode.commands.executeCommand<ScriptResult[]>('nandwright.runTest', calcUri);
+                assert.equal(results.length, 1);
+                assert.equal(results[0].outcome.kind, 'passed');
+                assert.ok(!fs.existsSync(path.join(folder, 'Main.vm')), 'must not write Main.vm');
+                assert.ok(!fs.existsSync(path.join(folder, 'Calc.vm')), 'must not write Calc.vm');
+
+                await until('passing CodeLens on Calc.jack', async () => {
+                    const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', calcUri);
+                    return list.some((l) => l.command?.title.includes('Test passes'));
+                });
+
+                computer = await nandwright.computers.open(calcUri);
+                assert.equal(computer.snapshot().expected?.name, 'CalcTest.cmp');
+                assert.equal(computer.snapshot().test?.kind, 'passed');
+                assert.deepEqual(computer.snapshot().test?.rows, ['match']);
+            } finally {
+                computer?.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
+
+        it('offers Compare with reference CodeLens on .hack, .vm and .xml only when a sibling source exists', async function () {
+            this.timeout(60_000);
+            await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'ref-lenses '));
+            const asmPath = path.join(folder, 'Banner.asm');
+            const hackPath = path.join(folder, 'Banner.hack');
+            const jackPath = path.join(folder, 'Widget.jack');
+            const vmPath = path.join(folder, 'Widget.vm');
+            const tokenXmlPath = path.join(folder, 'WidgetT.xml');
+            const plainXmlPath = path.join(folder, 'notes.xml');
+
+            fs.writeFileSync(asmPath, '@1\nD=A\n');
+            fs.writeFileSync(hackPath, '0000000000000001\n1110110000010000\n');
+            fs.writeFileSync(jackPath, 'class Widget { function void ping() { return; } }\n');
+            fs.writeFileSync(vmPath, 'function Widget.ping 0\npush constant 0\nreturn\n');
+            fs.writeFileSync(tokenXmlPath, '<tokens>\n</tokens>\n');
+            fs.writeFileSync(plainXmlPath, '<notes/>\n');
+
+            try {
+                for (const p of [hackPath, vmPath, tokenXmlPath]) {
+                    const uri = vscode.Uri.file(p);
+                    await vscode.workspace.openTextDocument(uri);
+                    await until(`Compare with reference CodeLens on ${path.basename(p)}`, async () => {
+                        const list = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', uri);
+                        return list.some((l) => l.command?.command === 'nandwright.compareWithReference');
+                    });
+                }
+                const plainUri = vscode.Uri.file(plainXmlPath);
+                await vscode.workspace.openTextDocument(plainUri);
+                const plainLenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', plainUri);
+                assert.ok(
+                    !plainLenses.some((l) => l.command?.command === 'nandwright.compareWithReference'),
+                    'unrelated XML must not show Compare with reference',
+                );
+            } finally {
+                await closeAll();
+                await removeFolder(folder);
             }
         });
     });

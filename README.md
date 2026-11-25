@@ -53,11 +53,20 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 - **Every `.tst` script is a test** in VS Code's Testing view: run one, a folder, or the
   whole course. Hardware Simulator, CPU Emulator and VM Emulator scripts all work; the
   extension reads from the script which kind it is.
+- **Test directly from your source file** (`.hdl`, `.asm`, `.hack`, `.vm`, or `.jack`):
+  press the play button (`Ctrl+Alt+T`, `Cmd+Alt+T` on a Mac) or click **Run test** above
+  the code. When a test script loads a `.hack` or `.vm` file (such as project 4's
+  `Mult.tst` and `FillAutomatic.tst`, or project 12's `load,` OS tests), Nandwright
+  assembles your `.asm` or compiles your `.jack` in memory whenever the built file is
+  missing, older than the source, or being edited — without writing `.hack` or `.vm` files
+  to disk (controlled by `nandwright.test.buildSources`). Forever demonstration scripts
+  such as `Fill.tst` are skipped in favour of the automated script (`FillAutomatic.tst`).
 - The `.out` file is written next to the script, as the official tools do.
 - Scripts that wait for a key (project 5's `Memory.tst`) get the key pressed for them, and
   the output says so.
 - Tests run when you save a file, quietly, in the Testing view.
-- Above a chip, beside Run test, the editor shows whether its test passes or how many rows differ.
+- Above a chip or program, beside Run test, the editor shows whether its test passes or
+  how many rows differ.
 - The status bar shows how many of the folder's tests pass; click it for the list of what is passing, failing, not run or not started.
 
 ![The Testing view listing test scripts with their results](docs/images/testing-view.png)
@@ -118,6 +127,11 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
   previous program stops and the new program starts paused. Turn off
   `nandwright.simulator.followEditor` to keep individual panels fixed to their files.
 - Saving an `.asm` file reloads it in the Hack computer while the machine is still at reset.
+- Below the screen, the panel shows the **Expected output** table from the program's
+  `.cmp` file, marks each row as matching, differing (with what your program gave) or not
+  reached after a test run, and includes **Run test** and **Diff `.out` ↔ `.cmp`**
+  buttons. Visual OS tests that ship a reference image (such as `ScreenTestOutput.gif` or
+  `OutputTestOutput.gif`) show an **Expected screen** preview beside the live screen.
 - **Breakpoints** set in the editor pause the program; the line about to run is highlighted.
   Jack programs step by Jack line.
 - Jack runs with a built-in OS (`Math`, `String`, `Array`, `Output`, `Screen`, `Keyboard`,
@@ -133,9 +147,12 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 
 ### Check your own assembler, translator and compiler
 
-In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite their output.
+In projects 6 to 11 you write the tools yourself. Nandwright does not overwrite their output,
+and when your own tool writes a newer `.hack` or `.vm` file, running the test script tests
+your file as-is.
 
-- **Compare with Reference Output** on a `.hack`, `.vm` or `.xml` file your tool wrote shows
+- **Compare with Reference Output** on a `.hack`, `.vm` or `.xml` file your tool wrote
+  (also offered as **Compare with reference** at the top of the file) shows
   a diff against what the built-in assembler, compiler or syntax analyzer produces. As with
   the official TextComparer, spaces and tabs inside a line do not count, so XML without
   indentation matches. The reference is what the official tools write; a course's own
@@ -231,13 +248,13 @@ Presets for other courses are welcome as contributions: see `extension/src/prese
 | Project | You write | What Nandwright does for it |
 |---|---|---|
 | 1 Boolean logic, 2 Arithmetic, 3 Memory, 5 Computer | Chips in HDL | Simulates them, runs the test scripts, shows failing rows with internal pins, interactive simulator with clock, live circuit diagrams with drill-down |
-| 4 Machine language | Hack assembly | Runs the CPU Emulator test scripts; runs programs with screen and keyboard; assembles to `.hack` |
+| 4 Machine language | Hack assembly | Runs CPU Emulator test scripts directly from `.asm` (even when the script loads `.hack`) without writing `.hack` files; shows expected `.cmp` output and pass/fail marks in the Hack computer panel; runs programs with screen and keyboard; assembles to `.hack` |
 | 6 Assembler | An assembler | Compares your `.hack` with the reference; runs it on the Hack computer |
 | 7, 8 VM translator | A VM-to-Hack translator | Runs the course's CPU Emulator scripts on your `.asm`; runs the `…VME.tst` scripts and any `.vm` program on the VM emulator |
 | 9 High-level language | Jack programs | Compiles and runs them with the built-in OS; breakpoints and stepping by Jack line |
 | 10 Syntax analyzer | A tokenizer and parser | Compares your `.xml` with the reference token list and parse tree |
 | 11 Compiler | A Jack compiler | Compares your `.vm` with the reference; runs your `.vm` on the VM emulator |
-| 12 Operating system | The OS classes in Jack | Runs the project's test scripts and test programs with your classes in place of the built-in ones |
+| 12 Operating system | The OS classes in Jack | Runs the project's test scripts directly from `.jack` in memory without writing `.vm` files; shows expected `.cmp` output and reference screen images in the VM emulator; runs test programs with your classes in place of the built-in ones |
 
 ## Does it match the official tools?
 
@@ -278,8 +295,9 @@ extensions are from their own Marketplace pages at the time of writing.
 
 ### How do I run a Nand2Tetris .tst file in VS Code?
 
-Install Nandwright, open the `.tst` file (or the `.hdl` it tests) and press the play button
-at the top right of the editor, or run it from the Testing view. No setup is needed.
+Install Nandwright, open the `.tst` file (or the `.hdl`, `.asm`, `.hack`, `.vm`, or `.jack`
+file it tests) and press the play button at the top right of the editor, or run it from the
+Testing view. No setup is needed.
 
 ### Do I need Java?
 
@@ -338,7 +356,8 @@ The engine also builds as a native command, `n2t`, used by the test suite:
 
 ```sh
 cargo build --release -p n2t-cli
-n2t test projects/01            # run every test script in a folder
+n2t test projects/01            # run every test script in a folder (strict Java behavior)
+n2t test --build projects/04    # assemble .asm / compile .jack in memory when .hack/.vm is missing
 n2t check projects              # report problems in .hdl, .tst, .asm, .vm and .jack files
 n2t eval Majority.hdl a=1 c=1   # evaluate a chip and print every pin
 n2t fmt --check projects/01     # check formatting

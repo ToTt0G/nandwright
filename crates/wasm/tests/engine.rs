@@ -1115,3 +1115,297 @@ fn course_hints_work_and_a_folders_own_chip_comes_before_the_built_in_one() {
     );
     assert_eq!(columns[3], vec![1, 1, 0, 1]);
 }
+
+#[test]
+fn cpu_test_assembles_sibling_asm_in_memory_even_when_case_differs() {
+    let dir = "/home/student/programs/double";
+    let host = Arc::new(MemoryHost::new());
+    // Lowercase source next to a script loading capitalised `.hack`,
+    // mirroring the case mismatch on case-sensitive filesystems.
+    host.insert(
+        &format!("{dir}/double.asm"),
+        "@R0\nD=M\nD=D+M\n@R1\nM=D\n(END)\n@END\n0;JMP\n",
+    );
+    host.insert(
+        &format!("{dir}/Double.tst"),
+        "load Double.hack,\noutput-file Double.out,\ncompare-to Double.cmp,\n\
+         output-list RAM[0]%D2.6.2 RAM[1]%D2.6.2;\n\
+         set RAM[0] 6, set RAM[1] -1;\nrepeat 20 { ticktock; }\noutput;\n",
+    );
+    host.insert(
+        &format!("{dir}/Double.cmp"),
+        "|  RAM[0]  |  RAM[1]  |\n|       6  |      12  |\n",
+    );
+    let mut engine = Engine::new(host.clone());
+    let script = format!("{dir}/Double.tst");
+
+    // Strict mode (default): fails with a helpful message naming `double.asm`.
+    let opened = call(&mut engine, json!({"op": "test.open", "path": script}));
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "error", "{status}");
+    assert!(
+        status["outcome"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("double.asm"),
+        "{status}"
+    );
+
+    // With `buildSources`: assembles `double.asm` in memory without writing `.hack`.
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+    assert!(host.get(&format!("{dir}/Double.hack")).is_none());
+
+    // Unsaved edits in `double.asm` are seen immediately.
+    call(
+        &mut engine,
+        json!({"op": "overlay.set", "path": format!("{dir}/double.asm"),
+               "text": "@R0\nD=M\n@R1\nM=D\n(END)\n@END\n0;JMP\n", "ignoreCase": false}),
+    );
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true}),
+    );
+    let (status, failures) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "failed", "{status}");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["actual"], "|       6  |       6  |");
+    call(&mut engine, json!({"op": "overlay.clear"}));
+
+    // When a stale `.hack` exists on disk:
+    // - without `preferSources`, the `.hack` runs (preserving own-assembler tests);
+    // - with `preferSources`, `double.asm` is assembled in memory instead.
+    host.insert(
+        &format!("{dir}/Double.hack"),
+        "0000000000000000\n1110101010000111\n",
+    );
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "failed", "{status}");
+
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true,
+               "preferSources": [format!("{dir}/double.asm")]}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+}
+
+#[test]
+fn vm_folder_test_compiles_jack_in_memory_without_writing_vm_files() {
+    let dir = "/home/student/programs/calc";
+    let host = Arc::new(MemoryHost::new());
+    host.insert(
+        &format!("{dir}/Main.jack"),
+        "class Main {\n    function void main() {\n        do Memory.poke(8000, Calc.triple(7));\n        return;\n    }\n}\n",
+    );
+    host.insert(
+        &format!("{dir}/Calc.jack"),
+        "class Calc {\n    function int triple(int x) {\n        return x + x + x;\n    }\n}\n",
+    );
+    host.insert(
+        &format!("{dir}/CalcTest.tst"),
+        "load,\noutput-file CalcTest.out,\ncompare-to CalcTest.cmp,\n\
+         output-list RAM[8000]%D2.6.1;\nrepeat 5000 { vmstep; }\noutput;\n",
+    );
+    host.insert(&format!("{dir}/CalcTest.cmp"), "|RAM[8000]|\n|      21 |\n");
+    let mut engine = Engine::new(host.clone());
+    let script = format!("{dir}/CalcTest.tst");
+
+    // Strict mode: fails because there are no `.vm` files.
+    let opened = call(&mut engine, json!({"op": "test.open", "path": script}));
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "error", "{status}");
+
+    // With `buildSources`: compiles both Jack classes in memory and passes.
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+    assert!(host.get(&format!("{dir}/Main.vm")).is_none());
+    assert!(host.get(&format!("{dir}/Calc.vm")).is_none());
+
+    // When a stale `Calc.vm` exists on disk, `preferSources` compiles `Calc.jack`
+    // in memory while still keeping any up-to-date `.vm` files untouched.
+    host.insert(
+        &format!("{dir}/Calc.vm"),
+        "function Calc.triple 0\npush constant 0\nreturn\n",
+    );
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "failed", "{status}");
+
+    let opened = call(
+        &mut engine,
+        json!({"op": "test.open", "path": script, "buildSources": true,
+               "preferSources": [format!("{dir}/Calc.jack")]}),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+
+    // Inspect reports exact provenance of loaded inputs.
+    let inspected = call(
+        &mut engine,
+        json!({"op": "test.inspect", "session": opened["session"]}),
+    );
+    let loaded = inspected["loaded"].as_array().unwrap();
+    assert!(
+        loaded
+            .iter()
+            .any(|entry| entry["path"] == format!("{dir}/Calc.jack")
+                && entry["builtFromSource"] == true),
+        "{loaded:?}"
+    );
+}
+
+#[test]
+fn mixed_jack_vm_folder_ignores_unselected_broken_jack_and_preserves_distinct_case_classes() {
+    let dir = "/home/student/programs/mixed";
+    let host = Arc::new(MemoryHost::new());
+    host.insert(
+        &format!("{dir}/Main.jack"),
+        "class Main {\n    function void main() {\n        do Memory.poke(8000, Old.value() + lower.value() + Lower.value());\n        return;\n    }\n}\n",
+    );
+    // Old.vm is valid while Old.jack is broken and unselected -> must NOT fail the build.
+    host.insert(
+        &format!("{dir}/Old.vm"),
+        "function Old.value 0\npush constant 10\nreturn\n",
+    );
+    host.insert(&format!("{dir}/Old.jack"), "class Old { broken syntax");
+    // On a case-sensitive volume, `Lower.jack` and `lower.vm` are distinct classes.
+    host.insert(
+        &format!("{dir}/Lower.jack"),
+        "class Lower {\n    function int value() {\n        return 5;\n    }\n}\n",
+    );
+    host.insert(
+        &format!("{dir}/lower.vm"),
+        "function lower.value 0\npush constant 2\nreturn\n",
+    );
+    host.insert(
+        &format!("{dir}/MixedTest.tst"),
+        "load,\noutput-file MixedTest.out,\ncompare-to MixedTest.cmp,\n\
+         output-list RAM[8000]%D2.6.1;\nrepeat 5000 { vmstep; }\noutput;\n",
+    );
+    host.insert(
+        &format!("{dir}/MixedTest.cmp"),
+        "|RAM[8000]|\n|      17 |\n",
+    );
+
+    let mut engine = Engine::new(host.clone());
+    let script = format!("{dir}/MixedTest.tst");
+    let opened = call(
+        &mut engine,
+        json!({
+            "op": "test.open",
+            "path": script,
+            "buildSources": true,
+            "ignoreCase": false,
+            "preferSources": [format!("{dir}/Lower.jack")]
+        }),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+
+    // Live VM emulator opening Main.jack also links extra `.vm` files (`lower.vm`, `Old.vm` when Old.jack absent).
+    let live_dir = "/home/student/programs/mixed_live";
+    host.insert(
+        &format!("{live_dir}/Main.jack"),
+        "class Main {\n    function void main() {\n        do Memory.poke(8000, Helper.value());\n        return;\n    }\n}\n",
+    );
+    host.insert(
+        &format!("{live_dir}/Helper.vm"),
+        "function Helper.value 0\npush constant 33\nreturn\n",
+    );
+    let opened_vm = call(
+        &mut engine,
+        json!({"op": "vm.open", "path": format!("{live_dir}/Main.jack"), "ignoreCase": false}),
+    );
+    assert!(opened_vm["error"].is_null(), "{opened_vm}");
+    let ran = call(
+        &mut engine,
+        json!({"op": "vm.run", "session": opened_vm["session"], "budget": 5000, "ram": [8000, 1]}),
+    );
+    assert_eq!(ran["status"], "halted", "{ran}");
+    assert_eq!(ran["ram"]["values"][0], 33, "{ran}");
+}
+
+#[test]
+fn test_open_inline_overlay_and_case_insensitive_prefer_sources() {
+    struct CaseInsensitiveHost(Arc<MemoryHost>);
+    impl n2t_core::host::Host for CaseInsensitiveHost {
+        fn read(&self, file: &str) -> Result<Vec<u8>, n2t_core::host::HostError> {
+            let norm = n2t_core::host::path::normalize(file);
+            if let Ok(bytes) = self.0.read(&norm) {
+                return Ok(bytes);
+            }
+            let dir = n2t_core::host::path::dir(&norm);
+            let target = n2t_core::host::path::file_name(&norm);
+            for entry in self.0.list(dir)? {
+                if !entry.is_dir && entry.name.eq_ignore_ascii_case(target) {
+                    return self.0.read(&n2t_core::host::path::join(dir, &entry.name));
+                }
+            }
+            Err(n2t_core::host::HostError::NotFound)
+        }
+        fn list(
+            &self,
+            dir: &str,
+        ) -> Result<Vec<n2t_core::host::DirEntry>, n2t_core::host::HostError> {
+            self.0.list(dir)
+        }
+        fn write(&self, file: &str, data: &[u8]) -> Result<(), n2t_core::host::HostError> {
+            self.0.write(file, data)
+        }
+    }
+
+    let dir = "/work/demo";
+    let mem = Arc::new(MemoryHost::new());
+    mem.insert(
+        &format!("{dir}/demo.asm"),
+        "@1\nD=A\n@R0\nM=D\n(END)\n@END\n0;JMP\n",
+    );
+    mem.insert(&format!("{dir}/Demo.hack"), "0000000000000001\n1110110000010000\n0000000000000000\n1110001100001000\n0000000000000100\n1110101010000111\n");
+    mem.insert(
+        &format!("{dir}/Demo.tst"),
+        "load Demo.hack,\noutput-file Demo.out,\ncompare-to Demo.cmp,\noutput-list RAM[0]%D2.6.2;\nrepeat 20 { ticktock; }\noutput;\n",
+    );
+    mem.insert(&format!("{dir}/Demo.cmp"), "|  RAM[0]  |\n|       2  |\n");
+
+    let host: n2t_core::host::SharedHost = Arc::new(CaseInsensitiveHost(mem));
+    let mut engine = Engine::new(host);
+    // Shared overlay has stale content (`@9`); inline overlay in `test.open` has `@2`.
+    call(
+        &mut engine,
+        json!({"op": "overlay.set", "path": format!("{dir}/demo.asm"), "text": "@9\nD=A\n@R0\nM=D\n(END)\n@END\n0;JMP\n", "ignoreCase": true}),
+    );
+    let opened = call(
+        &mut engine,
+        json!({
+            "op": "test.open",
+            "path": format!("{dir}/Demo.tst"),
+            "buildSources": true,
+            "ignoreCase": true,
+            "preferSources": [format!("{dir}/DEMO.ASM")],
+            "overlay": [{
+                "path": format!("{dir}/demo.asm"),
+                "text": "@2\nD=A\n@R0\nM=D\n(END)\n@END\n0;JMP\n",
+                "ignoreCase": true
+            }]
+        }),
+    );
+    let (status, _) = run_to_end(&mut engine, &opened["session"]);
+    assert_eq!(status["outcome"]["kind"], "passed", "{status}");
+}

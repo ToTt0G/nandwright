@@ -4,7 +4,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
-import { TestExplorer, commandFiles, textOf, withoutComments } from './testing';
+import { TestExplorer, textOf, withoutComments } from './testing';
+import { hasNoAsmCode, primaryScriptTarget } from './testLinks';
+import { ignoresCase } from './paths';
 
 export type ProgressState = 'failing' | 'notRun' | 'notStarted' | 'passing' | 'demonstration';
 
@@ -181,10 +183,13 @@ export class Progress implements vscode.Disposable {
                 const fails = result?.kind === 'failed' || result?.kind === 'error' || result?.kind === 'limit';
                 passed += passes ? 1 : 0;
                 failed += fails ? 1 : 0;
-                const loadedText = loaded && /\.hdl$/i.test(loaded.fsPath) ? await textOf(loaded.fsPath) : null;
-                if (loadedText !== null && hasNoParts(loadedText)) {
+                const loadedText = loaded && /\.(hdl|asm)$/i.test(loaded.fsPath) ? await textOf(loaded.fsPath) : null;
+                if (loaded && /\.hdl$/i.test(loaded.fsPath) && loadedText !== null && hasNoParts(loadedText)) {
                     state = 'notStarted';
                     description = 'not started: the chip has no parts yet';
+                } else if (loaded && /\.asm$/i.test(loaded.fsPath) && loadedText !== null && hasNoAsmCode(loadedText)) {
+                    state = 'notStarted';
+                    description = 'not started: the program has no instructions yet';
                 } else if (fails && result) {
                     state = 'failing';
                     description =
@@ -273,13 +278,20 @@ async function scriptsIn(folder: string): Promise<vscode.Uri[]> {
     }
 }
 
-/** The file a script loads, if it is in the script's folder. */
+/** The primary file a script tests, if it is in the script's folder. */
 async function loadedFile(script: vscode.Uri, text: string): Promise<vscode.Uri | undefined> {
-    const name = commandFiles(text, 'load')[0];
-    if (!name || /[\\/]/.test(name)) {
+    const dir = path.dirname(script.fsPath);
+    let entries: string[];
+    try {
+        entries = await fs.promises.readdir(dir);
+    } catch {
         return undefined;
     }
-    const file = path.join(path.dirname(script.fsPath), name);
+    const name = primaryScriptTarget(text, entries, ignoresCase(script.fsPath));
+    if (!name) {
+        return undefined;
+    }
+    const file = path.join(dir, name);
     try {
         await fs.promises.stat(file);
         return vscode.Uri.file(file);

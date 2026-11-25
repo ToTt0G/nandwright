@@ -1,5 +1,6 @@
 // Nandwright: Nand2Tetris in VS Code.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import {
@@ -13,15 +14,18 @@ import { ChipSessions } from './chipSessions';
 import { CircuitPanels } from './circuitPanel';
 import { ComputerPanels, isProgram } from './computerPanel';
 import { Outputs } from './outputs';
+import { ignoresCase } from './paths';
 import { Progress } from './progress';
 import { debugScript, registerDebugger } from './debug';
 import { Runtime, crashWorkerForTests } from './runtime/client';
-import { ScriptResult, TestExplorer } from './testing';
+import { ScriptResult, TestExplorer, rankScriptsForFile, scriptsForFile, textOf } from './testing';
+import { compareFilesForScript, hasReferenceSource, primaryScriptTarget } from './testLinks';
 import { addedFiles, handInFolder, planZip, projectFiles, writeProjectZip, zipPlaces, zipProject, zipSettings } from './zipProject';
 import { SetupUi, offerSetup, runSetup, setupPlaces, vscodeSetupUi } from './setup';
 
 const LANGUAGES = ['hdl', 'tst', 'cmp', 'hack-asm', 'hack', 'vm', 'jack'];
 const BUILTIN_SCHEME = 'n2t-builtin';
+const OUTPUT_SNAPSHOT_SCHEME = 'n2t-output';
 
 /** What the extension exposes to its own integration tests. */
 export interface TestHooks {
@@ -104,32 +108,6 @@ function chipNameOf(document: vscode.TextDocument): string | undefined {
     return /^\s*CHIP\s+([A-Za-z_][A-Za-z0-9_]*)/m.exec(document.getText())?.[1];
 }
 
-/** The `.tst` scripts in a chip's folder that load it. */
-async function scriptsForChip(chip: vscode.Uri): Promise<vscode.Uri[]> {
-    const dir = vscode.Uri.joinPath(chip, '..');
-    const name = path.basename(chip.fsPath, path.extname(chip.fsPath));
-    const loads = new RegExp(`\\bload\\s+"?${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.hdl\\b`, 'i');
-    const found: vscode.Uri[] = [];
-    let entries: [string, vscode.FileType][] = [];
-    try {
-        entries = await vscode.workspace.fs.readDirectory(dir);
-    } catch {
-        return found;
-    }
-    for (const [entry] of entries.sort(([a], [b]) => a.localeCompare(b))) {
-        if (!entry.toLowerCase().endsWith('.tst')) {
-            continue;
-        }
-        const uri = vscode.Uri.joinPath(dir, entry);
-        const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
-        const text = open ? open.getText() : new TextDecoder('latin1').decode(await vscode.workspace.fs.readFile(uri));
-        if (loads.test(text.replace(/\/\/.*$/gm, ''))) {
-            found.push(uri);
-        }
-    }
-    return found;
-}
-
 /** The chip a script loads, if it is a chip script and the file exists. */
 async function chipForScript(script: vscode.Uri): Promise<vscode.Uri | undefined> {
     const document = await vscode.workspace.openTextDocument(script);
@@ -146,6 +124,27 @@ async function chipForScript(script: vscode.Uri): Promise<vscode.Uri | undefined
     }
 }
 
+/** The program file a CPU or VM script tests, if one exists in its folder. */
+async function programForScript(script: vscode.Uri): Promise<vscode.Uri | undefined> {
+    const text = await textOf(script.fsPath);
+    if (text === null) {
+        return undefined;
+    }
+    const dir = path.dirname(script.fsPath);
+    let entries: string[];
+    try {
+        entries = await fs.promises.readdir(dir);
+    } catch {
+        return undefined;
+    }
+    const name = primaryScriptTarget(text, entries, ignoresCase(script.fsPath));
+    if (!name) {
+        return undefined;
+    }
+    const target = vscode.Uri.file(path.join(dir, name));
+    return isProgram(target) ? target : undefined;
+}
+
 function targetUri(argument: unknown): vscode.Uri | undefined {
     if (argument instanceof vscode.Uri) {
         return argument;
@@ -156,16 +155,16 @@ function targetUri(argument: unknown): vscode.Uri | undefined {
 const isHdl = (uri: vscode.Uri) => uri.fsPath.toLowerCase().endsWith('.hdl');
 const isTst = (uri: vscode.Uri) => uri.fsPath.toLowerCase().endsWith('.tst');
 
-async function scriptsFor(uri: vscode.Uri | undefined): Promise<vscode.Uri[] | undefined> {
+async function scriptsFor(uri: vscode.Uri | undefined): Promise<{ scripts: vscode.Uri[]; source?: vscode.Uri } | undefined> {
     if (!uri) {
-        void vscode.window.showInformationMessage('Open a chip (.hdl) or a test script (.tst) to run its test.');
+        void vscode.window.showInformationMessage('Open a chip (.hdl), program (.asm, .hack, .vm, .jack) or test script (.tst) to run its test.');
         return undefined;
     }
     if (isTst(uri)) {
-        return [uri];
+        return { scripts: [uri] };
     }
     if (isHdl(uri)) {
-        const scripts = await scriptsForChip(uri);
+        const scripts = await scriptsForFile(uri);
         if (scripts.length === 0) {
             const name = path.basename(uri.fsPath);
             const choice = await vscode.window.showInformationMessage(
@@ -177,9 +176,25 @@ async function scriptsFor(uri: vscode.Uri | undefined): Promise<vscode.Uri[] | u
             }
             return undefined;
         }
-        return scripts;
+        return { scripts, source: uri };
     }
-    void vscode.window.showInformationMessage('Open a chip (.hdl) or a test script (.tst) to run its test.');
+    if (isProgram(uri)) {
+        const scripts = await scriptsForFile(uri);
+        if (scripts.length === 0) {
+            const name = path.basename(uri.fsPath);
+            const panel = /\.(vm|jack)$/i.test(uri.fsPath) ? 'VM emulator' : 'Hack computer';
+            const choice = await vscode.window.showInformationMessage(
+                `No automated test script in this folder tests ${name}. You can still run it in the ${panel}.`,
+                'Run Program',
+            );
+            if (choice) {
+                await vscode.commands.executeCommand('nandwright.runProgram', uri);
+            }
+            return undefined;
+        }
+        return { scripts, source: uri };
+    }
+    void vscode.window.showInformationMessage('Open a chip (.hdl), program (.asm, .hack, .vm, .jack) or test script (.tst) to run its test.');
     return undefined;
 }
 
@@ -190,7 +205,16 @@ function summarize(results: ScriptResult[]): void {
     const quiet = ['passed', 'unchecked', 'cancelled', 'skipped'];
     const skipped = results.find((r) => r.outcome.kind === 'skipped');
     if (skipped && skipped.outcome.kind === 'skipped' && results.length === 1) {
-        void vscode.window.showInformationMessage(`${path.basename(skipped.uri.fsPath)} was not run. ${skipped.outcome.reason}`);
+        const reason = skipped.outcome.reason;
+        void programForScript(skipped.uri).then((program) => {
+            if (program) {
+                void vscode.window
+                    .showInformationMessage(`${path.basename(skipped.uri.fsPath)} was not run. ${reason}`, 'Run Program')
+                    .then((choice) => choice && vscode.commands.executeCommand('nandwright.runProgram', program));
+            } else {
+                void vscode.window.showInformationMessage(`${path.basename(skipped.uri.fsPath)} was not run. ${reason}`);
+            }
+        });
         return;
     }
     const failed = results.filter((r) => !quiet.includes(r.outcome.kind));
@@ -233,20 +257,26 @@ function summarize(results: ScriptResult[]): void {
             const chip = await chipForScript(first.uri);
             if (chip) {
                 await vscode.commands.executeCommand('nandwright.openChip', chip);
-            } else {
-                void vscode.window.showInformationMessage(`${name} does not load a chip from this folder.`);
+                return;
             }
+            const program = await programForScript(first.uri);
+            if (program) {
+                await vscode.commands.executeCommand('nandwright.runProgram', program);
+                return;
+            }
+            void vscode.window.showInformationMessage(`${name} does not load a chip or program from this folder.`);
         }
     });
 }
 
 /**
- * A CodeLens with the last result of a chip's test scripts: whether they
- * pass, and how many rows differ when one does not. None before a run or
- * once an edit has made the result out of date.
+ * A CodeLens with the last result of a chip's or program's test scripts:
+ * whether they pass, and how many rows differ when one does not. None before
+ * a run, when a stored run tested a different input (e.g. `.asm` vs `.hack`),
+ * or once an edit has made the result out of date.
  */
-export function testResultLens(tests: TestExplorer, scripts: vscode.Uri[]): vscode.Command | undefined {
-    const statuses = scripts.map((script) => ({ script, ...tests.statusOf(script) }));
+export function testResultLens(tests: TestExplorer, scripts: vscode.Uri[], forFile?: vscode.Uri): vscode.Command | undefined {
+    const statuses = scripts.map((script) => ({ script, ...tests.statusOf(script, forFile) }));
     // Plain text: a lens with no command cannot be clicked.
     const text = (title: string, tooltip: string): vscode.Command => ({ title, tooltip, command: '' });
     if (statuses.some((status) => status.status === 'running')) {
@@ -322,11 +352,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
     const sessions = new ChipSessions(runtime, { generation: () => generation, log: (line) => output.appendLine(line) });
     const chips = new ChipPanels(context.extensionUri, sessions, tests);
     const circuits = new CircuitPanels(context.extensionUri, sessions, context.workspaceState, output);
-    const computers = new ComputerPanels(context.extensionUri, runtime);
+    const computers = new ComputerPanels(context.extensionUri, runtime, tests);
     const outputs = new Outputs(runtime);
     const progress = new Progress(tests);
     registerDebugger(context, runtime);
     context.subscriptions.push(runtime, tests, chips, circuits, sessions, computers, outputs, progress);
+
+    const outputSnapshots = new Map<string, string>();
+    const outputSnapshotsChanged = new vscode.EventEmitter<vscode.Uri>();
+    context.subscriptions.push(
+        outputSnapshotsChanged,
+        vscode.workspace.registerTextDocumentContentProvider(OUTPUT_SNAPSHOT_SCHEME, {
+            onDidChange: outputSnapshotsChanged.event,
+            provideTextDocumentContent: (uri) => outputSnapshots.get(uri.path) ?? '',
+        }),
+    );
 
     // The result of the last run is shown in the editor, beside Run test, so
     // nobody has to open the Test Results view to see whether a chip passes.
@@ -343,18 +383,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
 
     context.subscriptions.push(
         vscode.commands.registerCommand('nandwright.runTest', async (argument?: unknown) => {
-            const scripts = await scriptsFor(targetUri(argument));
-            if (scripts) {
-                const results = await tests.runScripts(scripts);
+            const found = await scriptsFor(targetUri(argument));
+            if (found) {
+                const results = await tests.runScripts(found.scripts, { source: found.source });
                 summarize(results);
                 return results;
             }
             return [];
         }),
         vscode.commands.registerCommand('nandwright.debugTest', async (argument?: unknown) => {
-            const scripts = await scriptsFor(targetUri(argument));
-            if (scripts?.length) {
-                await debugScript(scripts[0]);
+            const found = await scriptsFor(targetUri(argument));
+            if (found?.scripts.length) {
+                const ordered = found.source
+                    ? await rankScriptsForFile(found.scripts, found.source, tests)
+                    : found.scripts;
+                await debugScript(ordered[0], found.source);
             }
         }),
         vscode.commands.registerCommand('nandwright.openChip', async (argument?: unknown) => {
@@ -416,25 +459,106 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
             return outputs.compareWithReference(uri);
         }),
         vscode.commands.registerCommand('nandwright.compareOutput', async (argument?: unknown) => {
-            const uri = targetUri(argument);
+            let uri: vscode.Uri | undefined;
+            let forFile: vscode.Uri | undefined;
+            if (
+                argument
+                && typeof argument === 'object'
+                && 'script' in argument
+                && (argument as { script?: unknown }).script instanceof vscode.Uri
+            ) {
+                uri = (argument as { script: vscode.Uri }).script;
+                const candidate = (argument as { forFile?: unknown }).forFile;
+                if (candidate instanceof vscode.Uri) {
+                    forFile = candidate;
+                }
+            } else {
+                uri = targetUri(argument);
+            }
             if (!uri) {
                 return;
             }
             const base = uri.fsPath.replace(/\.[^.\\/]+$/, '');
-            const expected = vscode.Uri.file(`${base}.cmp`);
-            const actual = vscode.Uri.file(`${base}.out`);
-            for (const [file, hint] of [
-                [expected, 'This test has no compare file.'],
-                [actual, 'Run the test first: it writes the output file.'],
-            ] as const) {
+            let selectedScript: vscode.Uri | undefined;
+            let expectedPath: string | null = `${base}.cmp`;
+            let actualPath = `${base}.out`;
+            if (isTst(uri)) {
+                selectedScript = uri;
+                const text = await textOf(uri.fsPath);
+                if (text !== null) {
+                    const pair = compareFilesForScript(text, uri.fsPath);
+                    expectedPath = pair.comparePath;
+                    actualPath = pair.outputPath;
+                }
+            } else if (isHdl(uri) || isProgram(uri)) {
+                forFile = uri;
+                const scripts = await rankScriptsForFile(await scriptsForFile(uri), uri, tests);
+                for (const script of scripts) {
+                    const text = await textOf(script.fsPath);
+                    if (text === null) {
+                        continue;
+                    }
+                    const pair = compareFilesForScript(text, script.fsPath);
+                    if (pair.comparePath && fs.existsSync(pair.comparePath)) {
+                        selectedScript = script;
+                        expectedPath = pair.comparePath;
+                        actualPath = pair.outputPath;
+                        break;
+                    }
+                }
+                if (!selectedScript && scripts.length > 0) {
+                    selectedScript = scripts[0];
+                    const text = await textOf(selectedScript.fsPath);
+                    if (text !== null) {
+                        const pair = compareFilesForScript(text, selectedScript.fsPath);
+                        expectedPath = pair.comparePath;
+                        actualPath = pair.outputPath;
+                    }
+                }
+            }
+            if (!expectedPath) {
+                void vscode.window.showInformationMessage('This test script does not name a valid .cmp compare file in its folder.');
+                return;
+            }
+            const runStatus = selectedScript ? tests.statusOf(selectedScript, forFile) : undefined;
+            const runResult = runStatus?.status === 'current' ? runStatus.result : undefined;
+            if (runResult?.comparePath) {
+                expectedPath = runResult.comparePath;
+            }
+            if (runResult?.outputPath) {
+                actualPath = runResult.outputPath;
+            }
+            const expected = vscode.Uri.file(expectedPath);
+            try {
+                await vscode.workspace.fs.stat(expected);
+            } catch {
+                void vscode.window.showInformationMessage(`${path.basename(expected.fsPath)} does not exist. This test has no compare file.`);
+                return;
+            }
+            let actual: vscode.Uri = vscode.Uri.file(actualPath);
+            if (runResult?.outputText !== undefined) {
+                let diskMatches = false;
                 try {
-                    await vscode.workspace.fs.stat(file);
+                    const diskText = await fs.promises.readFile(actualPath, 'utf8');
+                    diskMatches = diskText.replace(/\r\n/g, '\n') === runResult.outputText.replace(/\r\n/g, '\n');
                 } catch {
-                    void vscode.window.showInformationMessage(`${path.basename(file.fsPath)} does not exist. ${hint}`);
+                    diskMatches = false;
+                }
+                if (!diskMatches) {
+                    const snapshotUri = vscode.Uri.from({ scheme: OUTPUT_SNAPSHOT_SCHEME, path: actual.path });
+                    outputSnapshots.set(snapshotUri.path, runResult.outputText);
+                    outputSnapshotsChanged.fire(snapshotUri);
+                    actual = snapshotUri;
+                }
+            } else {
+                try {
+                    await vscode.workspace.fs.stat(actual);
+                } catch {
+                    void vscode.window.showInformationMessage(`${path.basename(actual.fsPath)} does not exist. Run the test first: it writes the output file.`);
                     return;
                 }
             }
-            const name = path.basename(base);
+            const name = path.basename(expectedPath, path.extname(expectedPath));
             await vscode.commands.executeCommand('vscode.diff', expected, actual, `${name}: expected (.cmp) ↔ actual (.out)`);
         }),
         vscode.commands.registerCommand('nandwright.getStarted', () =>
@@ -459,7 +583,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                     const position = document.positionAt(match.index);
                     const range = new vscode.Range(position, position);
                     const lenses: vscode.CodeLens[] = [];
-                    const scripts = await scriptsForChip(document.uri);
+                    const scripts = await scriptsForFile(document.uri);
                     if (scripts.length > 0) {
                         const result = testResultLens(tests, scripts);
                         if (result) {
@@ -486,6 +610,80 @@ export async function activate(context: vscode.ExtensionContext): Promise<Nandwr
                             command: 'nandwright.openChip',
                             arguments: [document.uri],
                             tooltip: 'Set the inputs yourself and watch every pin',
+                        }),
+                    );
+                    return lenses;
+                },
+            },
+        ),
+        vscode.languages.registerCodeLensProvider(
+            ['hack-asm', 'hack', 'vm', 'jack', 'xml'].map((language) => ({ language, scheme: 'file' })),
+            {
+                onDidChangeCodeLenses: lensesChanged.event,
+                async provideCodeLenses(document) {
+                    const uri = document.uri;
+                    const range = new vscode.Range(0, 0, 0, 0);
+                    const fileName = path.basename(uri.fsPath);
+                    const dir = path.dirname(uri.fsPath);
+                    let entries: string[] = [];
+                    try {
+                        entries = await fs.promises.readdir(dir);
+                    } catch {
+                        // Folder unreadable.
+                    }
+                    const ignoreCase = ignoresCase(uri.fsPath);
+                    if (document.languageId === 'xml') {
+                        if (!hasReferenceSource(fileName, entries, ignoreCase)) {
+                            return [];
+                        }
+                        return [
+                            new vscode.CodeLens(range, {
+                                title: '$(diff) Compare with reference',
+                                command: 'nandwright.compareWithReference',
+                                arguments: [uri],
+                                tooltip: 'Diff this XML file against the built-in syntax analyzer output',
+                            }),
+                        ];
+                    }
+                    const lenses: vscode.CodeLens[] = [];
+                    const scripts = await scriptsForFile(uri);
+                    if (scripts.length > 0) {
+                        const result = testResultLens(tests, scripts, uri);
+                        if (result) {
+                            lenses.push(new vscode.CodeLens(range, result));
+                        }
+                        lenses.push(
+                            new vscode.CodeLens(range, {
+                                title: scripts.length === 1 ? '$(play) Run test' : `$(play) Run ${scripts.length} tests`,
+                                command: 'nandwright.runTest',
+                                arguments: [uri],
+                                tooltip: scripts.map((s) => path.basename(s.fsPath)).join(', '),
+                            }),
+                            new vscode.CodeLens(range, {
+                                title: '$(debug-alt) Step through',
+                                command: 'nandwright.debugTest',
+                                arguments: [uri],
+                                tooltip: 'Run the test script one step at a time and watch registers and memory',
+                            }),
+                        );
+                    }
+                    if ((document.languageId === 'hack' || document.languageId === 'vm') && hasReferenceSource(fileName, entries, ignoreCase)) {
+                        lenses.push(
+                            new vscode.CodeLens(range, {
+                                title: '$(diff) Compare with reference',
+                                command: 'nandwright.compareWithReference',
+                                arguments: [uri],
+                                tooltip: 'Diff this file against the built-in reference tool output',
+                            }),
+                        );
+                    }
+                    const isVm = document.languageId === 'vm' || document.languageId === 'jack';
+                    lenses.push(
+                        new vscode.CodeLens(range, {
+                            title: isVm ? '$(vm-running) Open in VM emulator' : '$(vm-running) Open in Hack computer',
+                            command: 'nandwright.runProgram',
+                            arguments: [uri],
+                            tooltip: 'Run with the screen, keyboard, registers, memory and expected output',
                         }),
                     );
                     return lenses;

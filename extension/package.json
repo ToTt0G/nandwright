@@ -2,7 +2,7 @@
   "name": "nandwright",
   "displayName": "Nandwright: Nand2Tetris IDE (HDL, Hack Assembly, VM, Jack)",
   "description": "Run, test and debug every Nand2Tetris project inside VS Code: hardware simulator and live circuit diagrams for HDL chips, test scripts (.tst) in the Testing view, Hack assembler and CPU emulator, VM emulator, Jack compiler, screen and keyboard. No Java, nothing else to install.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "publisher": "nandwright",
   "license": "MPL-2.0",
   "icon": "media/icon.png",
@@ -264,7 +264,12 @@
         "nandwright.test.runOnSave": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Run a file's tests when you save it: saving a chip, a program, a test script or a compare file runs the test scripts in the same folder that use it. Results appear in the Testing view and in the chip simulator without taking focus. Scripts that repeat forever are not run this way."
+          "markdownDescription": "Run a file's tests when you save it: saving a chip, a program, a test script or a compare file runs the test scripts in the same folder that use it. Results appear in the Testing view and in the simulator panel without taking focus. Scripts that repeat forever are not run this way."
+        },
+        "nandwright.test.buildSources": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When a test script loads a `.hack` or `.vm` file (such as project 4's `Mult.tst` and `FillAutomatic.tst`, or project 12's OS tests), assemble the `.asm` or compile the `.jack` source in memory when the built file is missing, older than the source, or being edited. Never writes `.hack` or `.vm` files to disk."
         },
         "nandwright.zip.fileName": {
           "type": "string",
@@ -382,18 +387,18 @@
       "editor/title/run": [
         {
           "command": "nandwright.runTest",
-          "when": "resourceLangId == hdl || resourceLangId == tst",
+          "when": "resourceLangId == hdl || resourceLangId == tst || resourceLangId == hack-asm || resourceLangId == hack || resourceLangId == vm || resourceLangId == jack",
           "group": "navigation@1"
         },
         {
           "command": "nandwright.debugTest",
-          "when": "resourceLangId == hdl || resourceLangId == tst",
+          "when": "resourceLangId == hdl || resourceLangId == tst || resourceLangId == hack-asm || resourceLangId == hack || resourceLangId == vm || resourceLangId == jack",
           "group": "navigation@2"
         },
         {
           "command": "nandwright.runProgram",
           "when": "resourceLangId == hack-asm || resourceLangId == hack || resourceLangId == vm || resourceLangId == jack",
-          "group": "navigation@1"
+          "group": "navigation@3"
         }
       ],
       "editor/title": [
@@ -405,6 +410,11 @@
         {
           "command": "nandwright.showCircuit",
           "when": "resourceLangId == hdl",
+          "group": "navigation@10"
+        },
+        {
+          "command": "nandwright.runProgram",
+          "when": "resourceLangId == hack-asm || resourceLangId == hack || resourceLangId == vm || resourceLangId == jack",
           "group": "navigation@10"
         },
         {
@@ -424,7 +434,7 @@
         },
         {
           "command": "nandwright.compareWithReference",
-          "when": "resourceLangId == hack || resourceLangId == vm",
+          "when": "resourceLangId == hack || resourceLangId == vm || resourceExtname == .xml",
           "group": "navigation@13"
         },
         {
@@ -436,7 +446,7 @@
       "explorer/context": [
         {
           "command": "nandwright.runTest",
-          "when": "resourceExtname == .tst || resourceExtname == .hdl",
+          "when": "resourceExtname == .tst || resourceExtname == .hdl || resourceExtname == .asm || resourceExtname == .hack || resourceExtname == .vm || resourceExtname == .jack",
           "group": "nandwright@1"
         },
         {
@@ -478,11 +488,11 @@
       "commandPalette": [
         {
           "command": "nandwright.runTest",
-          "when": "editorLangId == hdl || editorLangId == tst"
+          "when": "editorLangId == hdl || editorLangId == tst || editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
         },
         {
           "command": "nandwright.debugTest",
-          "when": "editorLangId == hdl || editorLangId == tst"
+          "when": "editorLangId == hdl || editorLangId == tst || editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
         },
         {
           "command": "nandwright.openChip",
@@ -494,7 +504,7 @@
         },
         {
           "command": "nandwright.compareOutput",
-          "when": "editorLangId == cmp || editorLangId == tst || editorLangId == hdl"
+          "when": "editorLangId == cmp || editorLangId == tst || editorLangId == hdl || editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
         },
         {
           "command": "nandwright.runProgram",
@@ -526,12 +536,12 @@
         "command": "nandwright.runTest",
         "key": "ctrl+alt+t",
         "mac": "cmd+alt+t",
-        "when": "editorLangId == hdl || editorLangId == tst"
+        "when": "editorLangId == hdl || editorLangId == tst || editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
       },
       {
         "command": "nandwright.runProgram",
-        "key": "ctrl+alt+t",
-        "mac": "cmd+alt+t",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r",
         "when": "editorLangId == hack-asm || editorLangId == hack || editorLangId == vm || editorLangId == jack"
       }
     ],
@@ -667,7 +677,7 @@
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
     "typecheck": "tsc --noEmit -p .",
-    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs dist-test/unit/zipFiles.test.cjs dist-test/unit/offer.test.cjs dist-test/unit/circuitLayout.test.cjs dist-test/unit/circuitExport.test.cjs dist-test/unit/chipSessions.test.cjs dist-test/unit/chipWebview.test.cjs",
+    "test:unit": "node scripts/build.mjs --tests && node --test dist-test/unit/engine.test.cjs dist-test/unit/zip.test.cjs dist-test/unit/results.test.cjs dist-test/unit/zipName.test.cjs dist-test/unit/textCompare.test.cjs dist-test/unit/zipFiles.test.cjs dist-test/unit/offer.test.cjs dist-test/unit/circuitLayout.test.cjs dist-test/unit/circuitExport.test.cjs dist-test/unit/chipSessions.test.cjs dist-test/unit/chipWebview.test.cjs dist-test/unit/computerWebview.test.cjs dist-test/unit/testLinks.test.cjs",
     "preview:circuit": "node scripts/build.mjs && node scripts/circuit-preview.mjs",
     "test:integration": "node scripts/run-integration.mjs",
     "package": "node scripts/package.mjs"
