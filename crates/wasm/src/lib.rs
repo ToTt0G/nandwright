@@ -15,6 +15,7 @@
 //! | `start` | sets the first session number of a fresh engine, so that numbers are never reused after a restart |
 //! | `overlay.set`, `overlay.clear`, `overlay.replace` | unsaved editor buffers that shadow files |
 //! | `test.open`, `test.run`, `test.step`, `test.inspect` | a `.tst` script run |
+//! | `test.promote` | ends a CPU or VM script run and carries on with its machine, as it stands, as a `cpu.*` or `vm.*` session |
 //! | `chip.open`, `chip.set`, `chip.eval`, `chip.tick`, `chip.tock`, `chip.step`, `chip.reset`, `chip.state`, `chip.table`, `chip.diagram`, `chip.values` | an interactive chip |
 //! | `cpu.open`, `cpu.run`, `cpu.step`, `cpu.reset`, `cpu.restart`, `cpu.set`, `cpu.state` | a Hack computer running a program |
 //! | `vm.open`, `vm.run`, `vm.step`, `vm.reset`, `vm.set`, `vm.state` | a VM program (or a Jack folder, compiled in memory) on the VM emulator |
@@ -39,6 +40,7 @@ use std::sync::Arc;
 use n2t_core::host::SharedHost;
 use n2t_core::source::{LineIndex, Span};
 use n2t_lsp::JsonServer;
+use n2t_simulator::{CpuMachine, VmMachine};
 use serde_json::{Value, json};
 
 use crate::chip::ChipSession;
@@ -221,6 +223,7 @@ impl Engine {
                 reply["session"] = json!(self.add(Session::Test(Box::new(session))));
                 Ok(reply)
             }
+            "test.promote" => self.promote(request),
             "chip.open" => {
                 let session = ChipSession::open(&self.host, request)?;
                 let mut reply = session.state();
@@ -269,6 +272,76 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// `{"op":"test.promote","session":…}` with optional `path` (what a
+    /// reset reloads if the script loaded no program), `ignoreCase`, and the
+    /// `ram` / `screen` fields of `cpu.state` / `vm.state`. The test session
+    /// ends; its machine lives on as a new CPU or VM session. Answers
+    /// `{"session", "state", "scriptRange", "loaded"}`.
+    fn promote(&mut self, request: &Value) -> Result<Value, ErrorReply> {
+        let id = request["session"]
+            .as_u64()
+            .ok_or("the request needs a `session` number")?;
+        match self.sessions.get(&id) {
+            None => {
+                return Err(ErrorReply::coded(
+                    ErrorCode::SessionEnded,
+                    "this session has ended; start it again",
+                ));
+            }
+            Some(Session::Test(test)) => {
+                // Checked before the session is taken, so a refusal leaves
+                // the run as it was.
+                if let Some(message) = test.promotion_error() {
+                    return Err(message.into());
+                }
+            }
+            Some(_) => return Err("only a test run can be inspected this way".into()),
+        }
+        let Some(Session::Test(test)) = self.sessions.remove(&id) else {
+            unreachable!("checked above");
+        };
+        let promoted = test.into_promoted()?;
+        let fallback = request["path"].as_str().unwrap_or_default().to_string();
+        let mut machine = promoted.machine;
+        let any = machine.as_any_mut();
+        let (session, state) = if let Some(cpu) = any.downcast_mut::<CpuMachine>() {
+            let mut session =
+                ComputerSession::from_machine(&self.host, fallback, std::mem::take(cpu))?;
+            let state = session.state("paused", request);
+            (Session::Computer(Box::new(session)), state)
+        } else if let Some(vm) = any.downcast_mut::<VmMachine>() {
+            let ignore_case = request["ignoreCase"].as_bool().unwrap_or(false);
+            let mut session = VmSession::from_machine(
+                &self.host,
+                fallback,
+                ignore_case,
+                promoted.build_from_source,
+                promoted.prefer_sources,
+                std::mem::take(vm),
+            )?;
+            let status = if session.is_halted() {
+                "halted"
+            } else {
+                "paused"
+            };
+            let state = session.state(status, request);
+            (Session::Vm(Box::new(session)), state)
+        } else {
+            return Err(format!(
+                "a `{}` test run cannot be inspected in an emulator",
+                promoted.dialect.as_str()
+            )
+            .into());
+        };
+        let new_id = self.add(session);
+        Ok(json!({
+            "session": new_id,
+            "state": state,
+            "scriptRange": promoted.script_range,
+            "loaded": promoted.loaded,
+        }))
     }
 
     fn add(&mut self, session: Session) -> u64 {

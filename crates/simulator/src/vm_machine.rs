@@ -13,10 +13,49 @@ use crate::format::Value;
 use crate::machine::{Files, LoadedInput, Machine, Observed, Role};
 use crate::runner::{RunError, error};
 
+/// One class of a loaded program and where its code comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmLoadedFile {
+    /// The class name.
+    pub stem: String,
+    /// The file to show the student: the `.vm` file, or the `.jack` file the
+    /// code was compiled from.
+    pub source_path: String,
+    /// Whether the code was compiled from Jack in memory.
+    pub built_from_source: bool,
+    /// The text of each VM line, trimmed, for display.
+    pub vm_lines: Vec<String>,
+    /// For a compiled Jack class: the zero-based Jack line of each VM line.
+    pub jack_lines: Option<Vec<u32>>,
+}
+
+impl VmLoadedFile {
+    fn from_vm(stem: String, source_path: String, vm_text: &str) -> Self {
+        Self {
+            stem,
+            source_path,
+            built_from_source: false,
+            vm_lines: vm_lines(vm_text),
+            jack_lines: None,
+        }
+    }
+}
+
+/// A loaded program taken out of a [`VmMachine`] (see [`VmMachine::into_parts`]).
+pub struct VmMachineParts {
+    pub vm: Box<Vm>,
+    /// What `load` named: a `.vm` file or a folder.
+    pub target: String,
+    pub files: Vec<VmLoadedFile>,
+    /// Whether any class was compiled from Jack.
+    pub from_jack: bool,
+}
+
 pub struct VmMachine {
     vm: Option<Box<Vm>>,
-    /// Loaded `(stem, engine-form path, built_from_source)` entries.
-    files: Vec<(String, String, bool)>,
+    /// What the last successful `load` named.
+    target: Option<String>,
+    files: Vec<VmLoadedFile>,
     /// Scripts have no clock. Time moves only when the program sleeps, and
     /// then jumps straight to the moment it wakes: a test never waits.
     now_ms: u64,
@@ -33,6 +72,7 @@ impl VmMachine {
     pub fn new() -> Self {
         Self {
             vm: None,
+            target: None,
             files: Vec::new(),
             now_ms: 0,
             notes: Vec::new(),
@@ -51,8 +91,36 @@ impl VmMachine {
     pub fn file_path(&self, stem: &str) -> Option<&str> {
         self.files
             .iter()
-            .find(|(s, _, _)| s == stem)
-            .map(|(_, p, _)| p.as_str())
+            .find(|f| f.stem == stem)
+            .map(|f| f.source_path.as_str())
+    }
+
+    /// The classes of the loaded program.
+    pub fn files(&self) -> &[VmLoadedFile] {
+        &self.files
+    }
+
+    /// What the last successful `load` named: a `.vm` file or a folder.
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
+    }
+
+    /// Whether any class of the loaded program was compiled from Jack.
+    pub fn from_jack(&self) -> bool {
+        self.files.iter().any(|f| f.jack_lines.is_some())
+    }
+
+    /// Takes the loaded program out, to keep running it elsewhere. `None`
+    /// if nothing has been loaded.
+    pub fn into_parts(self) -> Option<VmMachineParts> {
+        let from_jack = self.from_jack();
+        let vm = self.vm?;
+        Some(VmMachineParts {
+            vm,
+            target: self.target.unwrap_or_default(),
+            files: self.files,
+            from_jack,
+        })
     }
 
     fn same_stem(a: &str, b: &str, ignore_case: bool) -> bool {
@@ -94,7 +162,7 @@ impl VmMachine {
     fn compile_jack_files(
         files: &Files<'_>,
         selected: &[(String, String)],
-    ) -> Result<Vec<(String, String, String)>, String> {
+    ) -> Result<Vec<(VmLoadedFile, String)>, String> {
         let mut texts: Vec<(String, String, String)> = Vec::with_capacity(selected.len());
         for (stem, file) in selected {
             let text = read_text(files.host.as_ref(), file)
@@ -129,7 +197,14 @@ impl VmMachine {
                     );
                 return Err(message);
             };
-            compiled.push((stem, file, vm_text.clone()));
+            let file = VmLoadedFile {
+                stem,
+                source_path: file,
+                built_from_source: true,
+                vm_lines: vm_lines(vm_text),
+                jack_lines: Some(jack_lines(vm_text, &output.compiled.line_map)),
+            };
+            compiled.push((file, vm_text.clone()));
         }
         Ok(compiled)
     }
@@ -137,7 +212,7 @@ impl VmMachine {
     /// Loads one `.vm` file, or every `.vm` (or `.jack`, when `build_from_source`
     /// is enabled) file of a folder. The error is a message for the user.
     pub fn load_path(&mut self, files: &Files<'_>, target: &str) -> Result<(), String> {
-        let mut loaded_files: Vec<(String, String, bool)> = Vec::new();
+        let mut loaded_files: Vec<VmLoadedFile> = Vec::new();
         let mut parsed: Vec<ParsedVm> = Vec::new();
 
         if path::has_extension(target, "vm") {
@@ -154,10 +229,10 @@ impl VmMachine {
             {
                 let selected = vec![(path::stem(jack_path).to_string(), jack_path.clone())];
                 let compiled = Self::compile_jack_files(files, &selected)?;
-                let Some((compiled_stem, source_path, vm_text)) = compiled.into_iter().next()
-                else {
+                let Some((file, vm_text)) = compiled.into_iter().next() else {
                     return Err(format!("cannot compile `{}`", path::file_name(jack_path)));
                 };
+                let source_path = file.source_path.clone();
                 if let Ok(disk_vm) = &existing_vm
                     && !same_lines(&disk_vm.text, &vm_text)
                 {
@@ -167,11 +242,11 @@ impl VmMachine {
                         path::file_name(target)
                     ));
                 }
-                let unit = n2t_vm::parse(&compiled_stem, &vm_text);
+                let unit = n2t_vm::parse(&file.stem, &vm_text);
                 if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
                     return Err(describe(path::file_name(&source_path), &vm_text, d));
                 }
-                loaded_files.push((compiled_stem, source_path, true));
+                loaded_files.push(file);
                 parsed.push(unit);
             } else {
                 let text = existing_vm
@@ -181,7 +256,11 @@ impl VmMachine {
                 if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
                     return Err(describe(path::file_name(target), &text, d));
                 }
-                loaded_files.push((stem.to_string(), target.to_string(), false));
+                loaded_files.push(VmLoadedFile::from_vm(
+                    stem.to_string(),
+                    target.to_string(),
+                    &text,
+                ));
                 parsed.push(unit);
             }
         } else {
@@ -229,8 +308,10 @@ impl VmMachine {
 
             if !selected_jacks.is_empty() {
                 let compiled = Self::compile_jack_files(files, &selected_jacks)?;
-                let mut units: Vec<(String, String, String, bool)> = Vec::new();
-                for (stem, jack_path, vm_text) in compiled {
+                let mut units: Vec<(VmLoadedFile, String)> = Vec::new();
+                for (file, vm_text) in compiled {
+                    let stem = file.stem.clone();
+                    let jack_path = file.source_path.clone();
                     if let Some((_, disk_vm_path)) = vm_sources
                         .iter()
                         .find(|(vm_stem, _)| Self::same_stem(vm_stem, &stem, files.ignore_case))
@@ -243,7 +324,7 @@ impl VmMachine {
                             path::file_name(disk_vm_path)
                         ));
                     }
-                    units.push((stem, jack_path, vm_text, true));
+                    units.push((file, vm_text));
                 }
                 for (stem, vm_path) in &vm_sources {
                     let replaced = selected_jacks
@@ -255,16 +336,17 @@ impl VmMachine {
                                 format!("cannot read `{}`: {e}", path::file_name(vm_path))
                             })?
                             .text;
-                        units.push((stem.clone(), vm_path.clone(), text, false));
+                        let file = VmLoadedFile::from_vm(stem.clone(), vm_path.clone(), &text);
+                        units.push((file, text));
                     }
                 }
-                units.sort_by(|a, b| a.0.cmp(&b.0));
-                for (stem, source_path, vm_text, built_from_source) in units {
-                    let unit = n2t_vm::parse(&stem, &vm_text);
+                units.sort_by(|a, b| a.0.stem.cmp(&b.0.stem));
+                for (file, vm_text) in units {
+                    let unit = n2t_vm::parse(&file.stem, &vm_text);
                     if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
-                        return Err(describe(path::file_name(&source_path), &vm_text, d));
+                        return Err(describe(path::file_name(&file.source_path), &vm_text, d));
                     }
-                    loaded_files.push((stem, source_path, built_from_source));
+                    loaded_files.push(file);
                     parsed.push(unit);
                 }
             } else {
@@ -282,7 +364,7 @@ impl VmMachine {
                     if let Some(d) = unit.diagnostics.iter().find(|d| d.is_error()) {
                         return Err(describe(path::file_name(&file), &text, d));
                     }
-                    loaded_files.push((stem, file, false));
+                    loaded_files.push(VmLoadedFile::from_vm(stem, file, &text));
                     parsed.push(unit);
                 }
             }
@@ -293,6 +375,7 @@ impl VmMachine {
         }
         self.vm = Some(Box::new(Vm::new(program)));
         self.files = loaded_files;
+        self.target = Some(target.to_string());
         self.now_ms = 0;
         Ok(())
     }
@@ -443,9 +526,9 @@ impl Machine for VmMachine {
     fn loaded_inputs(&self) -> Vec<LoadedInput> {
         self.files
             .iter()
-            .map(|(_, p, built_from_source)| LoadedInput {
-                path: p.clone(),
-                built_from_source: *built_from_source,
+            .map(|f| LoadedInput {
+                path: f.source_path.clone(),
+                built_from_source: f.built_from_source,
             })
             .collect()
     }
@@ -471,6 +554,27 @@ impl Machine for VmMachine {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+}
+
+/// The trimmed text of each line of a VM file.
+pub fn vm_lines(vm_text: &str) -> Vec<String> {
+    vm_text.lines().map(|l| l.trim().to_string()).collect()
+}
+
+/// For each line of compiled VM code, the zero-based Jack line it came from.
+/// `line_map` has one entry per VM command, in order; a blank line belongs
+/// to the command before it.
+pub fn jack_lines(vm_text: &str, line_map: &[u32]) -> Vec<u32> {
+    let mut lines = Vec::new();
+    let mut command = 0usize;
+    for line in vm_text.lines() {
+        if !line.trim().is_empty() {
+            command += 1;
+        }
+        let index = command.saturating_sub(1);
+        lines.push(line_map.get(index).copied().unwrap_or(0));
+    }
+    lines
 }
 
 fn same_lines(a: &str, b: &str) -> bool {

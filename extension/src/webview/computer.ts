@@ -3,7 +3,8 @@
 // owns the emulator; this file draws what it is sent and reports what the
 // student does.
 
-import type { ChipTest, Expected, ExpectedImage, MachineState } from '../runtime/protocol';
+import { memoryStartForAddress } from '../inspectRow';
+import type { ChipTest, Expected, ExpectedImage, InspectedMismatch, InspectedRow, MachineState, ScriptChoice } from '../runtime/protocol';
 import { Radix, cellMatchesExpected, formatValue, hackKeyCode, keyName, typedValue } from '../values';
 
 declare function acquireVsCodeApi(): {
@@ -21,8 +22,13 @@ export type ToComputer =
           problem: string | null;
           title: string;
           expected?: Expected | null;
+          expectedVersion?: number;
           expectedImage?: ExpectedImage | null;
           test?: ChipTest | null;
+          /** Every script that tests the program; a picker shows when there are several. */
+          scripts?: ScriptChoice[];
+          /** The compare row the machine was jumped to, if any. */
+          inspected?: InspectedRow | null;
       }
     | { type: 'rejected'; target: number; message: string };
 
@@ -39,7 +45,11 @@ type ComputerAction =
     | { type: 'runTest'; script?: string }
     | { type: 'openExpected' }
     | { type: 'openExpectedImage' }
-    | { type: 'compareOutput'; script?: string };
+    | { type: 'compareOutput'; script?: string }
+    | { type: 'selectScript'; script: string }
+    | { type: 'inspectRow'; script?: string; line: number; rowIndex: number; expectedVersion?: number }
+    | { type: 'openScriptAt'; script: string; line: number }
+    | { type: 'debugScript'; script: string };
 
 export type ComputerCommand = Ready | ComputerAction;
 export type FromComputer = Ready | (ComputerAction & { program: number });
@@ -64,9 +74,13 @@ let state: MachineState | null = null;
 let running = false;
 let problem: string | null = null;
 let expected: Expected | null = null;
+let expectedVersion: number | undefined;
 let expectedImage: ExpectedImage | null = null;
 let test: ChipTest | null = null;
+let scripts: ScriptChoice[] = [];
+let inspected: InspectedRow | null = null;
 let expectedDirty = true;
+let inspectDirty = true;
 let imageDirty = true;
 let heldKey = 0;
 
@@ -98,6 +112,7 @@ const root = document.getElementById('root')!;
 const title = element('h1', {}, '');
 const status = element('p', { class: 'status', role: 'status', 'aria-live': 'polite' });
 const banner = element('div', { class: 'problem', role: 'alert', hidden: '' });
+const inspectBanner = element('div', { class: 'inspect-banner', role: 'status', 'aria-live': 'polite', 'aria-label': 'Inspected test row', hidden: '' });
 
 const runButton = element('button', { type: 'button', class: 'primary' }, 'Run');
 const stepButton = element('button', { type: 'button', class: 'secondary', title: 'Execute one instruction' }, 'Step');
@@ -187,6 +202,83 @@ function jump(label: string, address: number, hint: string): HTMLElement {
     return button;
 }
 
+/** The RAM cells SP, LCL, ARG, THIS and THAT live in. */
+const POINTER_ADDRESSES: Record<string, number> = { SP: 0, LCL: 1, ARG: 2, THIS: 3, THAT: 4 };
+
+/** The mismatches of the inspected row while the machine is still at that row. */
+function liveMismatches(): InspectedMismatch[] {
+    return inspected && !inspected.stepped ? inspected.mismatches : [];
+}
+
+function inspectRow(index: number): void {
+    if (!expected || expected.lines[index] === undefined) {
+        return;
+    }
+    send({
+        type: 'inspectRow',
+        ...(test?.scriptPath ? { script: test.scriptPath } : {}),
+        line: expected.lines[index],
+        rowIndex: index,
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+    });
+}
+
+function updateInspection(): void {
+    if (!inspectDirty) {
+        return;
+    }
+    inspectDirty = false;
+    inspectBanner.hidden = !inspected;
+    if (!inspected) {
+        inspectBanner.replaceChildren();
+        return;
+    }
+    const row = inspected;
+    const heading = row.stepped
+        ? `Stepped from ${row.script} · row ${row.rowIndex + 1} (line ${row.compareLine})`
+        : `Inspecting ${row.script} · row ${row.rowIndex + 1} (line ${row.compareLine})`;
+    const nodes: Node[] = [element('strong', { class: 'inspect-title' }, heading)];
+    if (row.stepped) {
+        nodes.push(element('p', { class: 'hint' }, 'The machine has moved on since that row: Reset to start over, or inspect a row again.'));
+    } else if (row.mismatches.length === 0 && row.differs) {
+        nodes.push(element('p', { class: 'hint' }, 'This row differs (line format or column count does not match).'));
+    } else if (row.mismatches.length === 0) {
+        nodes.push(element('p', { class: 'hint' }, 'This row matches. The machine is shown as the test left it at this row.'));
+    } else {
+        const chips = element('ul', { class: 'mismatches', 'aria-label': 'Values that differ on this row' });
+        for (const mismatch of row.mismatches) {
+            const text = `${mismatch.column}: expected ${mismatch.expected}, got ${mismatch.actual}`;
+            const address = mismatch.target === 'RAM' ? mismatch.address : undefined;
+            if (address !== undefined) {
+                const chip = element('button', { type: 'button', class: 'chip', title: `Show RAM[${address}] in Memory` }, text);
+                chip.addEventListener('click', () => showMemory(memoryStartForAddress(address, ROWS)));
+                chips.append(element('li', {}, chip));
+            } else {
+                chips.append(element('li', {}, element('span', { class: 'chip' }, text)));
+            }
+        }
+        nodes.push(chips);
+    }
+    const actions = element('div', { class: 'toolbar' });
+    if (row.scriptLine !== null) {
+        const open = element(
+            'button',
+            { type: 'button', class: 'secondary', title: 'Show where the script stopped' },
+            `Open ${row.script}:${row.scriptLine}`,
+        );
+        const line = row.scriptLine;
+        open.addEventListener('click', () => send({ type: 'openScriptAt', script: row.scriptPath, line }));
+        actions.append(open);
+    }
+    const debug = element('button', { type: 'button', class: 'secondary', title: `Step through ${row.script} in the debugger` }, 'Debug script');
+    debug.addEventListener('click', () => send({ type: 'debugScript', script: row.scriptPath }));
+    const reset = element('button', { type: 'button', class: 'secondary', title: 'Leave the inspection and load the program again' }, 'Reset');
+    reset.addEventListener('click', () => send({ type: 'reset' }));
+    actions.append(debug, reset);
+    nodes.push(actions);
+    inspectBanner.replaceChildren(...nodes);
+}
+
 function showMemory(address: number): void {
     memoryStart = Math.max(0, Math.min(24576 - ROWS + 1, address));
     remember();
@@ -231,6 +323,7 @@ function build(): void {
         banner,
         toolbar,
         status,
+        inspectBanner,
         screen,
         keyboardHint,
         expectedScreenSection,
@@ -438,7 +531,22 @@ function updateExpected(): void {
     const activeAction = (document.activeElement as HTMLElement | null)?.getAttribute('data-expected-action');
     mountedExpectedPath = expected?.path ?? null;
 
+    const activeRow = (document.activeElement as HTMLElement | null)?.getAttribute('data-row');
     const headerNodes: Node[] = [];
+    if (scripts.length > 1) {
+        const picker = element('select', { 'data-expected-action': 'script', 'aria-label': 'Test script', title: 'Which test script to show' });
+        const shown = test?.scriptPath ?? inspected?.scriptPath;
+        for (const choice of scripts) {
+            const option = element('option', { value: choice.path }, choice.name);
+            option.selected = choice.path === shown;
+            picker.append(option);
+        }
+        if (shown) {
+            picker.value = shown;
+        }
+        picker.addEventListener('change', () => send({ type: 'selectScript', script: picker.value }));
+        headerNodes.push(element('label', { class: 'script-picker' }, 'Test script ', picker));
+    }
     if (expected) {
         const open = element('button', { type: 'button', class: 'link-inline', 'data-expected-action': 'open' }, expected.name);
         open.addEventListener('click', () => send({ type: 'openExpected' }));
@@ -459,6 +567,21 @@ function updateExpected(): void {
             );
             diffButton.addEventListener('click', () => send({ type: 'compareOutput', ...(scriptPath ? { script: scriptPath } : {}) }));
             bar.append(diffButton);
+        }
+        const firstDiffer = test.status === 'current' && test.kind === 'failed' && test.rows ? test.rows.indexOf('differ') : -1;
+        if (expected && firstDiffer >= 0 && expected.lines[firstDiffer] !== undefined) {
+            const inspectButton = element(
+                'button',
+                {
+                    type: 'button',
+                    class: 'secondary',
+                    'data-expected-action': 'inspectFirst',
+                    title: `Show the machine as it was at the first row that differs (line ${expected.lines[firstDiffer]})`,
+                },
+                'Inspect failure',
+            );
+            inspectButton.addEventListener('click', () => inspectRow(firstDiffer));
+            bar.append(inspectButton);
         }
         const button = element(
             'button',
@@ -484,8 +607,23 @@ function updateExpected(): void {
         expected.header.forEach((cell) => head.append(element('th', { scope: 'col' }, cell)));
         const body = element('tbody', {});
         for (const [index, row] of expected.rows.entries()) {
-            const tr = element('tr', {});
             const mark = marks?.[index];
+            const reached = mark === 'match' || mark === 'differ';
+            const tr = element('tr', {});
+            const current =
+                reached
+                && inspected !== null
+                && inspected.compareLine === expected.lines[index]
+                && inspected.scriptPath === test?.scriptPath;
+            if (reached) {
+                tr.className = current ? 'inspectable inspected' : 'inspectable';
+                tr.setAttribute('data-row', String(index));
+                tr.setAttribute('title', `Click to see the machine at this row (line ${expected.lines[index]})`);
+                if (current) {
+                    tr.setAttribute('aria-current', 'true');
+                }
+                tr.addEventListener('click', () => inspectRow(index));
+            }
             const produced = mark === 'differ' ? actualRows[index] : undefined;
             const rawExpectedRow = expected.rawRows?.[index];
             let blamedCell = false;
@@ -519,7 +657,21 @@ function updateExpected(): void {
                           : mark === 'match'
                             ? 'This row matches'
                             : 'The test did not reach this row';
-                tr.append(element('td', { class: `mark ${mark ?? 'unreached'}`, title: lineNote, 'aria-label': lineNote }, MARKS[mark ?? 'unreached']));
+                if (reached) {
+                    const label = `Inspect row ${index + 1} (${mark === 'differ' ? 'differs' : 'matches'}, line ${expected.lines[index]})`;
+                    const button = element(
+                        'button',
+                        { type: 'button', class: 'mark-button', 'data-inspect-row': String(index), title: lineNote, 'aria-label': label },
+                        MARKS[mark],
+                    );
+                    button.addEventListener('click', (event: MouseEvent) => {
+                        event.stopPropagation();
+                        inspectRow(index);
+                    });
+                    tr.append(element('td', { class: `mark ${mark}`, title: lineNote }, button));
+                } else {
+                    tr.append(element('td', { class: `mark ${mark ?? 'unreached'}`, title: lineNote, 'aria-label': lineNote }, MARKS[mark ?? 'unreached']));
+                }
             }
             tr.append(...dataCells);
             body.append(tr);
@@ -545,11 +697,15 @@ function updateExpected(): void {
     if (activeAction) {
         const refocus = expectedHeader.querySelector(`[data-expected-action="${activeAction}"]`) as HTMLElement | null;
         refocus?.focus();
+    } else if (activeRow) {
+        const refocus = expectedTable.querySelector(`tr[data-row="${activeRow}"]`) as HTMLElement | null;
+        refocus?.focus();
     }
 }
 
 function update(): void {
     updateExpected();
+    updateInspection();
     banner.hidden = !problem;
     banner.replaceChildren(element('strong', {}, 'The program stopped.'), element('pre', {}, problem ?? ''));
     picker.querySelectorAll('button').forEach((button) => {
@@ -619,9 +775,17 @@ function update(): void {
     );
 
     const focusedLabel = (document.activeElement as HTMLElement | null)?.getAttribute('aria-label');
+    const differing = liveMismatches();
     registers.replaceChildren();
     for (const register of state.registers) {
-        const row = element('div', { class: 'register', role: 'row', title: REGISTER_HINTS[register.name] ?? '' });
+        const mismatch = differing.find((m) => m.target === 'register' && m.name === register.name);
+        const row = element('div', {
+            class: mismatch ? 'register differs' : 'register',
+            role: 'row',
+            title: mismatch
+                ? `${register.name}: the test expected ${mismatch.expected}, the program had ${mismatch.actual}`
+                : (REGISTER_HINTS[register.name] ?? ''),
+        });
         row.append(element('span', { class: 'register-name', role: 'rowheader' }, register.name));
         if (register.value === null) {
             row.append(element('span', { class: 'value muted', role: 'cell' }, 'not a RAM address'));
@@ -631,6 +795,9 @@ function update(): void {
             row.append(
                 cellInput(register.name, register.value, (text) => send({ type: 'set', target: register.name, value: text })),
             );
+        }
+        if (mismatch) {
+            row.append(element('span', { class: 'got' }, `expected ${mismatch.expected}`));
         }
         registers.append(row);
     }
@@ -642,7 +809,16 @@ function update(): void {
         state.ram.values.forEach((value, i) => {
             const address = state!.ram!.start + i;
             const name = symbolFor(address);
-            const row = element('tr', { class: address === a ? 'pointed' : '' });
+            const mismatch = differing.find(
+                (m) =>
+                    (m.target === 'RAM' && m.address === address)
+                    || (m.target === 'register' && m.name !== undefined && POINTER_ADDRESSES[m.name] === address),
+            );
+            const classes = [address === a ? 'pointed' : '', mismatch ? 'differs' : ''].filter(Boolean).join(' ');
+            const row = element('tr', { class: classes });
+            if (mismatch) {
+                row.setAttribute('title', `${mismatch.column}: the test expected ${mismatch.expected}, the program had ${mismatch.actual}`);
+            }
             row.append(
                 element(
                     'th',
@@ -657,6 +833,7 @@ function update(): void {
                     'td',
                     {},
                     cellInput(`RAM[${address}]`, value, (text) => send({ type: 'set', target: 'RAM', address, value: text })),
+                    mismatch ? element('span', { class: 'got' }, `expected ${mismatch.expected}`) : '',
                 ),
             );
             memoryBody.append(row);
@@ -699,10 +876,14 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
     }
     if (target !== message.target) {
         expected = null;
+        expectedVersion = undefined;
         expectedImage = null;
         test = null;
+        scripts = [];
+        inspected = null;
         expectedDirty = true;
         imageDirty = true;
+        inspectDirty = true;
     }
     target = message.target;
     rejected.textContent = '';
@@ -711,6 +892,7 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
     problem = message.problem;
     if (message.expected !== undefined) {
         expected = message.expected;
+        expectedVersion = message.expectedVersion;
         expectedDirty = true;
     }
     if (message.expectedImage !== undefined) {
@@ -720,6 +902,15 @@ window.addEventListener('message', (event: MessageEvent<ToComputer>) => {
     if (message.test !== undefined) {
         test = message.test;
         expectedDirty = true;
+    }
+    if (message.scripts !== undefined && JSON.stringify(message.scripts) !== JSON.stringify(scripts)) {
+        scripts = message.scripts;
+        expectedDirty = true;
+    }
+    if (message.inspected !== undefined && JSON.stringify(message.inspected) !== JSON.stringify(inspected)) {
+        inspected = message.inspected;
+        expectedDirty = true;
+        inspectDirty = true;
     }
     if (message.state) {
         const previous = state;

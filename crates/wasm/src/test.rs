@@ -2,8 +2,11 @@
 
 use n2t_core::host::{SharedHost, path, read_text};
 use n2t_core::source::{LineIndex, Span};
+use n2t_core::tst::ast::Dialect;
 use n2t_simulator::runner::{Event, standard_machine};
-use n2t_simulator::{Newline, Outcome, RunnerOptions, ScriptRunner, StartError, SuspendReason};
+use n2t_simulator::{
+    Machine, Newline, Outcome, RunnerOptions, ScriptRunner, StartError, SuspendReason, VmMachine,
+};
 use serde_json::{Value, json};
 
 use crate::{Failure, Reply, budget, key_code, observed, range, text};
@@ -11,19 +14,40 @@ use crate::{Failure, Reply, budget, key_code, observed, range, text};
 /// Commands per `test.run` when the caller does not say.
 const DEFAULT_BUDGET: u64 = 200_000;
 
+/// A test run handed over to the CPU or VM emulator (see
+/// [`TestSession::into_promoted`]).
+pub struct PromotedTest {
+    pub dialect: Dialect,
+    pub machine: Box<dyn Machine>,
+    /// The script command the machine last executed (for a run stopped at
+    /// `stopAtLine`, the `output` that produced that line).
+    pub script_range: Value,
+    /// `[{"path", "builtFromSource"}, …]`, as `test.inspect` reports them.
+    pub loaded: Vec<Value>,
+    /// Source-building options the script ran with, so `vm.reset` on a
+    /// promoted session reloads the same way (e.g. compiling a missing `.vm`
+    /// from its sibling `.jack`).
+    pub build_from_source: bool,
+    pub prefer_sources: Vec<String>,
+}
+
 pub struct TestSession {
     runner: ScriptRunner,
     source: String,
     lines: LineIndex,
     /// How many failures have already been reported to the caller.
     reported_failures: usize,
+    build_from_source: bool,
+    prefer_sources: Vec<String>,
 }
 
 impl TestSession {
     /// `{"op":"test.open","path":…}` with optional `autoKeyboard` (default
     /// true), `stopEndlessWaits` (default false), `buildSources` (default
     /// false), `preferSources` (default `[]`), `crlf`, `collectAll` (default
-    /// true) and `maxCommands`.
+    /// true), `maxCommands`, `writeOutput` (default true; `false` keeps the
+    /// `.out` file in memory) and `stopAtLine` (a one-based output line, as
+    /// the compare file numbers it, to suspend at with reason `targetLine`).
     pub fn open(host: &SharedHost, request: &Value) -> Result<Self, Failure> {
         let script_path = path::normalize(text(request, "path")?);
         let source = read_text(host.as_ref(), &script_path)
@@ -36,6 +60,7 @@ impl TestSession {
             .filter_map(Value::as_str)
             .map(path::normalize)
             .collect();
+        let build_from_source = request["buildSources"].as_bool().unwrap_or(false);
         let options = RunnerOptions {
             max_commands: request["maxCommands"].as_u64(),
             cancel: None,
@@ -47,9 +72,13 @@ impl TestSession {
             collect_all_mismatches: request["collectAll"].as_bool().unwrap_or(true),
             auto_keyboard: request["autoKeyboard"].as_bool().unwrap_or(true),
             stop_endless_waits: request["stopEndlessWaits"].as_bool().unwrap_or(false),
-            build_from_source: request["buildSources"].as_bool().unwrap_or(false),
-            prefer_sources,
+            build_from_source,
+            prefer_sources: prefer_sources.clone(),
             ignore_case: request["ignoreCase"].as_bool().unwrap_or(false),
+            skip_output_write: !request["writeOutput"].as_bool().unwrap_or(true),
+            stop_at_output_line: request["stopAtLine"]
+                .as_u64()
+                .and_then(|line| usize::try_from(line).ok()),
         };
         let lines = LineIndex::new(&source);
         let mut runner = ScriptRunner::new(
@@ -81,6 +110,8 @@ impl TestSession {
             source,
             lines,
             reported_failures: 0,
+            build_from_source,
+            prefer_sources,
         })
     }
 
@@ -225,6 +256,7 @@ impl TestSession {
                     SuspendReason::Pause => "pause",
                     SuspendReason::Breakpoint => "breakpoint",
                     SuspendReason::StepEnd => "step",
+                    SuspendReason::TargetLine => "targetLine",
                 });
                 status["at"] = self.range(span);
                 status["next"] = self.next_range();
@@ -273,9 +305,45 @@ impl TestSession {
         }
     }
 
-    fn inspect(&self) -> Value {
-        let loaded: Vec<Value> = self
-            .runner
+    /// Why this run cannot be handed to an emulator, if it cannot.
+    pub fn promotion_error(&self) -> Option<Failure> {
+        match self.runner.dialect() {
+            Dialect::Hardware => Some(
+                "only CPU and VM test scripts can be inspected in the Hack computer or VM emulator"
+                    .into(),
+            ),
+            Dialect::Cpu => None,
+            Dialect::Vm => {
+                let loaded = self
+                    .runner
+                    .machine()
+                    .as_any()
+                    .downcast_ref::<VmMachine>()
+                    .is_some_and(|m| m.vm().is_some());
+                (!loaded).then(|| "the test script has not loaded a VM program yet".into())
+            }
+        }
+    }
+
+    /// Ends the run and hands over its machine as it stands.
+    pub fn into_promoted(self) -> Result<PromotedTest, Failure> {
+        if let Some(message) = self.promotion_error() {
+            return Err(message);
+        }
+        let script_range = self.range(self.runner.current_span());
+        let loaded = self.loaded();
+        Ok(PromotedTest {
+            dialect: self.runner.dialect(),
+            machine: self.runner.into_machine(),
+            script_range,
+            loaded,
+            build_from_source: self.build_from_source,
+            prefer_sources: self.prefer_sources,
+        })
+    }
+
+    fn loaded(&self) -> Vec<Value> {
+        self.runner
             .loaded_inputs()
             .into_iter()
             .map(|input| {
@@ -284,7 +352,11 @@ impl TestSession {
                     "builtFromSource": input.built_from_source,
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    fn inspect(&self) -> Value {
+        let loaded = self.loaded();
         json!({
             "dialect": self.runner.dialect().as_str(),
             "state": observed(&self.runner.machine().observe()),

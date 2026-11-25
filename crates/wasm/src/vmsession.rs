@@ -7,6 +7,9 @@
 
 use n2t_core::host::{HostError, SharedHost, path, read_text};
 use n2t_core::source::LineIndex;
+use n2t_simulator::VmMachine;
+use n2t_simulator::machine::Files;
+use n2t_simulator::vm_machine::{jack_lines, vm_lines};
 use n2t_vm::{Breakpoints, ParsedVm, Program, RunStatus, StepStatus, Vm};
 use serde_json::{Value, json};
 
@@ -46,6 +49,10 @@ pub struct VmSession {
     host: SharedHost,
     target: String,
     ignore_case: bool,
+    /// When promoted from a test run, `vm.reset` reloads with the same
+    /// source-building policy (`build_from_source`, `prefer_sources`) so a
+    /// script that compiled a missing `.vm` from `.jack` can still reset.
+    reload_from_test: Option<(bool, Vec<String>)>,
     vm: Box<Vm>,
     files: Vec<LoadedFile>,
     from_jack: bool,
@@ -184,7 +191,7 @@ fn load(
             loaded.push(LoadedFile {
                 stem,
                 source_path: file.clone(),
-                vm_lines: text.lines().map(|l| l.trim().to_string()).collect(),
+                vm_lines: vm_lines(&text),
                 jack_lines: None,
             });
             parsed.push(unit);
@@ -229,20 +236,11 @@ fn load(
                     return Err(message);
                 };
                 // One VM command per line, in the order of `line_map`.
-                let mut jack_lines = Vec::new();
-                let mut command = 0usize;
-                for line in vm_text.lines() {
-                    if !line.trim().is_empty() {
-                        command += 1;
-                    }
-                    let index = command.saturating_sub(1);
-                    jack_lines.push(output.compiled.line_map.get(index).copied().unwrap_or(0));
-                }
                 loaded.push(LoadedFile {
                     stem: stem.clone(),
                     source_path: file.clone(),
-                    vm_lines: vm_text.lines().map(|l| l.trim().to_string()).collect(),
-                    jack_lines: Some(jack_lines),
+                    vm_lines: vm_lines(vm_text),
+                    jack_lines: Some(jack_lines(vm_text, &output.compiled.line_map)),
                 });
                 parsed.push(n2t_vm::parse(stem, vm_text));
             }
@@ -266,12 +264,59 @@ impl VmSession {
             host: host.clone(),
             target,
             ignore_case,
+            reload_from_test: None,
             vm: Box::new(vm),
             files,
             from_jack,
             stopped: None,
             sent_screen: None,
         })
+    }
+
+    /// Carries on with the program a test script was running, as it stands.
+    /// `fallback_target` is what `vm.reset` reloads if the machine does not
+    /// know what its script loaded.
+    pub fn from_machine(
+        host: &SharedHost,
+        fallback_target: String,
+        ignore_case: bool,
+        build_from_source: bool,
+        prefer_sources: Vec<String>,
+        machine: VmMachine,
+    ) -> Result<Self, Failure> {
+        let parts = machine
+            .into_parts()
+            .ok_or("the test script has not loaded a VM program yet")?;
+        let target = if parts.target.is_empty() {
+            path::normalize(&fallback_target)
+        } else {
+            parts.target
+        };
+        let files = parts
+            .files
+            .into_iter()
+            .map(|f| LoadedFile {
+                stem: f.stem,
+                source_path: f.source_path,
+                vm_lines: f.vm_lines,
+                jack_lines: f.jack_lines,
+            })
+            .collect();
+        Ok(Self {
+            host: host.clone(),
+            target,
+            ignore_case,
+            reload_from_test: Some((build_from_source, prefer_sources)),
+            vm: parts.vm,
+            files,
+            from_jack: parts.from_jack,
+            stopped: None,
+            sent_screen: None,
+        })
+    }
+
+    pub fn is_halted(&self) -> bool {
+        self.vm.is_halted()
     }
 
     fn file(&self, stem: &str) -> Option<&LoadedFile> {
@@ -419,7 +464,40 @@ impl VmSession {
             "vm.reset" => {
                 // Read (and for Jack, compile) the program again.
                 let key = self.vm.key();
-                let (vm, files, from_jack) = load(&self.host, &self.target, self.ignore_case)?;
+                let (vm, files, from_jack) = if let Some((build_from_source, prefer_sources)) =
+                    &self.reload_from_test
+                {
+                    let dir = if path::has_extension(&self.target, "vm") {
+                        path::dir(&self.target)
+                    } else {
+                        self.target.as_str()
+                    };
+                    let files_cfg = Files {
+                        host: &self.host,
+                        dir,
+                        build_from_source: *build_from_source,
+                        prefer_sources,
+                        ignore_case: self.ignore_case,
+                    };
+                    let mut fresh = VmMachine::new();
+                    fresh.load_path(&files_cfg, &self.target)?;
+                    let parts = fresh
+                        .into_parts()
+                        .ok_or("the program could not be reloaded")?;
+                    let loaded_files = parts
+                        .files
+                        .into_iter()
+                        .map(|f| LoadedFile {
+                            stem: f.stem,
+                            source_path: f.source_path,
+                            vm_lines: f.vm_lines,
+                            jack_lines: f.jack_lines,
+                        })
+                        .collect();
+                    (*parts.vm, loaded_files, parts.from_jack)
+                } else {
+                    load(&self.host, &self.target, self.ignore_case)?
+                };
                 *self.vm = vm;
                 self.files = files;
                 self.from_jack = from_jack;

@@ -80,6 +80,17 @@ pub struct RunnerOptions {
     pub prefer_sources: Vec<String>,
     /// Whether the script's folder ignores case in file names.
     pub ignore_case: bool,
+    /// Keep the output file in memory only ([`ScriptRunner::output_text`])
+    /// and never write it to disk: a run made only to inspect the machine at
+    /// some row must not replace the `.out` file of a real run.
+    pub skip_output_write: bool,
+    /// Suspend with [`SuspendReason::TargetLine`] right after the
+    /// `output-list` or `output` command that produces this one-based output
+    /// line. With a compare file this is the physical line of the compare
+    /// file it is compared against (as in [`Mismatch::line`]); without one,
+    /// the count of lines produced so far. The run stops there even if an
+    /// earlier line already failed.
+    pub stop_at_output_line: Option<usize>,
 }
 
 /// An error that stops a run.
@@ -106,6 +117,8 @@ pub enum SuspendReason {
     StepEnd,
     /// The step budget of [`ScriptRunner::run_for`] ran out.
     Budget,
+    /// The output line of [`RunnerOptions::stop_at_output_line`] was produced.
+    TargetLine,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +299,13 @@ pub struct ScriptRunner {
     commands: u64,
     current_span: Span,
     finished: Option<Outcome>,
+    /// Output lines produced so far, including those after the first failure.
+    produced_lines: usize,
+    /// The one-based number of the line the last command produced, if it
+    /// produced one (see [`RunnerOptions::stop_at_output_line`]).
+    last_output_line: Option<usize>,
+    /// The command that produced the line the run stopped at.
+    target_span: Option<Span>,
 }
 
 impl ScriptRunner {
@@ -340,6 +360,9 @@ impl ScriptRunner {
             commands: 0,
             current_span: Span::default(),
             finished: None,
+            produced_lines: 0,
+            last_output_line: None,
+            target_span: None,
         })
     }
 
@@ -369,6 +392,11 @@ impl ScriptRunner {
 
     pub fn machine_mut(&mut self) -> &mut dyn Machine {
         self.machine.as_mut()
+    }
+
+    /// Ends the run and hands over its machine, as it stands now.
+    pub fn into_machine(self) -> Box<dyn Machine> {
+        self.machine
     }
 
     /// The chip under test, for a hardware script that has loaded one.
@@ -426,6 +454,12 @@ impl ScriptRunner {
     /// The span of the most recently executed command.
     pub fn current_span(&self) -> Span {
         self.current_span
+    }
+
+    /// The span of the command that produced the line of
+    /// [`RunnerOptions::stop_at_output_line`], once the run has reached it.
+    pub fn target_span(&self) -> Option<Span> {
+        self.target_span
     }
 
     /// The span of the command that will execute next, if the script has not
@@ -531,7 +565,7 @@ impl ScriptRunner {
 
     /// Writes the output file if it changed. Returns the error, if any.
     fn flush_output(&mut self) -> Option<RunError> {
-        if !self.output_dirty {
+        if !self.output_dirty || self.options.skip_output_write {
             return None;
         }
         let Some((path, text)) = self.output.as_ref() else {
@@ -631,6 +665,7 @@ impl ScriptRunner {
             executed += 1;
 
             self.current_span = simple.span;
+            self.last_output_line = None;
             match self.command(simple) {
                 Ok(()) => {}
                 Err(Stop::Error(e)) => return self.ended_early(Outcome::FailedError(e)),
@@ -649,7 +684,9 @@ impl ScriptRunner {
                         }
                         self.first_failure = Some((mismatch.clone(), simple.span));
                     }
-                    if !self.options.collect_all_mismatches {
+                    if !self.options.collect_all_mismatches
+                        && self.options.stop_at_output_line != self.last_output_line
+                    {
                         return Outcome::FailedComparison {
                             mismatch,
                             span: Some(simple.span),
@@ -669,6 +706,19 @@ impl ScriptRunner {
                         self.cursor.condition_checked = false;
                     }
                 }
+            }
+
+            if let Some(target) = self.options.stop_at_output_line
+                && matches!(simple.command, Command::OutputList(_) | Command::Output)
+                && self.last_output_line == Some(target)
+            {
+                // Checked before the shortcut below: the row to inspect may
+                // come after one that already failed.
+                self.target_span = Some(simple.span);
+                return Outcome::Suspended {
+                    reason: SuspendReason::TargetLine,
+                    span: simple.span,
+                };
             }
 
             if self.first_failure.is_some() {
@@ -981,6 +1031,12 @@ impl ScriptRunner {
         // Reported even after the first failure (the output file is not
         // written any more, but a front-end shows every row).
         self.events.push(Event::OutputLine(line.to_string()));
+        self.produced_lines += 1;
+        // Numbered as the compare file numbers it, blank lines included.
+        self.last_output_line = Some(match &self.compare {
+            Some((_, comparator)) => comparator.compared() + 1,
+            None => self.produced_lines,
+        });
         if let Some((_, comparator)) = &mut self.compare
             && let Err(mismatch) = comparator.compare(line)
         {

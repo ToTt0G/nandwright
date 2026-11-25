@@ -129,9 +129,13 @@ The [`examples`](examples) folder of this repository has more: chips, assembly p
 - Saving an `.asm` file reloads it in the Hack computer while the machine is still at reset.
 - Below the screen, the panel shows the **Expected output** table from the program's
   `.cmp` file, marks each row as matching, differing (with what your program gave) or not
-  reached after a test run, and includes **Run test** and **Diff `.out` ↔ `.cmp`**
-  buttons. Visual OS tests that ship a reference image (such as `ScreenTestOutput.gif` or
-  `OutputTestOutput.gif`) show an **Expected screen** preview beside the live screen.
+  reached after a test run, and includes **Run test**, **Inspect failure**, and **Diff `.out` ↔ `.cmp`**
+  buttons (plus a script picker when several `.tst` scripts test the same program). Click
+  **Inspect failure** or any reached row to jump the live Hack computer or VM emulator —
+  registers, RAM, stack, call stack, screen and source highlight — straight to that test row,
+  with differing registers and RAM cells highlighted in place. Visual OS tests that ship a
+  reference image (such as `ScreenTestOutput.gif` or `OutputTestOutput.gif`) show an
+  **Expected screen** preview beside the live screen.
 - **Breakpoints** set in the editor pause the program; the line about to run is highlighted.
   Jack programs step by Jack line.
 - Jack runs with a built-in OS (`Math`, `String`, `Array`, `Output`, `Screen`, `Keyboard`,

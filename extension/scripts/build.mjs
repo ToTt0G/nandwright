@@ -75,6 +75,7 @@ if (process.argv.includes('--tests')) {
                 'src/test/unit/chipWebview.test.ts',
                 'src/test/unit/computerWebview.test.ts',
                 'src/test/unit/testLinks.test.ts',
+                'src/test/unit/inspectRow.test.ts',
             ],
             outdir: 'dist-test/unit',
             outExtension: { '.js': '.cjs' },

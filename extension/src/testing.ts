@@ -579,6 +579,42 @@ export class TestExplorer implements vscode.Disposable {
         return results;
     }
 
+    /**
+     * Computes the `test.open` execution and source-building options for
+     * `script`, matching `runOne` so test replays (e.g. row inspection in
+     * `ComputerPanel`) load the exact same code and respect the same settings.
+     */
+    async openOptionsFor(
+        script: vscode.Uri,
+        explicitSources: vscode.Uri[] | undefined,
+        overlay: { path: string; text: string; ignoreCase: boolean }[],
+    ): Promise<{
+        buildSources: boolean;
+        preferSources: string[];
+        autoKeyboard: boolean;
+        stopEndlessWaits: boolean;
+        ignoreCase: boolean;
+        maxCommands: number;
+    }> {
+        const explicitOnlyArtifacts =
+            explicitSources !== undefined
+            && explicitSources.length > 0
+            && explicitSources.every((u) => /\.(hack|vm)$/i.test(u.fsPath));
+        const config = vscode.workspace.getConfiguration('nandwright');
+        const buildSources = !explicitOnlyArtifacts && config.get<boolean>('test.buildSources', true);
+        const preferSources = buildSources
+            ? await preferredSources(script, explicitSources, overlay, this.savedFileAt)
+            : [];
+        return {
+            buildSources,
+            preferSources,
+            autoKeyboard: config.get('test.pressKeys', true),
+            stopEndlessWaits: true,
+            ignoreCase: ignoresCase(script.fsPath),
+            maxCommands: MAX_COMMANDS,
+        };
+    }
+
     private async runOne(
         run: vscode.TestRun,
         item: vscode.TestItem,
@@ -593,10 +629,6 @@ export class TestExplorer implements vscode.Disposable {
         const started = Date.now();
         run.started(item);
         const notes: string[] = [];
-        const explicitOnlyArtifacts =
-            explicitSources !== undefined
-            && explicitSources.length > 0
-            && explicitSources.every((u) => /\.(hack|vm)$/i.test(u.fsPath));
         const fallbackErrorInputs = (): RunInput[] | undefined => {
             if (!explicitSources || explicitSources.length === 0) {
                 return undefined;
@@ -622,24 +654,15 @@ export class TestExplorer implements vscode.Disposable {
 
         let session: number | undefined;
         try {
-            const config = vscode.workspace.getConfiguration('nandwright');
-            const buildSources = !explicitOnlyArtifacts && config.get<boolean>('test.buildSources', true);
-            const preferSources = buildSources
-                ? await preferredSources(uri, explicitSources, overlay, this.savedFileAt)
-                : [];
+            const openOptions = await this.openOptionsFor(uri, explicitSources, overlay);
             const opened = await this.runtime.call<TestOpened>({
                 op: 'test.open',
                 path: uri.fsPath,
                 crlf: process.platform === 'win32',
                 collectAll: true,
-                autoKeyboard: config.get('test.pressKeys', true),
                 // Nobody can press a key in the Testing view: a wait that nothing can end is not worth 200 million commands.
-                stopEndlessWaits: true,
-                buildSources,
-                preferSources,
-                ignoreCase: ignoresCase(uri.fsPath),
+                ...openOptions,
                 overlay,
-                maxCommands: MAX_COMMANDS,
             });
             session = opened.session;
             if (opened.runsForever) {

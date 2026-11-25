@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+- **Inspect failing test rows live in the Hack computer and VM emulator**:
+  - Click **Inspect failure** (or any reached `✓`/`✗` row in the **Expected output** table)
+    to replay the `.tst` script up to that exact row without overwriting `.out` on disk and
+    hand the live machine over to the panel.
+  - Registers, RAM, the VM stack, the call stack, the screen, and the highlighted `.asm`,
+    `.vm`, or `.jack` source line all jump directly to that row, and the Memory table
+    scrolls straight to the first differing `RAM[…]` address.
+  - Differing registers and RAM cells are highlighted inline with `expected …` hints until
+    you step, run, or edit a value; an inspection banner lists every mismatch (with
+    clickable `RAM[…]` jumps) alongside **Open `<script>:<line>`**, **Debug script**, and
+    **Reset**.
+  - When several `.tst` scripts test the same program, a script picker lets you switch
+    between them in the panel.
+
 ## 0.6.0
 
 - **Test and compare Hack assembly, VM, and Jack programs like HDL chips**:

@@ -40,6 +40,27 @@ impl ComputerSession {
         Ok(session)
     }
 
+    /// Carries on with the computer a test script was running, as it stands:
+    /// registers, memory and program. `fallback_file` is what `cpu.reset`
+    /// reloads if the script loaded no program.
+    pub fn from_machine(
+        host: &SharedHost,
+        fallback_file: String,
+        machine: CpuMachine,
+    ) -> Result<Self, Failure> {
+        let file = machine
+            .program()
+            .map(|p| p.file.clone())
+            .unwrap_or_else(|| path::normalize(&fallback_file));
+        Ok(Self {
+            host: host.clone(),
+            file,
+            machine,
+            stopped: None,
+            sent_screen: None,
+        })
+    }
+
     fn load(&mut self) -> Result<(), Failure> {
         let dir = path::dir(&self.file).to_string();
         let files = Files::plain(&self.host, &dir);

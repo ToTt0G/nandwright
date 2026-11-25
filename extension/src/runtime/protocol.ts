@@ -111,7 +111,7 @@ export type TestOutcome =
  */
 export interface TestStatus {
     state: 'suspended' | 'finished';
-    reason?: 'budget' | 'pause' | 'breakpoint' | 'step';
+    reason?: 'budget' | 'pause' | 'breakpoint' | 'step' | 'targetLine';
     at?: Range;
     next?: Range | null;
     outcome?: TestOutcome;
@@ -135,6 +135,52 @@ export interface TestOpened {
 export interface LoadedInput {
     path: string;
     builtFromSource: boolean;
+}
+
+/** The reply to `test.promote`: the test session became a live computer or VM session. */
+export interface TestPromoted {
+    session: number;
+    state: MachineState;
+    /** Where the script stopped. */
+    scriptRange: Range | null;
+    loaded?: LoadedInput[];
+}
+
+/** A column of an inspected compare row whose produced value differs. */
+export interface InspectedMismatch {
+    column: string;
+    /** What the column names in the machine; `other` for columns such as `time`. */
+    target: 'RAM' | 'register' | 'other';
+    /** For a register: its name (`A`, `D`, `PC`, `SP`, …). */
+    name?: string;
+    /** For RAM: the address. */
+    address?: number;
+    expected: string;
+    actual: string;
+}
+
+/** A compare row the computer panel has jumped to, by running its test script up to it. */
+export interface InspectedRow {
+    /** The script's file name. */
+    script: string;
+    scriptPath: string;
+    /** 1-based line of the script where it stopped, if known. */
+    scriptLine: number | null;
+    /** The row of the compare file, from 0. */
+    rowIndex: number;
+    /** 1-based line of the compare file. */
+    compareLine: number;
+    /** The student has run, stepped or changed the machine since. */
+    stepped: boolean;
+    /** True when the engine reported a comparison mismatch on this line, even if no single cell differed. */
+    differs?: boolean;
+    mismatches: InspectedMismatch[];
+}
+
+/** A test script the panel can show expected output for. */
+export interface ScriptChoice {
+    name: string;
+    path: string;
 }
 
 export interface TestInspection {

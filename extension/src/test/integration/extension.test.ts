@@ -3204,5 +3204,126 @@ describe('Nandwright', function () {
                 await removeFolder(folder);
             }
         });
+
+        it('inspects failing test rows live in ComputerPanel for CPU and VM programs without writing .out', async function () {
+            this.timeout(90_000);
+            const nandwright = await api();
+            const folder = fs.mkdtempSync(path.join(workspace, 'inspect-row '));
+            const asmPath = path.join(folder, 'Double.asm');
+            const tstPath = path.join(folder, 'Double.tst');
+            const cmpPath = path.join(folder, 'Double.cmp');
+            const outPath = path.join(folder, 'Double.out');
+
+            // Buggy: copies R0 into R1 instead of doubling it.
+            const badAsm = ['@R0', 'D=M', '@R1', 'M=D', '(END)', '@END', '0;JMP', ''].join('\n');
+            const tst = [
+                'load Double.hack,',
+                'output-file Double.out,',
+                'compare-to Double.cmp,',
+                'output-list RAM[0]%D2.6.2 RAM[1]%D2.6.2;',
+                'set RAM[0] 3, set RAM[1] -1;',
+                'repeat 20 { ticktock; }',
+                'output;',
+                'set PC 0, set RAM[0] 5, set RAM[1] -1;',
+                'repeat 20 { ticktock; }',
+                'output;',
+                '',
+            ].join('\n');
+            const cmp = [
+                '|  RAM[0]  |  RAM[1]  |',
+                '|       3  |       6  |',
+                '|       5  |      10  |',
+                '',
+            ].join('\n');
+
+            const vmFolder = path.join(folder, 'vm-fail');
+            fs.mkdirSync(vmFolder);
+            const vmPath = path.join(vmFolder, 'AddWrong.vm');
+            const vmTstPath = path.join(vmFolder, 'AddWrong.tst');
+            const vmCmpPath = path.join(vmFolder, 'AddWrong.cmp');
+            const vmOutPath = path.join(vmFolder, 'AddWrong.out');
+
+            fs.writeFileSync(asmPath, badAsm);
+            fs.writeFileSync(tstPath, tst);
+            fs.writeFileSync(cmpPath, cmp);
+            fs.writeFileSync(vmPath, 'push constant 7\npush constant 2\nsub\n');
+            fs.writeFileSync(
+                vmTstPath,
+                [
+                    'load AddWrong.vm,',
+                    'output-file AddWrong.out,',
+                    'compare-to AddWrong.cmp,',
+                    'output-list RAM[0]%D2.6.2 RAM[256]%D2.6.2;',
+                    'set sp 256,',
+                    'repeat 3 { vmstep; }',
+                    'output;',
+                    '',
+                ].join('\n'),
+            );
+            fs.writeFileSync(vmCmpPath, '|  RAM[0]  | RAM[256] |\n|     257  |       9  |\n');
+
+            let computer: Awaited<ReturnType<typeof nandwright.computers.open>> | undefined;
+            try {
+                computer = await nandwright.computers.open(vscode.Uri.file(asmPath));
+                assert.equal(fs.existsSync(outPath), false);
+
+                // Inspect the second failing row (compare line 3, rowIndex 1) directly.
+                await computer.simulate({ type: 'inspectRow', script: tstPath, line: 3, rowIndex: 1 });
+                assert.equal(fs.existsSync(outPath), false, 'inspectRow must not write Double.out to disk');
+
+                const cpuSnap = computer.snapshot();
+                assert.equal(cpuSnap.state?.kind, 'cpu');
+                assert.equal(cpuSnap.state?.ram?.start, 0);
+                assert.equal(cpuSnap.state?.ram?.values[0], 5);
+                assert.equal(cpuSnap.state?.ram?.values[1], 5);
+                assert.equal(cpuSnap.inspected?.compareLine, 3);
+                assert.equal(cpuSnap.inspected?.rowIndex, 1);
+                assert.equal(cpuSnap.inspected?.scriptLine, 10);
+                assert.equal(cpuSnap.inspected?.stepped, false);
+                assert.equal(cpuSnap.inspected?.mismatches.length, 1);
+                assert.deepEqual(cpuSnap.inspected?.mismatches[0], {
+                    column: 'RAM[1]',
+                    target: 'RAM',
+                    address: 1,
+                    expected: '10',
+                    actual: '5',
+                });
+
+                // Stepping from the promoted machine works live and marks the snapshot stepped.
+                const stepsBefore = cpuSnap.state!.steps;
+                await computer.simulate({ type: 'step' });
+                const steppedSnap = computer.snapshot();
+                assert.equal(steppedSnap.state?.steps, stepsBefore + 1);
+                assert.equal(steppedSnap.inspected?.stepped, true);
+
+                // Resetting clears the inspection and returns to a clean machine.
+                await computer.simulate({ type: 'reset' });
+                assert.equal(computer.snapshot().inspected, null);
+                assert.equal(computer.snapshot().state?.steps, 0);
+
+                // VM program inspection auto-scrolls Memory to the failing RAM[256] cell.
+                await computer.showProgram(vscode.Uri.file(vmPath));
+                await computer.simulate({ type: 'inspectRow', script: vmTstPath, line: 2, rowIndex: 0 });
+                assert.equal(fs.existsSync(vmOutPath), false, 'inspectRow must not write AddWrong.out to disk');
+
+                const vmSnap = computer.snapshot();
+                assert.equal(vmSnap.state?.kind, 'vm');
+                assert.equal(vmSnap.state?.ram?.start, 254);
+                assert.equal(vmSnap.state?.ram?.values[2], 5);
+                assert.deepEqual(vmSnap.inspected?.mismatches, [
+                    {
+                        column: 'RAM[256]',
+                        target: 'RAM',
+                        address: 256,
+                        expected: '9',
+                        actual: '5',
+                    },
+                ]);
+            } finally {
+                computer?.panel.dispose();
+                await closeAll();
+                await removeFolder(folder);
+            }
+        });
     });
 });
